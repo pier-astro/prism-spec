@@ -1,0 +1,196 @@
+def set_tied_zlines(files=[], 
+                       name='',
+                       z=0, 
+                       amplitude=2,
+                       fwhm=3000,
+                       offset=0,
+                       min_offset=-3000,
+                       max_offset=3000,
+                       min_amplitude=0,
+                       max_amplitude=600,
+                       min_fwhm=100,
+                       max_fwhm=7000,
+                       profile='gauss'):
+
+    if len(files) > 0:
+        F = []
+        for file in files:
+            F.append(pd.read_csv(path1 + file))
+        df = pd.concat(F)
+        df.reset_index(drop=True, inplace=True)
+    else:
+        print("List of csv files should be given to create model")
+        
+    class Fixed_Lines(model.RegriddableModel1D):
+        def __init__(self, name=name):
+            dft = df
+            dft['name']=dft.line+'_'+dft.position.round(0).astype(int).astype(str)
+
+            uniq = dft.name.tolist()
+            pars = []
+
+            pars.append(Parameter(name, "z", z, min=0, max=10, frozen=True))
+
+            for i in range(len(uniq)):
+                pars.append(
+                    Parameter(name, "amp_" + uniq[i],
+                            amplitude, min=min_amplitude, max=max_amplitude, frozen=False)
+                )
+            for p in pars:
+                setattr(self, p.name, p)
+            self.offs_kms = model.Parameter(
+                name, "offs_kms", offset, min=min_offset, hard_min=min_offset, max=max_offset, units='km/s'
+            )
+            self.fwhm = model.Parameter(
+                name, "fwhm", fwhm, min=min_fwhm, hard_min=min_fwhm, max=max_fwhm, units='km/s'
+            )
+
+            pars.append(self.offs_kms)
+            pars.append(self.fwhm)
+            self.dft=dft
+
+            model.RegriddableModel1D.__init__(self, name, pars)
+
+        def fixed(self, pars, x):
+            f=0
+            dft=self.dft
+            fwhm=pars[-1]
+            offs_kms=pars[-2]
+            pos = dft.position.to_numpy()
+
+            if profile=='gauss':
+                func = _basic_modelfuncs.gauss1d
+            elif profile=='lorentz':
+                # func = _astro_modelfuncs.lorentz1d
+                func = lorentzian
+
+            for i in range(len(pos)):
+                
+                offset = (pos[i] * offs_kms / c)
+                center = (pos[i] + offset) * (1+z) # redshift correction
+                ampl = pars[i] / (1+z)  # redshift correction
+                fwhm_func = (fwhm/c * center) * (1+z)  # redshift correction
+                p = (fwhm_func, center, ampl)
+
+                f += func(p, x)
+            return f
+        
+        def calc(self, pars, x, *args, **kwargs):
+            return self.fixed(pars, x)
+        
+    return Fixed_Lines()
+
+
+
+
+
+
+
+
+    def fit(self, default_mask=True, custom_mask_list=None, n_galaxy=10, n_agn=15): # Adapt the fit_host() function to this class
+        # Prepare grid of (galaxy, AGN) component numbers
+        n_min_eigen = 3  # Minimum number of eigen spectra to use
+        if n_galaxy < n_min_eigen or n_agn < n_min_eigen:
+            raise ValueError(f"Number of galaxy components and AGN components must be at least {n_min_eigen}.")
+        galaxy_range = np.linspace(n_min_eigen, n_galaxy, n_galaxy-n_min_eigen+1, dtype=int)
+        agn_range = np.linspace(n_min_eigen, n_agn, n_agn-n_min_eigen+1, dtype=int)
+        grid = list(product(galaxy_range, agn_range))
+
+        # Prepare eigenspectra
+        wave_hs, flux_hs, fluxerr_hs, g_prime, qso_prime = self._prepare(n_galaxy, n_agn)
+
+        results = []
+        for gal, qso in grid:
+            hs = g_prime[:gal]
+            ags = qso_prime[:qso]
+            coefficients = self._host_fitter(hs, ags, flux_hs, fluxerr_hs)
+            host = sum(coefficients[i] * hs[i] for i in range(gal))
+            if custom_mask_list is not None:
+                host = self._mask_host_custom(wave_hs, host, custom_mask_list)
+            elif default_mask:
+                host = self._mask_host_default(wave_hs, host)
+            agn = sum(coefficients[gal + i] * ags[i] for i in range(qso))
+            negative_threshold = 100  # Threshold for number of negative values in the host and AGN spectra
+            if self._check_host(host, negative_threshold) and self._check_host(agn, negative_threshold):
+                fit = host + agn
+                chi = compute_reduced_chi2(flux_hs, fluxerr_hs, fit, gal + qso)
+                results.append((gal, qso, host, agn, fit, chi, coefficients))
+        if not results:
+            print("All combinations returned negative host. Host contribution might be negliglable.")
+            self.host = np.zeros(len(wave_hs))
+            return
+        
+        # Select the result with reduced chi-square value closest to 1
+        chi_values = [abs(r[5] - 1) for r in results] # r[5] is the chi-square value
+        min_idx = np.argmin(chi_values)
+        best_result = results[min_idx]
+        gal, qso, host, agn, fit, chi, coefficients = best_result
+
+        print(f"Number of galaxy components: {gal}")
+        print(f"Number of AGN components: {qso}")
+        print(f"Reduced chi square: {chi:.3f}")
+
+        # Store results
+        self.host = host
+        self.agn = agn
+        self.flux = flux_hs - host
+        self.wave = wave_hs
+        self.fluxerr = fluxerr_hs
+        self.n_galcomp  = gal
+        self.n_qsocomp = qso
+
+
+
+    # @staticmethod
+    # def _old_mask_host_custom(wave, hostspec, mask_list):
+    #     """
+    #     Create a mask for the host galaxy spectrum based on a custom list of wavelength ranges to exclude.
+
+    #     Parameters
+    #     ----------
+    #     wave : array
+    #         Wavelength array of the spectrum.
+    #     hostspec : array
+    #         Host galaxy spectrum to be masked.
+    #     mask_list : list of tuples
+    #         List of (min, max) wavelength pairs to exclude.
+
+    #     Returns
+    #     -------
+    #     array
+    #         Masked host galaxy spectrum.
+    #     """
+    #     line_mask = np.ones_like(wave, dtype=bool)
+    #     for min_w, max_w in mask_list:
+    #         line_mask &= ~((wave < max_w) & (wave > min_w))
+    #     f = interpolate.interp1d(wave[line_mask], hostspec[line_mask], bounds_error=False, fill_value=0)
+    #     return f(wave)
+
+
+
+def compute_reduced_chi2(data, data_err, model, npars):
+    """
+    Compute the reduced chi-squared statistic for a given model and data.
+
+    Parameters
+    ----------
+    data : array-like
+        Observed data (flux).
+    data_err : array-like
+        Uncertainties in the observed data.
+    model : array-like
+        Model predictions.
+    npars : int
+        Number of parameters in the model.
+
+    Returns
+    -------
+    float
+        Reduced chi-squared value.
+    """
+    residuals = (data - model) / data_err
+    chi2 = np.sum(residuals**2)
+    dof = len(data) - npars  # degrees of freedom
+    return chi2 / dof if dof > 0 else np.nan  # Avoid division by zero
+
+

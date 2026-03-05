@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prism-spec"
+dynamic = ["version"]
+description = "AGN spectral handling tools"
+authors = [
+    { name = "Pierpaolo", email = "pierpaolo.condo@gmail.com" }
+    ]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+]
+license = { file = "LICENSE" }
+keywords = ["science", "astronomy", "astrophysics", "AGN", "spectra", "spectroscopy", "data analysis"]
+
+[project.urls]
+Homepage = "https://github.com/pier-astro/prism-spec"
+# Documentation = "https://prism-spec.readthedocs.io"
+Repository = "https://github.com/pier-astro/prism-spec.git"
+Issues = "https://github.com/pier-astro/prism-spec/issues"
+Changelog = "https://github.com/pier-astro/prism-spec/releases"
+
+
+
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "PyYAML>=5.0",
+    "pandas>=1.3",
+    "adjustText",
+    "PyAstronomy>=0.17",
+    "sfdmap2",
+    "tqdm>=4.0",
+    "dill",
+    "multiprocess>=0.70",
+    "astropy>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=1.0",
+    "myst-parser>=0.18",
+    "docutils>=0.18.1,<=0.21.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["examples*"]
+
+[tool.setuptools.package-data]
+prism-spec = [
+    "responses/*",
+    "lines_csv/*",
+    "eigenspectra/*",
+    "sfddata/*"
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "pubplotlib._version.__version__"}
