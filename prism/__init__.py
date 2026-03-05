@@ -1,12 +1,8 @@
 from ._version import __version__
 
-from .spectrum import *
-from .tools import *
-
-from . import models
-from . import tools
+# Import main subpackages
+from . import data
+from . import modeling
+from . import processing
 from . import display
-from .fitting import *
-
-# Instrument module now lives in models
-from .models.instrument import InstrumentResponse, SpectralResponse
+from . import utils

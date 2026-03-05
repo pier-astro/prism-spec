@@ -77,8 +77,8 @@ from astropy.modeling import Fittable1DModel, Parameter
 # --- Path utilities ---
 
 def _get_package_response_dir() -> str:
-    """Return the path to the package response matrix directory."""
-    return os.path.join(os.path.dirname(__file__), "..", "responses")
+    """Return the path to the package responses directory."""
+    return os.path.join(os.path.dirname(__file__), "..", "..", "..", "resources", "responses")
 
 
 def _get_user_response_dir() -> str:

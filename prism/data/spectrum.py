@@ -8,11 +8,11 @@ import matplotlib.pyplot as plt
 import os
 import warnings
 
-from .tools import resample_spectrum, downsample_wave, vac_to_air, air_to_vac
+from ..utils.tools import resample_spectrum, downsample_wave, vac_to_air, air_to_vac
 
 c_kms = const.c.to(u.km/u.s).value # Speed of light in km/s
 script_dir = os.path.dirname(__file__)
-sfdpath = os.path.join(script_dir, "sfddata")
+dustpath = os.path.join(script_dir, "..", "..", "resources", "dust")
 plt.rcParams['axes.xmargin'] = 0
 
 class Spectrum():
@@ -230,7 +230,7 @@ class Spectrum():
         if ebv is not None:
             self.ebv = ebv
         elif self.ra is not None and self.dec is not None:
-            m = sfdmap.SFDMap(sfdpath)
+            m = sfdmap.SFDMap(dustpath)
             self.ebv = m.ebv(self.ra, self.dec)
         else:
             raise ValueError("Cannot determine E(B-V). Provide ra/dec or an ebv value.")

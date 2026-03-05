@@ -24,9 +24,9 @@ c_kms = const.c.to(u.km/u.s).value # Speed of light in km/s
 sigma2fwhm = 2 * np.sqrt(2 * np.log(2))
 
 script_dir = os.path.dirname(__file__) # get the directory of the current script
-input_path = os.path.join(script_dir, "../lines_csv")
+input_path = os.path.join(script_dir, "..", "..", "..", "resources", "lines")
 
-def init_lines_csv(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
+def init_lines_csv(wmin=4000, wmax=7000, dirpath=input_path, overwrite=False):
     """
     The init_lines function initializes the lines by reading the csv files from the input folder and filtering them based on the wavelength range.
     """

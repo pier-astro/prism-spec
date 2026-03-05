@@ -19,13 +19,6 @@ classifiers = [
 license = { file = "LICENSE" }
 keywords = ["science", "astronomy", "astrophysics", "AGN", "spectra", "spectroscopy", "data analysis"]
 
-[project.urls]
-Homepage = "https://github.com/pier-astro/prism-spec"
-# Documentation = "https://prism-spec.readthedocs.io"
-Repository = "https://github.com/pier-astro/prism-spec.git"
-Issues = "https://github.com/pier-astro/prism-spec/issues"
-Changelog = "https://github.com/pier-astro/prism-spec/releases"
-
 
 
 dependencies = [
@@ -43,6 +36,13 @@ dependencies = [
     "astropy>=5.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/pier-astro/prism-spec"
+# Documentation = "https://prism-spec.readthedocs.io"
+Repository = "https://github.com/pier-astro/prism-spec.git"
+Issues = "https://github.com/pier-astro/prism-spec/issues"
+Changelog = "https://github.com/pier-astro/prism-spec/releases"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
@@ -56,13 +56,12 @@ dev = [
 where = ["."]
 exclude = ["examples*"]
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.package-data]
-prism-spec = [
-    "responses/*",
-    "lines_csv/*",
-    "eigenspectra/*",
-    "sfddata/*"
-]
+prism = ["*"]
+"*" = ["resources/**/*"]
 
 [tool.setuptools.dynamic]
-version = {attr = "pubplotlib._version.__version__"}
+version = {attr = "prism._version.__version__"}
