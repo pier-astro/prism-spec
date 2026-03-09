@@ -197,8 +197,7 @@ class GaussianLine(LineModelBase):
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
         d_center_d_off = center / c_kms
         
-        # d_sigma_eff / d_sigma_intrinsic = sigma_intrinsic / sigma_eff
-        d_sigma_eff_d_sigma_intrinsic = sigma_intrinsic / sigma_eff if sigma_eff != 0 else 0.0
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
         
         d_sigma_intrinsic_d_pos = (fwhm / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
@@ -336,7 +335,7 @@ class VoigtLine(LineModelBase):
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = sigma_intrinsic / sigma_eff if sigma_eff != 0 else 0.0
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
         
         d_sigma_intrinsic_d_pos = (fwhm_G / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
@@ -720,7 +719,7 @@ class GaussianLines(LineGroupBase):
         
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = sigma_intrinsic / sigma_eff if sigma_eff != 0 else 0.0
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
         
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhm = (center / c_kms) / sigma2fwhm
@@ -844,7 +843,7 @@ class VoigtLines(LineGroupBase):
         
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = sigma_intrinsic / sigma_eff if sigma_eff != 0 else 0.0
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
         
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhmG = (center / c_kms) / sigma2fwhm
