@@ -9,6 +9,9 @@ import abc
 import time
 import copy
 import numpy as np
+from multiprocess import Pool
+from tqdm import tqdm
+
 from astropy.modeling.fitting import Fitter, model_to_fit_params
 from astropy.modeling import CompoundModel
 
@@ -106,6 +109,62 @@ def _apply_tied_fast(model, tied_info, parameters_cache):
 # =============================================================================
 # BASE CLASS
 # =============================================================================
+
+class MultiFitResult:
+    """
+    Stores the result of a 2D/3D fitting over multiple spectra.
+    Provides easy access to parameter maps and statistics.
+    """
+    def __init__(self, shape, param_names, has_cov=False):
+        self.shape = shape
+        self.param_names = param_names
+        
+        # We store flattened arrays initially and reshape upon access
+        self.n_spaxels = np.prod(shape)
+        self._params = {name: np.full(self.n_spaxels, np.nan) for name in param_names}
+        self._errs = {name: np.full(self.n_spaxels, np.nan) for name in param_names}
+        self._success = np.zeros(self.n_spaxels, dtype=bool)
+        self._nfev = np.zeros(self.n_spaxels, dtype=float)
+        
+        self.has_cov = has_cov
+        if has_cov:
+            self._cov = np.full((self.n_spaxels, len(param_names), len(param_names)), np.nan)
+
+    def update(self, idx, model_params, stdevs, success, nfev, cov=None):
+        """Update a single spaxel result at flattened index idx."""
+        for i, name in enumerate(self.param_names):
+            self._params[name][idx] = model_params[i]
+            if stdevs is not None:
+                self._errs[name][idx] = stdevs[i]
+                
+        self._success[idx] = success
+        self._nfev[idx] = nfev
+        
+        if self.has_cov and cov is not None:
+            self._cov[idx] = cov
+
+    def __getattr__(self, name):
+        """Allow direct access to parameter maps e.g. result.amplitude_0"""
+        if name in self.param_names:
+            return self._params[name].reshape(self.shape)
+        if name.endswith("_err") and name[:-4] in self.param_names:
+            return self._errs[name[:-4]].reshape(self.shape)
+        raise AttributeError(f"'MultiFitResult' object has no attribute '{name}'")
+        
+    @property
+    def success(self):
+        return self._success.reshape(self.shape)
+
+    @property
+    def nfev(self):
+        return self._nfev.reshape(self.shape)
+
+    @property
+    def covariance(self):
+        if not self.has_cov:
+            return None
+        return self._cov.reshape(self.shape + (len(self.param_names), len(self.param_names)))
+
 
 class FitterBase(Fitter):
     """
@@ -316,8 +375,83 @@ class FitterBase(Fitter):
         """
         pass
 
+    def _fit_single_target(self, args):
+        """Helper for multiprocess mapping. Unpacks and runs a single 1D fit."""
+        idx, model, x, y_1d, yerr_1d, statistic, weights_1d, kwargs = args
+        try:
+            # We enforce inplace=False to avoid corrupting shared state (though dill makes a copy anyway)
+            fitted = self(model=model.copy(), x=x, y=y_1d, yerr=yerr_1d, 
+                          statistic=statistic, weights=weights_1d, inplace=False, nproc=1, **kwargs)
+            return (idx, fitted.parameters, self.stdevs, self.fit_info['success'], self.fit_info['nfev'], self.covariance)
+        except Exception as e:
+            if self.verbose:
+                print(f"Worker {idx} failed: {e}")
+            return (idx, np.full(len(model.parameters), np.nan), None, False, 0, None)
+
+    def _fit_multi(self, model, x, y, yerr=None, statistic='chi2', weights=None, nproc=1, **kwargs):
+        """
+        Handle multi-spectra (2D/3D) fitting by iterating over spaxels.
+        Expects y shape: (N_axes..., N_wave) or (N_wave, N_axes...).
+        We assume the dimension matching len(x) is the wave axis.
+        """
+        y = np.asarray(y)
+        
+        # 1. Identify spectral axis
+        wave_len = len(x)
+        if y.shape[0] == wave_len and y.shape[-1] != wave_len:
+            # (N_wave, spatial) -> Transpose to (spatial..., N_wave)
+            y = np.moveaxis(y, 0, -1)
+            mapped_yerr = np.moveaxis(np.asarray(yerr), 0, -1) if yerr is not None else None
+            mapped_weights = np.moveaxis(np.asarray(weights), 0, -1) if weights is not None else None
+            spatial_shape = y.shape[:-1]
+        elif y.shape[-1] == wave_len:
+            # (spatial..., N_wave)
+            mapped_yerr = np.asarray(yerr) if yerr is not None else None
+            mapped_weights = np.asarray(weights) if weights is not None else None
+            spatial_shape = y.shape[:-1]
+        else:
+            raise ValueError(f"Could not match wave axis length ({wave_len}) to any dimension in y shape {y.shape}")
+
+        n_spaxels = np.prod(spatial_shape)
+        y_flat = y.reshape((n_spaxels, wave_len))
+        yerr_flat = mapped_yerr.reshape((n_spaxels, wave_len)) if mapped_yerr is not None else [None]*n_spaxels
+        weights_flat = mapped_weights.reshape((n_spaxels, wave_len)) if mapped_weights is not None else [None]*n_spaxels
+        
+        # 2. Setup MultiFitResult
+        res = MultiFitResult(spatial_shape, model.param_names, has_cov=self.calc_uncertainties)
+        
+        # 3. Create task generator
+        def task_generator():
+            for idx in range(n_spaxels):
+                # Skip all-NaN or all-zero spectra if you want, but astropy should fail fast
+                yield (idx, model, x, y_flat[idx], yerr_flat[idx], statistic, weights_flat[idx], kwargs)
+
+        if self.verbose:
+            print(f"Fitting {n_spaxels} spectra across {nproc} cores...")
+
+        t0 = time.perf_counter()
+        
+        # 4. Execute standard or parallel mapping
+        if nproc <= 1:
+            # Single process, nice progress bar
+            for task in tqdm(task_generator(), total=n_spaxels, disable=not self.verbose, desc="Fitting Spectra"):
+                result = self._fit_single_target(task)
+                res.update(*result)
+        else:
+            # Multi process
+            with Pool(nproc) as pool:
+                iterator = pool.imap_unordered(self._fit_single_target, task_generator(), chunksize=max(1, n_spaxels//(nproc*4)))
+                for result in tqdm(iterator, total=n_spaxels, disable=not self.verbose, desc="Fitting Spectra Par"):
+                    res.update(*result)
+                    
+        total_time = time.perf_counter() - t0
+        if self.verbose:
+            print(f"Finished multi-fit in {total_time:.2f}s ({total_time/n_spaxels*1000:.1f}ms/spaxel)")
+
+        return res
+
     def __call__(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None, 
-                 inplace=False, **kwargs):
+                 inplace=False, nproc=1, **kwargs):
         """
         Fit model to data.
         
@@ -349,6 +483,11 @@ class FitterBase(Fitter):
         """
         if z is not None:
             raise NotImplementedError("2D fitting not yet implemented")
+
+        y = np.asarray(y)
+        if y.ndim > 1:
+            return self._fit_multi(model, x, y, yerr=yerr, statistic=statistic, 
+                                   weights=weights, nproc=nproc, **kwargs)
 
         # Prepare fitting data using common logic
         t0 = time.perf_counter()

@@ -53,15 +53,44 @@ def setup_local_lines(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
     if overwrite or is_created:
         for files in glob.glob(resource_path + "/*.csv"):
             df = pd.read_csv(files)
-            if 'pos' in df.columns:
-                df = df[df.pos > wmin]
-                df = df[df.pos < wmax]
+            if not {'name', 'pos', 'weight'}.issubset(df.columns):
+                raise ValueError(f"CSV format not recognized in {files}. Required columns: name, pos, weight.")
+            df = df[df.pos > wmin]
+            df = df[df.pos < wmax]
             name = os.path.join(dirpath, Path(files).name)
             df.to_csv(name, index=False)
 
 # ------
 # MODELS
 # ------
+
+
+def _instfwhm_val(instfwhm, center):
+    if callable(instfwhm):
+        res = instfwhm(center)
+        if isinstance(res, tuple):
+            return res[0]
+        return res
+    return float(instfwhm)
+
+def _instfwhm_val_and_deriv(instfwhm, center, eps=1.0):
+    if callable(instfwhm):
+        res = instfwhm(center)
+        if isinstance(res, tuple):
+            return res[0], res[1]
+        
+        # Fallback to numerical derivative
+        res_plus = instfwhm(center + eps)
+        val_plus = res_plus[0] if isinstance(res_plus, tuple) else res_plus
+        
+        res_minus = instfwhm(center - eps)
+        val_minus = res_minus[0] if isinstance(res_minus, tuple) else res_minus
+        
+        dval = (val_plus - val_minus) / (2.0 * eps)
+        return res, dval
+        
+    val = float(instfwhm)
+    return val, 0.0
 
 def _has_param_std(param) -> bool:
     """Check if parameter has valid std."""
@@ -187,7 +216,7 @@ class GaussianLine(LineModelBase):
     def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val = _instfwhm_val(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -200,7 +229,7 @@ class GaussianLine(LineModelBase):
     def fit_deriv(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -216,14 +245,19 @@ class GaussianLine(LineModelBase):
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
+        safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_pos = (fwhm / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhm = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_pos = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
-        d_sigma_eff_d_off = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+        d_sigma_eff_d_pos = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_pos)
+        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhm = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhm
         
         d_position = d_center * d_center_d_pos + d_sigma_eff * d_sigma_eff_d_pos
@@ -232,7 +266,9 @@ class GaussianLine(LineModelBase):
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
-        d_sigma_eff_d_redshift = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+        d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
+        d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+                                  + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
         d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift
@@ -242,7 +278,7 @@ class GaussianLine(LineModelBase):
     def _calc_flux(self):
         center = self.position.value * (1.0 + self.redshift.value) * np.exp(self.offset.value / c_kms)
         fwhm_A = self.fwhm.value / c_kms * center
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val = _instfwhm_val(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -321,7 +357,7 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val = _instfwhm_val(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -337,7 +373,7 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -354,14 +390,19 @@ class VoigtLine(LineModelBase):
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
+        safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_pos = (fwhm_G / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhmG = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_pos = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
-        d_sigma_eff_d_off = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+        d_sigma_eff_d_pos = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_pos)
+        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhmG = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhmG
         
         d_gamma_d_pos = (fwhm_L / c_kms * d_center_d_pos) / 2.0
@@ -375,7 +416,9 @@ class VoigtLine(LineModelBase):
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
-        d_sigma_eff_d_redshift = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+        d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
+        d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+                                  + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         d_gamma_d_redshift = gamma / (1.0 + redshift)
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
         d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift + d_gamma * d_gamma_d_redshift
@@ -387,7 +430,7 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = self.fwhm_G.value / c_kms * center
         fwhm_L_A = self.fwhm_L.value / c_kms * center
         
-        instfwhm_val = self.instfwhm(center) if callable(self.instfwhm) else self.instfwhm
+        instfwhm_val = _instfwhm_val(self.instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -444,7 +487,10 @@ class LineGroupBase(Fittable1DModel):
         dfs = []
         for f in csv_files:
             path = f if os.path.isabs(f) else os.path.join(dirpath, f)
-            dfs.append(pd.read_csv(path))
+            df_curr = pd.read_csv(path)
+            if not {'name', 'pos', 'weight'}.issubset(df_curr.columns):
+                raise ValueError(f"CSV format not recognized in {path}. Required columns: name, pos, weight.")
+            dfs.append(df_curr)
             
         df = pd.concat(dfs, ignore_index=True)
         return cls.from_templates(df, name=name, bounds=bounds, amplitude=amplitude, instfwhm=instfwhm, **init_kwargs)
@@ -710,7 +756,7 @@ class GaussianLines(LineGroupBase):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val = _instfwhm_val(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -725,7 +771,7 @@ class GaussianLines(LineGroupBase):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -740,12 +786,16 @@ class GaussianLines(LineGroupBase):
         
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
+        safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhm = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_off = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhm = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhm
         
         d_offset = d_center * d_center_d_off + d_sigma_eff * d_sigma_eff_d_off
@@ -753,7 +803,9 @@ class GaussianLines(LineGroupBase):
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
-        d_sigma_eff_d_redshift = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+        d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
+        d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+                                  + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
         d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift
@@ -765,7 +817,7 @@ class GaussianLines(LineGroupBase):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val = _instfwhm_val(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -831,7 +883,7 @@ class VoigtLines(LineGroupBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val = _instfwhm_val(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -848,7 +900,7 @@ class VoigtLines(LineGroupBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -864,12 +916,16 @@ class VoigtLines(LineGroupBase):
         
         d_center_d_off = center / c_kms
         
-        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / np.where(sigma_eff != 0, sigma_eff, 1.0), 0.0)
+        safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
+        d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhmG = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_off = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhmG = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhmG
         
         d_gamma_d_off = (fwhm_L / c_kms * d_center_d_off) / 2.0
@@ -881,7 +937,9 @@ class VoigtLines(LineGroupBase):
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
-        d_sigma_eff_d_redshift = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+        d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
+        d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
+                                  + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         
         d_gamma_d_redshift = gamma / (1.0 + redshift)
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
@@ -895,7 +953,7 @@ class VoigtLines(LineGroupBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = instfwhm(center) if callable(instfwhm) else instfwhm
+        instfwhm_val = _instfwhm_val(instfwhm, center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
