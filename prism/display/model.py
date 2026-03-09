@@ -13,6 +13,7 @@ import numpy as np
 import inspect
 import uuid
 from astropy.modeling import CompoundModel
+import pandas as pd
 
 from .sciformat import format_value
 from .styles import MODEL_TABLE_CSS, COLLAPSIBLE_CSS, FLUX_TABLE_CSS, get_toggle_script
@@ -40,7 +41,7 @@ def _unwrap_convolved(model):
     
     Returns (source_model, wrapper_name) where wrapper_name is None if not wrapped.
     """
-    from fantasylab.models.convolved import ConvolvedModel
+    from prism.modeling.operators.convolved import ConvolvedModel
     
     if isinstance(model, ConvolvedModel):
         return model._source, model.name
@@ -59,7 +60,7 @@ def _get_components(model):
         return [(0, name)]
     
     # Import here to avoid circular imports
-    from fantasylab.models.components import get_components
+    from prism.modeling.models.components import get_components
     comps = get_components(model, additive=False)
     return list(zip(comps.indices, comps.names))
 
@@ -245,20 +246,25 @@ def _iter_param_rows(model, output_format='html', sig_digits=2, filter_fn=None):
 
 
 def _format_flux_value(flux, output_format='html', sig_digits=2):
-    """Format a Flux object for display."""
-    if flux.method == 'samples':
-        delta_lo = flux.value - flux.lolim if flux.lolim is not None else None
-        delta_hi = flux.uplim - flux.value if flux.uplim is not None else None
-        # Show asymmetric if at least one side is valid
-        if (delta_lo is not None and delta_lo != 0) or (delta_hi is not None and delta_hi != 0):
-            return format_value(flux.value, (delta_lo, delta_hi), 
-                               output=output_format, sig_digits=sig_digits, use_dollars=False)
-    elif flux.std is not None and flux.std != 0 and np.isfinite(flux.std):
-        return format_value(flux.value, flux.std, 
+    """Format a Flux pd.Series for display."""
+    flux_val = flux['value']
+    
+    if 'std' in flux and flux['std'] is not None and np.isfinite(flux['std']):
+        return format_value(flux_val, flux['std'], 
                            output=output_format, sig_digits=sig_digits, use_dollars=False)
     
-    return format_value(flux.value, None, output=output_format, sig_digits=sig_digits, use_dollars=False)
-
+    # Check for limits (asymmetric errors)
+    if 'lolim' in flux.index and 'uplim' in flux.index:
+        lolim_val = flux['lolim']
+        uplim_val = flux['uplim']
+        if pd.notna(lolim_val) and pd.notna(uplim_val):
+            delta_lo = flux_val - lolim_val
+            delta_hi = uplim_val - flux_val
+            if (delta_lo != 0) or (delta_hi != 0):
+                return format_value(flux_val, (delta_lo, delta_hi), 
+                                   output=output_format, sig_digits=sig_digits, use_dollars=False)
+            
+    return format_value(flux_val, None, output=output_format, sig_digits=sig_digits, use_dollars=False)
 
 def _iter_model_rows_with_fluxes(model, fluxes, output_format='html', sig_digits=2):
     """
@@ -528,6 +534,41 @@ def show(model, format='auto', sig_digits=2, filter=None):
     _display_output(output, format)
 
 
+def _extract_fluxes(model):
+    """Internal helper to extract fluxes from a model."""
+    from astropy.modeling.core import CompoundModel
+    from prism.modeling.operators.convolved import ConvolvedModel
+    
+    # Unwrap ConvolvedModel
+    if isinstance(model, ConvolvedModel):
+        model = model._source
+    
+    if isinstance(model, CompoundModel):
+        from prism.modeling.models.components import get_components
+        fluxes = {}
+        comps = get_components(model, additive=False)
+        for comp_idx, comp in zip(comps.indices, comps.to_list()):
+            if hasattr(comp, 'flux'):
+                flux_obj = comp.flux
+                if isinstance(flux_obj, __import__('pandas').DataFrame):
+                    for name, row in flux_obj.iterrows():
+                        clean = name.replace('amp_', '', 1) if name.startswith('amp_') else name
+                        fluxes[f"{clean}_{comp_idx}"] = row
+                elif isinstance(flux_obj, __import__('pandas').Series):
+                    fluxes[f"flux_{comp_idx}"] = flux_obj
+        return fluxes
+        
+    # Single model
+    if hasattr(model, 'flux'):
+        flux_obj = model.flux
+        if isinstance(flux_obj, __import__('pandas').DataFrame):
+            return {k.replace('amp_', '', 1) if k.startswith('amp_') else k: v 
+                    for k, v in flux_obj.iterrows()}
+        elif isinstance(flux_obj, __import__('pandas').Series):
+            return {'flux': flux_obj}
+            
+    return {}
+
 def show_model_lineflux(model, fluxes=None, format='auto', sig_digits=2):
     """
     Display model parameters with derived line fluxes.
@@ -548,8 +589,7 @@ def show_model_lineflux(model, fluxes=None, format='auto', sig_digits=2):
     
     # Extract fluxes if not provided
     if fluxes is None:
-        from fantasylab.models.flux import extract_fluxes
-        fluxes = extract_fluxes(model)
+        fluxes = _extract_fluxes(model)
     
     rows = list(_iter_model_rows_with_fluxes(model, fluxes, format, sig_digits))
     has_units, has_fluxes = _collect_flags(rows)
@@ -582,8 +622,7 @@ def show_fluxes(model, fluxes=None, format='auto', sig_digits=2):
         format = 'html' if _detect_environment() == 'jupyter' else 'text'
     
     if fluxes is None:
-        from fantasylab.models.flux import extract_fluxes
-        fluxes = extract_fluxes(model)
+        fluxes = _extract_fluxes(model)
     
     if not fluxes:
         print("No line fluxes found in model.")

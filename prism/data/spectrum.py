@@ -13,7 +13,6 @@ from ..utils.tools import resample_spectrum, downsample_wave, vac_to_air, air_to
 c_kms = const.c.to(u.km/u.s).value # Speed of light in km/s
 script_dir = os.path.dirname(__file__)
 dustpath = os.path.join(script_dir, "..", "..", "resources", "dust")
-plt.rcParams['axes.xmargin'] = 0
 
 class Spectrum():
     def __init__(self,

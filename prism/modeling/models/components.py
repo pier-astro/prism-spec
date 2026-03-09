@@ -22,7 +22,7 @@ def _get_source_model(model):
     underlying source model. Otherwise return the model unchanged.
     """
     # Import here to avoid circular imports
-    from .convolved import ConvolvedModel
+    from ..operators.convolved import ConvolvedModel
     
     if isinstance(model, ConvolvedModel):
         return model._source
@@ -43,7 +43,7 @@ def _get_convolution_info(model):
     tuple or None
         (ConvolvedModelClass, operator_matrix, wave, name) if wrapped, else None
     """
-    from .convolved import ConvolvedModel
+    from ..operators.convolved import ConvolvedModel
     
     if isinstance(model, ConvolvedModel):
         return (type(model), model._operator_matrix, model._wave, model._name)

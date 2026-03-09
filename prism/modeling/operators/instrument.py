@@ -29,9 +29,7 @@ ResponseModel/ConvolvedModel solve this by applying the chain rule:
 This preserves analytic derivatives since R is a fixed matrix.
 
 Files modified to handle ConvolvedModel unwrapping:
-- fantasylab/models/components.py: get_components(), _get_source_model()
-- fantasylab/models/flux.py: extract_fluxes(), flux_from_samples()  
-- fantasylab/display/model.py: show(), _build_model_expression()
+- prism/modeling/models/lines.py: extract_fluxes()
 
 See myresources/convolved_model.md for full documentation.
 
@@ -43,12 +41,12 @@ When working with redshifted sources:
 
 Instrument Storage:
 - Default instruments are stored in the package directory (responses/)
-- Custom instruments are stored in ~/.fantasylab/instruments/
+- Custom instruments are stored in ~/.prism/instruments/
 - User instruments override package defaults with the same name
 
 Example:
 --------
->>> from fantasylab.models.instrument import SpectralResponse, InstrumentResponse
+>>> from prism.modeling.operators.instrument import SpectralResponse, InstrumentResponse
 >>> from astropy.modeling.models import Gaussian1D
 >>> 
 >>> # Build response from instrument archive
@@ -82,8 +80,8 @@ def _get_package_response_dir() -> str:
 
 
 def _get_user_response_dir() -> str:
-    """Return the path to the user's local response directory (~/.fantasylab/instruments/)."""
-    return os.path.join(os.path.expanduser("~"), ".fantasylab", "instruments")
+    """Return the path to the user's local response directory (~/.prism/instruments/)."""
+    return os.path.join(os.path.expanduser("~"), ".prism", "instruments")
 
 
 def _ensure_user_response_dir() -> str:
@@ -107,7 +105,7 @@ def load_responses_mapping() -> dict:
     """
     Load the combined instrument-to-FITS mapping.
     
-    User instruments (~/.fantasylab/instruments/) override package defaults.
+    User instruments (~/.prism/instruments/) override package defaults.
     """
     # Load package defaults
     pkg_yaml = _get_package_yaml_path()
@@ -306,7 +304,7 @@ class InstrumentResponse:
         """
         Load from instrument name in the archive.
         
-        Searches user directory (~/.fantasylab/instruments/) first,
+        Searches user directory (~/.prism/instruments/) first,
         then falls back to package defaults.
         """
         # Check user directory first
@@ -390,7 +388,7 @@ class InstrumentResponse:
         """
         Save the response matrix to user directory and register it.
         
-        The file is saved to ~/.fantasylab/instruments/<instrument_name>.fits
+        The file is saved to ~/.prism/instruments/<instrument_name>.fits
         and registered in the user's instrument archive.
         
         Parameters
@@ -633,7 +631,7 @@ class ResponseModel(ConvolvedModel):
         
     Example
     -------
-    >>> from fantasylab.models.instrument import ResponseModel, InstrumentResponse
+    >>> from prism.modeling.operators.instrument import ResponseModel, InstrumentResponse
     >>> 
     >>> # Build response matrix
     >>> rsp = InstrumentResponse.from_fixed_resolution(wave, R=2000)

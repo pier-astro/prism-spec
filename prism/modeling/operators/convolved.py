@@ -43,44 +43,28 @@ Package Modification Log
 ------------------------
 The following files contain logic to handle ConvolvedModel instances:
 
-1. fantasylab/models/convolved.py (THIS FILE)
+1. prism/modeling/operators/convolved.py (THIS FILE)
    - Defines base ConvolvedModel class
    - Implements fit_deriv with chain rule: J_new = M @ J_source
    - Delegates all model properties to source via __getattr__
 
-2. fantasylab/models/instrument.py
+2. prism/modeling/operators/instrument.py
    - Defines ResponseModel(ConvolvedModel) for instrumental response
    - SpectralResponse.__call__() returns ResponseModel by default
    - ResponseModel has default name='rsp' for display
 
-3. fantasylab/models/components.py
+3. prism/modeling/models/components.py
    - _get_source_model(): Unwraps ConvolvedModel → source for component extraction
    - _get_convolution_info(): Extracts convolution params for re-wrapping
    - _wrap_component(): Re-wraps extracted components with convolution
    - ModelComponents: Stores conv_info and wraps extracted components
    - Result: get_components(rsp(A+B)) returns [rsp(A), rsp(B)] not [A, B]
 
-4. fantasylab/models/flux.py
+4. prism/modeling/models/lines.py
    - extract_fluxes(): Unwraps ConvolvedModel before extracting line fluxes
-   - flux_from_samples(): Unwraps ConvolvedModel before processing samples
 
-5. fantasylab/display/model.py
-   - _unwrap_convolved(): Returns (source, wrapper_name) tuple
-   - _build_model_expression(): Shows "name(source_expr)" format
-   - _get_components(): Unwraps before extracting component list
-
-6. fantasylab/models/__init__.py
+6. prism/modeling/models/__init__.py
    - Exports ConvolvedModel and ResponseModel for public API
-
-Display Format
---------------
-When wrapped in ResponseModel (or ConvolvedModel), show() displays:
-
-    Model: rsp(continuum (0) + blr_h (1) + blr_he (2) + nlr (3))
-
-Instead of the old format:
-
-    Model: continuum (0) + blr_h (1) + blr_he (2) + nlr (3) [convolved]
 """
 import numpy as np
 from scipy.interpolate import interp1d
