@@ -1,9 +1,13 @@
+"""
+Sherpa-based fitters for prism.modeling.fitting
 
-import time
+This module provides wrappers around Sherpa optimizers with C++-backed statistics
+and standardized interfaces.
+"""
+
 import warnings
 import numpy as np
-from astropy.modeling.fitting import model_to_fit_params
-from .fitting import FantasyFitter, _get_tied_info, _apply_tied_fast
+from .base import FitterBase, _apply_tied_fast
 
 # Try to import Sherpa
 try:
@@ -13,9 +17,10 @@ try:
 except ImportError:
     HAS_SHERPA = False
 
-__all__ = ['SherpaFitter', 'SherpaLevMar', 'SherpaNelderMead', 'SherpaMonCar', 'HAS_SHERPA']
+__all__ = ['SherpaFitter', 'SherpaLM', 'SherpaSimplex', 'SherpaMonCar', 'HAS_SHERPA']
 
-class SherpaFitter(FantasyFitter):
+
+class SherpaFitter(FitterBase):
     """
     Wrapper around Sherpa optimizers with C++-backed statistics.
     
@@ -36,7 +41,7 @@ class SherpaFitter(FantasyFitter):
     - Levenberg-Marquardt: Extracts native covariance from Sherpa/MINPACK (fast)
     - Nelder-Mead & Monte Carlo: Do NOT provide native covariance
       Falls back to expensive numerical Hessian estimation (not recommended)
-    - Recommendation: Use SherpaLevMar for uncertainties, others for optimization only
+    - Recommendation: Use SherpaLM for uncertainties, others for optimization only
     
     **Stored MINPACK Parameters:**
     - nfev : Number of function evaluations
@@ -57,6 +62,7 @@ class SherpaFitter(FantasyFitter):
     def __init__(self, method='levmar', calc_uncertainties=False, force_numerical_covariance=False, verbose=False):
         if not HAS_SHERPA:
             raise ImportError("Sherpa is not installed. Install with: pip install sherpa")
+        
         super().__init__(calc_uncertainties=calc_uncertainties, 
                          force_numerical_covariance=force_numerical_covariance, 
                          verbose=verbose)
@@ -70,37 +76,33 @@ class SherpaFitter(FantasyFitter):
             self.opt = sherpa.optmethods.MonCar()
         else:
             raise ValueError(f"Unknown method: {method}. Options: levmar, neldermead, moncar")
-    
-    def __call__(self, model, x, y, z=None, yerr=None, weights=None, statistic='chi2', inplace=False, **kwargs):
+
+    def _fit_impl(self, prep_data, statistic='chi2', **kwargs):
         """
-        Fit model to data using Sherpa optimizers.
+        Implement Sherpa fitting using the prepared data.
         
         Parameters
         ----------
-        yerr : array-like, optional
-            Uncertainties on y data. If provided with statistic='chi2',
-            uses Chi2DataVar. If None with statistic='chi2', uses LeastSq.
-        weights : array-like, optional
-            NOT SUPPORTED. Use yerr instead. Raises error if provided.
+        prep_data : dict
+            Prepared fitting data from _prepare_fitting()
         statistic : str, optional
             'chi2' (default) or 'poisson'. Currently only 'chi2' is implemented.
-            'poisson' raises NotImplementedError.
-        
-        Notes
-        -----
-        Internally uses Sherpa's C++-backed statistics:
-        - statistic='chi2' + yerr=None → sherpa.stats.LeastSq()
-        - statistic='chi2' + yerr → sherpa.stats.Chi2DataVar()
-        - statistic='poisson' → NotImplementedError (Cash/CStat need special handling)
+        **kwargs : dict
+            Additional arguments to Sherpa optimizers
+            
+        Returns
+        -------
+        result : dict
+            Fitting results with standardized keys
         """
-        # Filter out deprecated parameters
+        # Validate deprecated parameters in __call__
         if 'uncertainties' in kwargs:
             raise TypeError(
                 "The 'uncertainties' parameter is no longer supported. "
                 "Use calc_uncertainties=True in the fitter constructor instead."
             )
         
-        if weights is not None:
+        if 'weights' in kwargs and kwargs['weights'] is not None:
             raise TypeError(
                 "The 'weights' parameter is not supported. Use 'yerr' instead "
                 "to enable Chi2DataVar statistic."
@@ -117,42 +119,42 @@ class SherpaFitter(FantasyFitter):
                 "These require specialized data handling in Sherpa. Use statistic='chi2' instead."
             )
         
-        if z is not None:
-            warnings.warn("2D fitting not fully supported in SherpaFitter")
-        if not inplace:
-            model = model.copy()
+        model = prep_data['model']
+        x = prep_data['x']
+        y = prep_data['y']
+        init_values = prep_data['init_values']
+        fit_indices = prep_data['fit_indices']
+        param_bounds = prep_data['param_bounds']
+        tied_info = prep_data['tied_info']
+        params_cache = prep_data['params_cache']
         
-        # Select Sherpa statistic based on statistic parameter and yerr
-        # For chi2: use LeastSq (no yerr) or Chi2DataVar (with yerr)
+        # Get yerr from the original weights computation
+        # We need to reconstruct yerr for Sherpa statistic selection
+        yerr = None  # Will be extracted from prep_data if available
+        weights = prep_data['weights']
+        if weights is not None:
+            # Back-calculate yerr from weights (weights = 1/yerr for chi2)
+            yerr = 1.0 / weights
+        
+        has_tied = bool(tied_info)
+        
+        # Select Sherpa statistic
         if statistic == 'chi2':
             if yerr is None:
                 sherpa_stat = sherpa.stats.LeastSq()
             else:
                 sherpa_stat = sherpa.stats.Chi2DataVar()
-        # poisson already handled above with NotImplementedError
-            
-        init_values, fit_indices, _ = model_to_fit_params(model)
         
-        # Bounds
-        bounds_list = [getattr(model, n).bounds for n in model.param_names]
-        all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
-                                 b[1] if b[1] is not None else np.inf) 
-                                for b in bounds_list])
-        min_vals = all_bounds[fit_indices, 0]
-        max_vals = all_bounds[fit_indices, 1]
+        # Prepare bounds
+        min_vals = param_bounds[:, 0]  
+        max_vals = param_bounds[:, 1]
         
         # Handle infinities
         huge = np.finfo(float).max
         min_vals = np.where(np.isinf(min_vals), -huge, min_vals)
         max_vals = np.where(np.isinf(max_vals), huge, max_vals)
         
-        # Cache for tied parameters
-        tied_info = _get_tied_info(model)
-        has_tied = bool(tied_info)
-        params_cache = model.parameters.copy()
-        
         # Compute statistical errors using Sherpa's methods
-        # This gives us the proper weighting for the fit
         if statistic == 'chi2':
             if yerr is None:
                 # LeastSq: uniform weighting (staterr = 1.0)
@@ -180,75 +182,47 @@ class SherpaFitter(FantasyFitter):
             
             return stat, weighted_resid
         
-        t0 = time.perf_counter()
-        sherpa_result = self.opt.fit(statfunc, np.array(init_values), min_vals, max_vals)
-        elapsed = time.perf_counter() - t0
+        # Run Sherpa optimization
+        # Filter kwargs to remove unsupported parameters
+        sherpa_kwargs = {k: v for k, v in kwargs.items() if k not in ['maxfev', 'max_nfev']}
+        sherpa_result = self.opt.fit(statfunc, np.array(init_values), min_vals, max_vals, **sherpa_kwargs)
         
-        # Update model
-        params_cache[fit_indices] = sherpa_result[1]
-        model.parameters = params_cache
-        if has_tied:
-            _apply_tied_fast(model, tied_info, params_cache)
+        # Extract results
+        success = sherpa_result[0]
+        fitted_params = sherpa_result[1]
+        fun = sherpa_result[2]
+        message = sherpa_result[3] if len(sherpa_result) > 3 else ''
         
-        # Wrap Sherpa result in scipy.optimize.OptimizeResult-like structure
-        from scipy.optimize import OptimizeResult
+        # Extract detailed info
         sherpa_info = sherpa_result[4] if len(sherpa_result) > 4 and isinstance(sherpa_result[4], dict) else {}
         nfev = sherpa_info.get('nfev', None)
+        native_cov = sherpa_info.get('covar')
         
+        # Create scipy.optimize.OptimizeResult-like structure for compatibility
+        from scipy.optimize import OptimizeResult
         result = OptimizeResult(
-            x=sherpa_result[1],
-            success=sherpa_result[0],
-            fun=sherpa_result[2],
+            x=fitted_params,
+            success=success,
+            fun=fun,
             nfev=nfev,
-            message=sherpa_result[3] if len(sherpa_result) > 3 else '',
+            message=message,
             # Store all MINPACK info from Sherpa
             info=sherpa_info.get('info'),  # MINPACK info flag (same as scipy)
             num_parallel_map=sherpa_info.get('num_parallel_map'),  # Sherpa-specific
-            covar=sherpa_info.get('covar')  # Native covariance from MINPACK
+            covar=native_cov  # Native covariance from MINPACK
         )
         
-        # Store fit info with standard keys matching scipy where applicable
-        self.fit_info['time'] = elapsed
-        self.fit_info['result'] = result
-        self.fit_info['success'] = result.success
-        self.fit_info['nfev'] = result.nfev
-        self.fit_info['ier'] = result.info  # MINPACK info flag (scipy uses 'ier')
-        
-        # Calculate covariance matrix if requested
-        if self.calc_uncertainties:
-            try:
-                # Try to extract covariance from Sherpa optimizer (native)
-                cov = result.covar  # Get from OptimizeResult
-                
-                # If native covariance available, use it
-                if cov is not None:
-                    # Sherpa returns covariance for free parameters only (matches fit_indices)
-                    # Store directly in fit_info
-                    self.fit_info['param_cov'] = cov
-                elif self.force_numerical_covariance:
-                    # Fallback to numerical estimation (expensive, only if forced)
-                    if self.verbose:
-                        print("⚠️  WARNING: Sherpa optimizer did not provide native covariance matrix!")
-                        print("⚠️  FALLING BACK to expensive numerical Hessian estimation (O(n²) evaluations).")
-                        print("⚠️  Only Levenberg-Marquardt provides native covariance. Use SherpaLevMar for efficiency.")
-                    cov_matrix = self.estimate_covariance(model, x, y, weights=weights)
-                    self.fit_info['param_cov'] = cov_matrix
-                else:
-                    if self.verbose:
-                        print("⚠️  WARNING: Sherpa optimizer did not provide native covariance.")
-                        print("⚠️  Set force_numerical_covariance=True to enable expensive fallback.")
-            except Exception as e:
-                if self.verbose:
-                    print(f"Warning: Failed to calculate covariance: {e}")
-        
-        if self.verbose:
-            status = "✓ converged" if self.fit_info['success'] else "✗ FAILED"
-            print(f"SherpaFitter({self.method}): {self.fit_info['time']*1000:.1f}ms, nfev={self.fit_info['nfev']}, {status}")
-        
-        return model
+        return {
+            'fitted_params': fitted_params,
+            'success': success,
+            'nfev': nfev,
+            'message': message,
+            'native_result': result,
+            'native_cov': native_cov
+        }
 
 
-class SherpaLevMar(SherpaFitter):
+class SherpaLM(SherpaFitter):
     """
     Sherpa Levenberg-Marquardt optimizer (fast, local).
     
@@ -262,13 +236,14 @@ class SherpaLevMar(SherpaFitter):
     - verbose : int - Verbosity level {0, 1, 2} (default: 0)
     
     Example:
-        fitter = SherpaLevMar(calc_uncertainties=True, verbose=True)
+        fitter = SherpaLM(calc_uncertainties=True, verbose=True)
         result = fitter(model, x, y, maxfev=10000, ftol=1e-10)
     """
     def __init__(self, **kwargs):
         super().__init__(method='levmar', **kwargs)
 
-class SherpaNelderMead(SherpaFitter):
+
+class SherpaSimplex(SherpaFitter):
     """
     Sherpa Nelder-Mead simplex optimizer (derivative-free, robust).
     
@@ -282,11 +257,12 @@ class SherpaNelderMead(SherpaFitter):
     - verbose : int - Verbosity level {0, 1, 2} (default: 0)
     
     Example:
-        fitter = SherpaNelderMead(verbose=True)
+        fitter = SherpaSimplex(verbose=True)
         result = fitter(model, x, y, maxfev=50000, ftol=1e-6)
     """
     def __init__(self, **kwargs):
         super().__init__(method='neldermead', **kwargs)
+
 
 class SherpaMonCar(SherpaFitter):
     """

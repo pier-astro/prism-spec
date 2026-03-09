@@ -6,7 +6,7 @@ refitting synthetic datasets generated from the best-fit model.
 
 Usage
 -----
-    from fantasylab.fitting import AstropyTRF
+    from prism.modeling.fitting import AstropyTRF
     from fantasylab.uncertainty.resample import bootstrap, attach
     
     # Fit model
@@ -172,7 +172,7 @@ def _prepare_noise_and_weights(y, yerr, weights, statistic):
     if np.any(~np.isfinite(yerr)):
         raise ResampleError("yerr contains non-finite values.")
 
-    # Always pass weights to fitter (native Astropy + FantasyFitters).
+    # Always pass weights to fitter (native Astropy + FitterBases).
     if weights is None:
         if stat == 'poisson':
             weights = 1.0 / np.maximum(np.abs(y), 1e-10)
@@ -239,7 +239,7 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
     Notes
     -----
     Weights are always passed to the fitter (derived from yerr when needed)
-    so both native Astropy fitters and FantasyFitters receive a consistent
+    so both native Astropy fitters and FitterBases receive a consistent
     interface.
         
     Returns
@@ -265,7 +265,7 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
     
     Examples
     --------
-    >>> from fantasylab.fitting import AstropyTRF
+    >>> from prism.modeling.fitting import AstropyTRF
     >>> from fantasylab.uncertainty.resample import bootstrap, attach
     >>> 
     >>> fitter = AstropyTRF()

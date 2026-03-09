@@ -16,7 +16,7 @@ Usage
 -----
 **Covariance-based (fast):**
 
-    from fantasylab.fitting import AstropyTRF
+    from prism.modeling.fitting import AstropyTRF
     from fantasylab.uncertainty import covariance
     
     fitter = AstropyTRF(calc_uncertainties=True)

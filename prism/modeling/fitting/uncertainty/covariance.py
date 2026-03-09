@@ -12,7 +12,7 @@ Usage
 -----
 With FantasyLab fitters:
 
-    from fantasylab.fitting import AstropyTRF
+    from prism.modeling.fitting import AstropyTRF
     from fantasylab.uncertainty.covariance import attach
     
     fitter = AstropyTRF(calc_uncertainties=True)
@@ -65,7 +65,7 @@ def covar(fitter):
     
     Parameters
     ----------
-    fitter : FantasyFitter or astropy fitter
+    fitter : FitterBase or astropy fitter
         Fitter instance with fit_info dictionary populated after fitting.
         
     Returns
@@ -184,7 +184,7 @@ def attach(model, fitter, verbose=False):
     ----------
     model : astropy.modeling.Model
         Fitted model whose parameters will receive .std attributes.
-    fitter : FantasyFitter
+    fitter : FitterBase
         Fitter instance with fit_info containing covariance matrix.
     verbose : bool, optional
         Print diagnostic information. Default is False.

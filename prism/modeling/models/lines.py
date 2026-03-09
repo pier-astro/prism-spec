@@ -19,10 +19,29 @@ script_dir = os.path.dirname(__file__) # get the directory of the current script
 resource_path = os.path.join(script_dir, "..", "..", "..", "resources", "lines")
 csv_lines_path = resource_path
 
+# Global wavelength range for filtering
+_wmin = 0.0
+_wmax = np.inf
+
+def set_wavelength_range(wmin=None, wmax=None):
+    """
+    Sets the global wavelength range for line filtering.
+    """
+    global _wmin, _wmax
+    if wmin is not None:
+        _wmin = wmin
+    if wmax is not None:
+        _wmax = wmax
+    print(f"Wavelength range set to: [{_wmin}, {_wmax}]")
+
 def setup_local_lines(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
     """
     Initializes the lines by reading the csv files from the input folder and filtering them based on the wavelength range.
+    Also updates the global wavelength range.
     """
+    # Sync global limits with provided ones
+    set_wavelength_range(wmin=wmin, wmax=wmax)
+
     if not os.path.exists(dirpath):
         os.makedirs(dirpath)
         is_created = True
@@ -447,20 +466,31 @@ class LineGroupBase(Fittable1DModel):
 
     @classmethod
     def from_templates(cls, df, name=None, bounds=None, amplitude=None, instfwhm=0.0, **init_kwargs):
-        # Identify unique template names
-        templates = pd.unique(df['name'])
+        # Filter based on global wavelength range
+        if 'pos' in df.columns:
+            df = df[(df.pos >= _wmin) & (df.pos <= _wmax)]
         
-        # Generate pythonic parameter names
+        if df.empty:
+            raise ValueError(f"No lines found in the range [{_wmin}, {_wmax}]")
+
+        templates = pd.unique(df['name'])
+
         _raw_param_names = [f"amp_{_clean_name(tmpl)}" for tmpl in templates]
         param_names = _make_unique(_raw_param_names)
         n_templates = len(templates)
-        
-        # Handle initial values for amplitudes
+
+        # Pre-cache per-template positions and weights as numpy arrays
+        _tmpl_positions = []
+        _tmpl_weights = []
+        for tmpl in templates:
+            df_tmpl = df[df['name'] == tmpl]
+            _tmpl_positions.append(df_tmpl['pos'].values)
+            _tmpl_weights.append(df_tmpl['weight'].values)
+
         for pname in param_names:
             if amplitude is not None and pname not in init_kwargs:
                 init_kwargs[pname] = amplitude
 
-        # Handle bounds for amplitudes
         bounds = dict(bounds) if bounds else {}
         amp_bounds = bounds.pop('amplitude', None)
         param_bounds = {}
@@ -481,58 +511,47 @@ class LineGroupBase(Fittable1DModel):
         def evaluate(self, x, *args):
             amplitudes = args[:n_templates]
             shared = args[n_templates:]
-            
+
             x_arr = np.atleast_1d(x)
             total = np.zeros_like(x_arr, dtype=float)
-            x_col = x_arr[:, np.newaxis]
-            
-            for i, tmpl in enumerate(templates):
-                df_tmpl = df[df['name'] == tmpl]
-                positions = df_tmpl['pos'].values
-                weights = df_tmpl['weight'].values
-                
-                pos_row = positions[np.newaxis, :]
-                wt_row = weights[np.newaxis, :]
-                
-                profile_args = cls._profile_args(pos_row, amplitudes[i], wt_row, *shared, instfwhm=self.instfwhm)
-                components = cls._profile_func(x_col, *profile_args)
-                total += np.sum(components, axis=1)
-                
+            instfwhm_val = self.instfwhm
+
+            for i in range(n_templates):
+                positions = _tmpl_positions[i]
+                weights = _tmpl_weights[i]
+                for j in range(len(positions)):
+                    profile_args = cls._single_profile_args(
+                        positions[j], amplitudes[i], weights[j], *shared, instfwhm=instfwhm_val)
+                    total += cls._profile_func(x_arr, *profile_args)
+
             if np.ndim(x) == 0:
                 return total[0]
             return total
-        
+
         def fit_deriv(self, x, *args):
             amplitudes = args[:n_templates]
             shared = args[n_templates:]
-            
+
             x_arr = np.atleast_1d(x)
             n_params = len(args)
             n_x = len(x_arr)
             grad = np.zeros((n_params, n_x))
-            
             d_shared = [np.zeros(n_x) for _ in shared]
-            x_col = x_arr[:, np.newaxis]
-            
-            for i, tmpl in enumerate(templates):
-                df_tmpl = df[df['name'] == tmpl]
-                positions = df_tmpl['pos'].values
-                weights = df_tmpl['weight'].values
-                
-                pos_row = positions[np.newaxis, :]
-                wt_row = weights[np.newaxis, :]
-                
-                derivs = cls._profile_deriv_func(x_col, pos_row, amplitudes[i], wt_row, *shared, instfwhm=self.instfwhm)
-                
-                d_amp_tmpl = np.sum(derivs[1] * wt_row, axis=1)
-                grad[i] = d_amp_tmpl
-                
-                for j, d in enumerate(derivs[2:]):
-                    d_shared[j] += np.sum(d, axis=1)
-            
+            instfwhm_val = self.instfwhm
+
+            for i in range(n_templates):
+                positions = _tmpl_positions[i]
+                weights = _tmpl_weights[i]
+                for j in range(len(positions)):
+                    derivs = cls._single_profile_deriv(
+                        x_arr, positions[j], amplitudes[i], weights[j], *shared, instfwhm=instfwhm_val)
+                    grad[i] += derivs[1] * weights[j]
+                    for k, d in enumerate(derivs[2:]):
+                        d_shared[k] += d
+
             for j, d in enumerate(d_shared):
                 grad[n_templates + j] = d
-                
+
             return list(grad)
 
         def __init__(self, *args, instfwhm=0.0, **kwargs):
@@ -550,6 +569,8 @@ class LineGroupBase(Fittable1DModel):
             '_templates': templates,
             '_n_templates': n_templates,
             '_param_names_list': param_names,
+            '_tmpl_positions': _tmpl_positions,
+            '_tmpl_weights': _tmpl_weights,
         })
         if name is not None:
             init_kwargs['name'] = name
@@ -685,7 +706,7 @@ class GaussianLines(LineGroupBase):
     _profile_func = staticmethod(profiles.gaussian)
     
     @staticmethod
-    def _profile_args(pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
+    def _single_profile_args(pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
@@ -700,7 +721,7 @@ class GaussianLines(LineGroupBase):
         return (amplitude_eff, center, sigma_eff)
     
     @staticmethod
-    def _profile_deriv_func(x, pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
+    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
@@ -759,7 +780,7 @@ class LorentzianLines(LineGroupBase):
     _profile_func = staticmethod(profiles.lorentzian)
     
     @staticmethod
-    def _profile_args(pos, amp_template, weight, offset, fwhm, redshift):
+    def _single_profile_args(pos, amp_template, weight, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         gamma = fwhm_A / 2.0
@@ -767,7 +788,7 @@ class LorentzianLines(LineGroupBase):
         return (amplitude_eff, center, gamma)
 
     @staticmethod
-    def _profile_deriv_func(x, pos, amp_template, weight, offset, fwhm, redshift):
+    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         gamma = fwhm_A / 2.0
@@ -805,7 +826,7 @@ class VoigtLines(LineGroupBase):
     _profile_func = staticmethod(profiles.voigt)
     
     @staticmethod
-    def _profile_args(pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
+    def _single_profile_args(pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
@@ -822,7 +843,7 @@ class VoigtLines(LineGroupBase):
         return (amplitude_eff, center, sigma_eff, gamma)
 
     @staticmethod
-    def _profile_deriv_func(x, pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
+    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center

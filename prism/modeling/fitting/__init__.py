@@ -1,13 +1,13 @@
 
-from .fitting import *
-from .astropy_fitter import *
-from .scipy_fitter import *
-from .sherpa_fitter import *
-from .fantasy_fitter import *
+from .base import *
+from .astrofit import *  
+from .scipyfit import *
+from .sherpafit import *
+from .lmfit import *
 
 __all__ = []
-__all__.extend(fitting.__all__)
-__all__.extend(astropy_fitter.__all__)
-__all__.extend(scipy_fitter.__all__)
-__all__.extend(sherpa_fitter.__all__)
-__all__.extend(fantasy_fitter.__all__)
+__all__.extend(base.__all__)
+__all__.extend(astrofit.__all__)
+__all__.extend(scipyfit.__all__)
+__all__.extend(sherpafit.__all__)
+__all__.extend(lmfit.__all__)
