@@ -53,8 +53,11 @@ def setup_local_lines(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
     if overwrite or is_created:
         for files in glob.glob(resource_path + "/*.csv"):
             df = pd.read_csv(files)
-            if not {'name', 'pos', 'weight'}.issubset(df.columns):
-                raise ValueError(f"CSV format not recognized in {files}. Required columns: name, pos, weight.")
+            if not {'name', 'pos'}.issubset(df.columns):
+                raise ValueError(f"CSV format not recognized in {files}. Required columns: name, pos.")
+            if 'weight' not in df.columns:
+                df['weight'] = 1.0
+                df['name'] = _make_unique(df['name'])
             df = df[df.pos > wmin]
             df = df[df.pos < wmax]
             name = os.path.join(dirpath, Path(files).name)
@@ -488,8 +491,11 @@ class LineGroupBase(Fittable1DModel):
         for f in csv_files:
             path = f if os.path.isabs(f) else os.path.join(dirpath, f)
             df_curr = pd.read_csv(path)
-            if not {'name', 'pos', 'weight'}.issubset(df_curr.columns):
-                raise ValueError(f"CSV format not recognized in {path}. Required columns: name, pos, weight.")
+            if not {'name', 'pos'}.issubset(df_curr.columns):
+                raise ValueError(f"CSV format not recognized in {path}. Required columns: name, pos.")
+            if 'weight' not in df_curr.columns:
+                df_curr['weight'] = 1.0
+                df_curr['name'] = _make_unique(df_curr['name'])
             dfs.append(df_curr)
             
         df = pd.concat(dfs, ignore_index=True)
@@ -504,6 +510,7 @@ class LineGroupBase(Fittable1DModel):
         pos = np.atleast_1d(pos)
         if weights is None:
             weights = np.ones_like(pos)
+            names = _make_unique(names)
         else:
             weights = np.atleast_1d(weights)
             
