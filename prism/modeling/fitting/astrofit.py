@@ -49,10 +49,12 @@ class AstroFitter(FitterBase):
     _no_bounds_methods = {'levmar', 'simplex'}
     _no_uncertainties_methods = {'simplex'}
     
-    def __init__(self, method='TRF', calc_uncertainties=False, force_numerical_covariance=False, verbose=False):
+    def __init__(self, method='TRF', calc_uncertainties=False, force_numerical_covariance=False,
+                 verbose=False, filter_non_finite=False):
         super().__init__(calc_uncertainties=calc_uncertainties,
                         force_numerical_covariance=force_numerical_covariance,
-                        verbose=verbose)
+                        verbose=verbose,
+                        filter_non_finite=filter_non_finite)
         
         key = method.lower()
         if key not in self._methods:

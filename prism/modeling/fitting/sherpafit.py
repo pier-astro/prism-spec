@@ -5,7 +5,6 @@ This module provides wrappers around Sherpa optimizers with C++-backed statistic
 and standardized interfaces.
 """
 
-import warnings
 import numpy as np
 from .base import FitterBase, _apply_tied_fast
 
@@ -59,13 +58,16 @@ class SherpaFitter(FitterBase):
         Calculate parameter uncertainties (default: False).
     """
     
-    def __init__(self, method='levmar', calc_uncertainties=False, force_numerical_covariance=False, verbose=False):
+    def __init__(self, method='levmar', calc_uncertainties=False,
+                 force_numerical_covariance=False, verbose=False,
+                 filter_non_finite=False):
         if not HAS_SHERPA:
             raise ImportError("Sherpa is not installed. Install with: pip install sherpa")
         
         super().__init__(calc_uncertainties=calc_uncertainties, 
                          force_numerical_covariance=force_numerical_covariance, 
-                         verbose=verbose)
+                         verbose=verbose,
+                         filter_non_finite=filter_non_finite)
         self.method = method.lower()
         
         if self.method == 'levmar':

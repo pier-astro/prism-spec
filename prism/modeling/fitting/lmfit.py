@@ -5,9 +5,7 @@ This module implements scipy's leastsq (classic Levenberg-Marquardt) with parame
 transformations to handle bounds. Provides native covariance extraction from the LM algorithm.
 """
 
-import time
 import numpy as np
-import warnings
 from scipy.optimize import leastsq
 from numpy.linalg import LinAlgError
 from .base import FitterBase, _apply_tied_fast
@@ -67,11 +65,21 @@ class LMFitter(FitterBase):
     - Parameter transformations add slight overhead (~1.6x vs unbounded LM)
     """
     
-    def __init__(self, calc_uncertainties=False, force_numerical_covariance=False, verbose=False, **kwargs):
+    def __init__(self, calc_uncertainties=False, force_numerical_covariance=False,
+                 verbose=False, filter_non_finite=False, **kwargs):
         super().__init__(calc_uncertainties=calc_uncertainties,
                         force_numerical_covariance=force_numerical_covariance,
-                        verbose=verbose)
+                        verbose=verbose,
+                        filter_non_finite=filter_non_finite)
         self.leastsq_kwargs = kwargs
+
+    @staticmethod
+    def _normalize_bound_pair(bounds):
+        """Convert infinite bounds back to the unbounded representation used internally."""
+        lower, upper = bounds if isinstance(bounds, (list, tuple, np.ndarray)) else (bounds[0], bounds[1])
+        lower = None if lower is None or np.isneginf(lower) else lower
+        upper = None if upper is None or np.isposinf(upper) else upper
+        return lower, upper
 
     def _transform_params(self, external_values, bounds_list):
         """
@@ -83,7 +91,7 @@ class LMFitter(FitterBase):
         self._param_transforms = {}
         
         for i, (value, bounds) in enumerate(zip(external_values, bounds_list)):
-            lower, upper = bounds if isinstance(bounds, (list, tuple)) else (bounds[0], bounds[1])
+            lower, upper = self._normalize_bound_pair(bounds)
             
             if lower is None and upper is None:
                 # No bounds: direct mapping
@@ -316,7 +324,7 @@ class LMFitter(FitterBase):
         
         # Compute covariance in external space
         native_cov = None
-        if self.calc_uncertainties and cov_internal is not None and success:
+        if cov_internal is not None and success:
             try:
                 # Scale by reduced chi-square (following lmfit convention)
                 resid_final = residuals(xopt_internal)

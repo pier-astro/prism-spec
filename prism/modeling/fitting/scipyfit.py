@@ -38,10 +38,12 @@ class ScipyFitter(FitterBase):
         Print diagnostic information.
     """
     
-    def __init__(self, method='trf', calc_uncertainties=False, force_numerical_covariance=False, verbose=False):
-        super().__init__(calc_uncertainties=calc_uncertainties, 
-                        force_numerical_covariance=force_numerical_covariance, 
-                        verbose=verbose)
+    def __init__(self, method='trf', calc_uncertainties=False, force_numerical_covariance=False,
+                 verbose=False, filter_non_finite=False):
+        super().__init__(calc_uncertainties=calc_uncertainties,
+                        force_numerical_covariance=force_numerical_covariance,
+                        verbose=verbose,
+                        filter_non_finite=filter_non_finite)
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
         self.method = method

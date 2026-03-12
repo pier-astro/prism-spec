@@ -31,8 +31,8 @@ class Cube:
     is_var : bool, optional
         Flag indicating if the source error data was natively variance (True) or standard deviation (False).
     """
-    def __init__(self, data, wave=None, err=None, var=None, mask=None, wcs=None, 
-                 header=None, unit=None, is_var=None):
+    def __init__(self, data, wave=None, err=None, var=None, mask=None, wcs=None,
+                 header=None, unit=None, wave_unit=None, is_var=None):
         data = np.asarray(data)
         
         # Determine shapes
@@ -70,6 +70,10 @@ class Cube:
             self.unit = u.Unit(unit)
         else:
             self.unit = unit
+        if isinstance(wave_unit, str):
+            self.wave_unit = u.Unit(wave_unit)
+        else:
+            self.wave_unit = wave_unit if wave_unit is not None else u.AA
         
         # State tracking
         self._zcorrected = False
@@ -94,6 +98,23 @@ class Cube:
     def wave(self):
         """Return the wavelength array."""
         return self._wave
+
+    def get_masked(self):
+        """
+        Return wavelength-consistent (wave, data, err) arrays with masked channels removed.
+
+        A wavelength channel is excluded if **any** spaxel is masked at that channel,
+        ensuring all returned arrays are free of NaN values and have matching shapes.
+
+        Returns
+        -------
+        wave : ndarray, shape (N_valid,)
+        data : ndarray, shape (N_valid, ...) or (N_valid, N_y, N_x)
+        err  : ndarray, same shape as data
+        """
+        spatial_axes = tuple(range(1, self.mask.ndim))
+        channel_valid = self.mask.all(axis=spatial_axes)  # (N_wave,)
+        return self._wave[channel_valid], self._data[channel_valid], self._err[channel_valid]
 
     @classmethod
     def from_fits(cls, filename, ext_data=None, ext_err=None, ext_var=None, ext_mask=None,
@@ -191,9 +212,9 @@ class Cube:
                         pix_coords[:, wcs.naxis-1] = np.arange(n_wave)
                         world_coords = wcs.all_pix2world(pix_coords, 0)
                         wave = world_coords[:, wcs.naxis-1]
-                        
-                        if 'CUNIT3' in header_wcs and header_wcs['CUNIT3'].strip() == 'm':
-                            wave *= 1e10 # m to Angstrom
+                        spectral_cunit = wcs.wcs.cunit[wcs.naxis - 1]
+                        if spectral_cunit:
+                            wave = (wave * u.Unit(spectral_cunit.to_string())).to(u.AA).value
 
             # --- 6. Load Error/Variance ---
             err = None
@@ -228,8 +249,17 @@ class Cube:
                         mask = mask_data.astype(bool)
                 except Exception as e:
                     warnings.warn(f"Failed to load mask from extension {ext_mask}: {e}")
-                    
-        return cls(data=data, wave=wave, err=err, var=var, mask=mask, wcs=wcs, header=headers, unit=unit)
+
+            # --- 8. Finite mask fallback ---
+            # Only applied when no instrument mask was available.
+            if mask is None:
+                mask = np.isfinite(data)
+                if err is not None:
+                    mask &= np.isfinite(err)
+                elif var is not None:
+                    mask &= np.isfinite(var)
+
+        return cls(data=data, wave=wave, err=err, var=var, mask=mask, wcs=wcs, header=headers, unit=unit, wave_unit=u.AA)
 
     def zcorrect(self, redshift=None):
         """Correct the cube spectra for redshift."""

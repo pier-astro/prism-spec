@@ -1,6 +1,7 @@
 
+from . import astrofit, base, lmfit, scipyfit, sherpafit
 from .base import *
-from .astrofit import *  
+from .astrofit import *
 from .scipyfit import *
 from .sherpafit import *
 from .lmfit import *

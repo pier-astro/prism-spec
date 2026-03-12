@@ -453,8 +453,10 @@ def _clean_name(name):
     name = str(name).strip()
     # Remove brackets and common non-pythonic characters
     name = re.sub(r'[\[\]<>]', '', name)
-    # Replace spaces and dashes with underscores
-    name = re.sub(r'[\s\-]+', '_', name)
+    # Remove all whitespace
+    name = re.sub(r'\s+', '', name)
+    # Replace dashes with underscores
+    name = name.replace('-', '_')
     return name.lower()
 
 def _make_unique(names):
