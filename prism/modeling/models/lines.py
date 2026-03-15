@@ -215,6 +215,8 @@ class GaussianLine(LineModelBase):
     offset = Parameter(default=0.0)
     fwhm = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    
+    _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm': u.km/u.s}
 
     def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
@@ -300,6 +302,8 @@ class LorentzianLine(LineModelBase):
     offset = Parameter(default=0.0)
     fwhm = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    
+    _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm': u.km/u.s}
 
     @staticmethod
     def evaluate(x, amplitude, position, offset, fwhm, redshift):
@@ -354,6 +358,8 @@ class VoigtLine(LineModelBase):
     fwhm_G = Parameter(default=1000.0)
     fwhm_L = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    
+    _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm_G': u.km/u.s, 'fwhm_L': u.km/u.s}
 
     def evaluate(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
@@ -558,6 +564,7 @@ class LineGroupBase(Fittable1DModel):
             if k not in param_bounds:
                 param_bounds[k] = v
 
+        shared_units = getattr(cls, '_shared_units', {})
         params = {pname: Parameter(default=1.0) for pname in param_names}
         for pname, default in cls._shared_params.items():
             is_fixed = True if pname == 'redshift' else False
@@ -758,6 +765,7 @@ class LineGroupBase(Fittable1DModel):
 
 class GaussianLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
+    _shared_units = {'offset': u.km/u.s, 'fwhm': u.km/u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.gaussian)
     
     @staticmethod
@@ -838,6 +846,7 @@ class GaussianLines(LineGroupBase):
 
 class LorentzianLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
+    _shared_units = {'offset': u.km/u.s, 'fwhm': u.km/u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.lorentzian)
     
     @staticmethod
@@ -884,6 +893,7 @@ class LorentzianLines(LineGroupBase):
 
 class VoigtLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm_G': 1000.0, 'fwhm_L': 1000.0, 'redshift': 0.0}
+    _shared_units = {'offset': u.km/u.s, 'fwhm_G': u.km/u.s, 'fwhm_L': u.km/u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
     
     @staticmethod

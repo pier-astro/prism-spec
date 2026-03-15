@@ -27,9 +27,8 @@ Usage
 
 import numpy as np
 import warnings
-import joblib
+from multiprocess import Pool
 from tqdm.auto import tqdm
-from copy import deepcopy
 
 __all__ = [
     'bootstrap',
@@ -44,7 +43,17 @@ class ResampleError(Exception):
     pass
 
 
-def _bootstrap_worker(model, fitter, x, y_model, yerr, weights, statistic, fitter_kwargs, seed):
+def _is_batched_result_like(model) -> bool:
+    """Return True for MultiFit-like containers (batched spectra/cubes)."""
+    return (
+        hasattr(model, 'n_spaxels')
+        and hasattr(model, 'get_model')
+        and hasattr(model, 'param_names')
+    )
+
+
+def _bootstrap_worker(task_index, model, fitter, x, y_model, yerr, weights,
+                      statistic, fitter_kwargs, seed):
     """Worker function for parallel bootstrap."""
     np.random.seed(seed)
     if statistic.lower() == 'gauss':
@@ -58,9 +67,9 @@ def _bootstrap_worker(model, fitter, x, y_model, yerr, weights, statistic, fitte
         fitted_synth = fitter(model_copy, x, y_synth, weights=weights, **fitter_kwargs)
         from astropy.modeling.fitting import model_to_fit_params
         fitted_params, _, _ = model_to_fit_params(fitted_synth)
-        return fitted_params
-    except Exception:
-        return None
+        return task_index, fitted_params, None
+    except Exception as exc:
+        return task_index, None, str(exc)
 
 
 
@@ -188,7 +197,7 @@ def _prepare_noise_and_weights(y, yerr, weights, statistic):
 
 
 def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, statistic='gauss',
-             fitter_kwargs=None, seed=None, verbose=True, njobs=1):
+             fitter_kwargs=None, seed=None, verbose=True, nproc=1):
     """
     Parametric bootstrap uncertainty estimation.
     
@@ -232,9 +241,8 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
         Random seed for reproducibility
     verbose : bool
         Show progress bar (default: True)
-    njobs : int, optional
-        Number of parallel jobs to run. Default: 1 (serial).
-        If > 1, uses joblib for parallel execution.
+    nproc : int, optional
+        Number of worker processes to run. Default: 1 (serial).
 
     Notes
     -----
@@ -272,13 +280,19 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
     >>> fitted = fitter(model, x, y, yerr=yerr, maxiter=10000)
     >>> 
     >>> # Bootstrap with Gaussian noise
-    >>> samples = bootstrap(fitted, fitter, x, y, yerr, n_samples=1000, njobs=4)
+    >>> samples = bootstrap(fitted, fitter, x, y, yerr, n_samples=1000, nproc=4)
     >>> attach(fitted, samples)
     >>> 
     >>> print(f"Amplitude: {fitted.amplitude_0.value:.3f} ± {fitted.amplitude_0.std:.3f}")
     """
     from astropy.modeling.fitting import model_to_fit_params
-    
+
+    if _is_batched_result_like(model):
+        raise NotImplementedError(
+            "Resampling for batched spectra/cubes is not implemented yet. "
+            "Use ad-hoc single-spectrum fitting for bootstrap uncertainties."
+        )
+
     if statistic.lower() not in ['gauss', 'poisson']:
         raise ResampleError(
             f"Unknown statistic '{statistic}'. Use 'gauss' or 'poisson'."
@@ -322,30 +336,45 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
     n_failed = 0
     
     # Parallel execution
-    if njobs > 1:
+    if nproc > 1:
         # Generate seeds for reproducibility in parallel
         seeds = np.random.randint(0, 2**32 - 1, size=n_samples)
-        
-        # Use joblib for parallel execution
-        # return_as='generator' allows tqdm to update as tasks complete
-        with joblib.Parallel(n_jobs=njobs, return_as='generator') as parallel:
-            results_gen = parallel(
-                joblib.delayed(_bootstrap_worker)(
-                    model, fitter, x, y_model, yerr, weights, statistic, fitter_kwargs, s
-                ) for s in seeds
-            )
-            
-            # Collect results with progress bar
-            for i, fitted_params in enumerate(tqdm(results_gen, total=n_samples, desc="Bootstrap (Parallel)", disable=not verbose)):
+
+        tasks = [
+            (i, model, fitter, x, y_model, yerr, weights, statistic, fitter_kwargs, int(s))
+            for i, s in enumerate(seeds)
+        ]
+
+        with Pool(processes=nproc) as pool:
+            iterator = pool.imap_unordered(_bootstrap_worker_star, tasks)
+            pbar = tqdm(total=n_samples, desc="Bootstrap (Parallel)", disable=not verbose)
+            n_reported_failures = 0
+
+            for task_index, fitted_params, error_text in iterator:
+                pbar.update(1)
                 if fitted_params is not None:
-                    for j, (param_name, param_value) in enumerate(zip(param_names, fitted_params)):
-                        param_samples[param_name][i] = param_value
+                    for param_name, param_value in zip(param_names, fitted_params):
+                        param_samples[param_name][task_index] = param_value
                     n_success += 1
                 else:
                     # Fit failed - use NaN
                     for param_name in param_names:
-                        param_samples[param_name][i] = np.nan
+                        param_samples[param_name][task_index] = np.nan
                     n_failed += 1
+                    if verbose and n_reported_failures < 5:
+                        warnings.warn(
+                            f"Bootstrap iteration {task_index} failed: {error_text}",
+                            RuntimeWarning
+                        )
+                        n_reported_failures += 1
+
+                if verbose:
+                    pbar.set_postfix({
+                        'success': n_success,
+                        'failed': n_failed
+                    })
+
+            pbar.close()
     else:
         # Serial execution
         pbar = tqdm(range(n_samples), desc="Bootstrap", disable=not verbose)
@@ -414,6 +443,11 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000, stat
     return param_samples
 
 
+def _bootstrap_worker_star(args):
+    """Tuple-unpacking wrapper for multiprocessing pool workers."""
+    return _bootstrap_worker(*args)
+
+
 def attach(model, samples, confidence=68, percentiles=None, verbose=False, set_values=True):
     """
     Attach bootstrap uncertainties to model parameters.
@@ -455,6 +489,12 @@ def attach(model, samples, confidence=68, percentiles=None, verbose=False, set_v
     >>> print(f"{fitted.amplitude_0.value:.3f} [{fitted.amplitude_0.lolim:.3f}, {fitted.amplitude_0.uplim:.3f}]")
     >>> print(f"Median: {fitted.amplitude_0.median:.3f}")
     """
+    if _is_batched_result_like(model):
+        raise NotImplementedError(
+            "Attaching resampling limits to batched spectra/cubes is not implemented yet. "
+            "Use ad-hoc single-spectrum fitting for uncertainty attachment."
+        )
+
     if percentiles is None:
         percentiles = [16, 50, 84]
     
