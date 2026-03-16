@@ -5,6 +5,37 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import astropy.units as u
 
+
+def wcs_to_cd_matrix(header):
+    """
+    Convert WCS PC matrix + CDELT to the legacy CD matrix format (ESO convention).
+    Modifies the header in-place.
+    """
+    naxis = header.get('WCSAXES', 2)
+    has_pc = any(f'PC{i}_{j}' in header
+                 for i in range(1, naxis + 1) for j in range(1, naxis + 1))
+
+    if has_pc:
+        for i in range(1, naxis + 1):
+            cdelt = header.get(f'CDELT{i}', 1.0)
+            for j in range(1, naxis + 1):
+                pc_key = f'PC{i}_{j}'
+                if pc_key in header:
+                    header[f'CD{i}_{j}'] = header[pc_key] * cdelt
+                    del header[pc_key]
+        for i in range(1, naxis + 1):
+            if f'CDELT{i}' in header:
+                del header[f'CDELT{i}']
+    else:
+        # No PC matrix, convert CDELTi to CDi_i
+        for i in range(1, naxis + 1):
+            cdelt_key = f'CDELT{i}'
+            if cdelt_key in header:
+                header[f'CD{i}_{i}'] = header[cdelt_key]
+                del header[cdelt_key]
+    return header
+
+
 class Cube:
     """
     A lightweight, Astropy-backed container for 3D integral field spectroscopic data,
@@ -293,7 +324,7 @@ class Cube:
         self._err /= (1 + self.z)
         self._zcorrected = False
 
-    def write(self, filename, overwrite=False, save_err=True, save_mask=False, 
+    def write(self, filename, overwrite=False, err=True, mask=False, 
               cd_matrix=False, is_var=None, keep_keywords='default'):
         """Save the cube data to a FITS file. Masked values are set to np.nan."""
         from datetime import datetime
@@ -321,21 +352,7 @@ class Cube:
                 if 'CDELT3' in wcs_header:
                     wcs_header['CDELT3'] *= 1e10
 
-            # Convert PC matrix + CDELT to CD matrix for all 3 axes (ESO convention)
-            naxis = wcs_header.get('WCSAXES', 3)
-            has_pc = any(f'PC{i}_{j}' in wcs_header
-                         for i in range(1, naxis + 1) for j in range(1, naxis + 1))
-            if has_pc:
-                for i in range(1, naxis + 1):
-                    cdelt = wcs_header.get(f'CDELT{i}', 1.0)
-                    for j in range(1, naxis + 1):
-                        pc_key = f'PC{i}_{j}'
-                        if pc_key in wcs_header:
-                            wcs_header[f'CD{i}_{j}'] = wcs_header[pc_key] * cdelt
-                            del wcs_header[pc_key]
-                for i in range(1, naxis + 1):
-                    if f'CDELT{i}' in wcs_header:
-                        del wcs_header[f'CDELT{i}']
+            wcs_to_cd_matrix(wcs_header)
 
             # Explicitly zero the spatial–spectral cross-terms (ESO convention)
             for i, j in [(1, 3), (2, 3), (3, 1), (3, 2)]:
@@ -399,7 +416,7 @@ class Cube:
         hdus = [fits.PrimaryHDU(header=phdu_header)]
         hdus.append(fits.ImageHDU(data=out_data, header=ext_header, name='DATA'))
         
-        if save_err:
+        if err:
             out_err = self._err.copy().astype(np.float32)
             if self.mask is not None:
                 out_err[~self.mask] = np.nan
@@ -411,7 +428,7 @@ class Cube:
                 err_hdu = fits.ImageHDU(data=out_err, header=ext_header.copy(), name='ERR')
             hdus.append(err_hdu)
             
-        if save_mask and self.mask is not None:
+        if mask and self.mask is not None:
             mask_data = self.mask.astype(np.uint8)
             hdus.append(fits.ImageHDU(data=mask_data, header=wcs_header, name='DQ'))
             

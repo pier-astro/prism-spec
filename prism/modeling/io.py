@@ -79,23 +79,29 @@ def _model_hdu(yaml_str: str) -> fits.BinTableHDU:
     return hdu
 
 
-def _primary_hdu(wcs=None) -> fits.PrimaryHDU:
+def _primary_hdu() -> fits.PrimaryHDU:
     hdr = fits.Header()
     hdr['AUTHOR']  = 'prism-spec'
     hdr['DATE']    = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
     hdr['HISTORY'] = 'Created by prism-spec MultiFit I/O'
-    if wcs is not None:
-        hdr.update(wcs.to_header())
     return fits.PrimaryHDU(header=hdr)
 
 
-def _image_hdu(name: str, data: np.ndarray, unit=None) -> fits.ImageHDU:
+def _image_hdu(name: str, data: np.ndarray, unit=None, wcs=None, cd_matrix=False) -> fits.ImageHDU:
+    from prism.data.cube import wcs_to_cd_matrix
     hdr = fits.Header()
     if unit is not None:
         try:
             hdr['BUNIT'] = u.Unit(unit).to_string('fits')
         except Exception:
             hdr['BUNIT'] = str(unit)
+
+    if wcs is not None:
+        wcs_header = wcs.to_header()
+        if cd_matrix:
+            wcs_to_cd_matrix(wcs_header)
+        hdr.update(wcs_header)
+
     return fits.ImageHDU(data=np.asarray(data, dtype=np.float32), header=hdr, name=name)
 
 
@@ -228,8 +234,8 @@ install_model_io_methods()
 # ---------------------------------------------------------------------------
 
 def multifit_to_fits(result, filename: str, wcs=None, overwrite: bool = False,
-                     parfilter=None, std: bool = True, model: bool = True,
-                     **custom_exts):
+                     parfilter=None, std: bool = False, model: bool = True,
+                     cd_matrix: bool = False, **custom_exts):
     """
     Save a ``MultiFitResult`` to a multi-extension FITS file.
 
@@ -238,7 +244,7 @@ def multifit_to_fits(result, filename: str, wcs=None, overwrite: bool = False,
     result : MultiFitResult
     filename : str
     wcs : astropy.wcs.WCS, optional
-        Spatial WCS for cube results loaded into the PRIMARY header.
+        Spatial WCS for cube results loaded into each ImageHDU header.
     overwrite : bool
     parfilter : list of str, optional
         Export only these parameters. Omitting parameters raises a warning
@@ -247,6 +253,8 @@ def multifit_to_fits(result, filename: str, wcs=None, overwrite: bool = False,
         Also export parameter standard-deviation maps as ``<PARNAME>_ERR``.
     model : bool
         Serialize the template model into a ``MODEL_DEF`` extension.
+    cd_matrix : bool
+        If True, convert WCS PC matrix + CDELT to the legacy CD matrix format.
     **custom_exts
         Arbitrary extra extensions, e.g. ``CHISQ=chi2_array, DOF=dof_array``.
         Each value must be array-like and broadcastable to result.shape.
@@ -268,18 +276,18 @@ def multifit_to_fits(result, filename: str, wcs=None, overwrite: bool = False,
             )
         param_names = [p for p in param_names if p in parfilter]
 
-    hdus = [_primary_hdu(wcs)]
+    hdus = [_primary_hdu()]
 
     for pname in param_names:
         val  = result._param_array(pname)
         unit = result.get_unit(pname)
-        hdus.append(_image_hdu(_ext_name(pname), val, unit))
+        hdus.append(_image_hdu(_ext_name(pname), val, unit, wcs=wcs, cd_matrix=cd_matrix))
         if std:
             err = result._std_array(pname)
-            hdus.append(_image_hdu(_ext_name(pname) + EXT_ERR_SUFFIX, err, unit))
+            hdus.append(_image_hdu(_ext_name(pname) + EXT_ERR_SUFFIX, err, unit, wcs=wcs, cd_matrix=cd_matrix))
 
     for ext_name, data in custom_exts.items():
-        hdus.append(_image_hdu(ext_name.upper(), np.asarray(data)))
+        hdus.append(_image_hdu(ext_name.upper(), np.asarray(data), wcs=wcs, cd_matrix=cd_matrix))
 
     if model:
         yaml_str = _serialize_model(result._template_model)
