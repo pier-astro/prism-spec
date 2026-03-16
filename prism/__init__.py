@@ -4,5 +4,4 @@ from ._version import __version__
 from . import data
 from . import modeling
 from . import processing
-from . import display
 from . import utils

@@ -1,3 +1,4 @@
+- Add the minimal display module and verify how feasible is to add the html `__repr__` to the model object directly to keep things lightweight
 - Verify how feasible is to add the .link attribute to the Astropy model calss (as we are doing with .save) to easily apply the tie function
 - Verify how feasible is to minimally extend the Compound model to support Convolved model and analytic derivatives in astropy
 - Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
