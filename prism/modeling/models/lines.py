@@ -4,13 +4,13 @@ import pandas as pd
 import glob
 from pathlib import Path
 import re
+from scipy.interpolate import CubicSpline
 
 import astropy.units as u
 import astropy.constants as const
 from astropy.modeling import Fittable1DModel, Parameter
 
 from . import profiles
-import pandas as pd
 
 c_kms = const.c.to(u.km/u.s).value # Speed of light in km/s
 sigma2fwhm = 2 * np.sqrt(2 * np.log(2))
@@ -67,34 +67,6 @@ def setup_local_lines(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
 # MODELS
 # ------
 
-
-def _instfwhm_val(instfwhm, center):
-    if callable(instfwhm):
-        res = instfwhm(center)
-        if isinstance(res, tuple):
-            return res[0]
-        return res
-    return float(instfwhm)
-
-def _instfwhm_val_and_deriv(instfwhm, center, eps=1.0):
-    if callable(instfwhm):
-        res = instfwhm(center)
-        if isinstance(res, tuple):
-            return res[0], res[1]
-        
-        # Fallback to numerical derivative
-        res_plus = instfwhm(center + eps)
-        val_plus = res_plus[0] if isinstance(res_plus, tuple) else res_plus
-        
-        res_minus = instfwhm(center - eps)
-        val_minus = res_minus[0] if isinstance(res_minus, tuple) else res_minus
-        
-        dval = (val_plus - val_minus) / (2.0 * eps)
-        return res, dval
-        
-    val = float(instfwhm)
-    return val, 0.0
-
 def _has_param_std(param) -> bool:
     """Check if parameter has valid std."""
     return hasattr(param, 'std') and param.std is not None and np.isfinite(param.std)
@@ -112,9 +84,67 @@ def _get_param_limits(param):
 
 class LineModelBase(Fittable1DModel):
     """Base class for line models providing common derivative logic."""
+
+    @staticmethod
+    def _normalize_instfwhm(instfwhm):
+        if np.isscalar(instfwhm):
+            value = float(instfwhm)
+            return value, 'constant', value, None
+
+        arr = np.asarray(instfwhm, dtype=float)
+        if arr.ndim == 1:
+            if arr.size != 2:
+                raise ValueError(
+                    "instfwhm must be a scalar or a 2-column [wavelength, fwhm] array."
+                )
+            arr = arr.reshape(1, 2)
+        elif arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(
+                "instfwhm must be a scalar or a 2-column [wavelength, fwhm] array."
+            )
+
+        if arr.shape[0] == 1:
+            return arr.copy(), 'constant', float(arr[0, 1]), None
+
+        order = np.argsort(arr[:, 0])
+        arr = arr[order]
+        wl = arr[:, 0]
+        fwhm = arr[:, 1]
+
+        if np.any(~np.isfinite(wl)) or np.any(~np.isfinite(fwhm)):
+            raise ValueError("instfwhm wavelength/FWHM values must be finite.")
+        if np.any(np.diff(wl) <= 0):
+            raise ValueError("instfwhm wavelengths must be strictly increasing.")
+
+        spline = CubicSpline(wl, fwhm, extrapolate=True)
+        return arr.copy(), 'spline', spline, spline.derivative()
+
     def __init__(self, *args, instfwhm=0.0, **kwargs):
-        self.instfwhm = instfwhm
+        raw, mode, value_or_spline, deriv = self._normalize_instfwhm(instfwhm)
+        self._instfwhm_raw = raw
+        self._instfwhm_mode = mode
+        if mode == 'constant':
+            self._instfwhm_const = float(value_or_spline)
+            self._instfwhm_spline = None
+            self._instfwhm_spline_deriv = None
+        else:
+            self._instfwhm_const = None
+            self._instfwhm_spline = value_or_spline
+            self._instfwhm_spline_deriv = deriv
+        self.instfwhm = raw
         super().__init__(*args, **kwargs)
+
+    def instfwhm_val(self, center):
+        if self._instfwhm_mode == 'constant':
+            center_arr = np.asarray(center, dtype=float)
+            return center_arr * 0.0 + self._instfwhm_const
+        return self._instfwhm_spline(center)
+
+    def instfwhm_deriv(self, center):
+        if self._instfwhm_mode == 'constant':
+            center_arr = np.asarray(center, dtype=float)
+            return center_arr * 0.0
+        return self._instfwhm_spline_deriv(center)
         
     @property
     def flux(self):
@@ -221,7 +251,7 @@ class GaussianLine(LineModelBase):
     def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
-        instfwhm_val = _instfwhm_val(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -234,7 +264,8 @@ class GaussianLine(LineModelBase):
     def fit_deriv(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
-        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
+        instfwhm_deriv = self.instfwhm_deriv(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -283,7 +314,7 @@ class GaussianLine(LineModelBase):
     def _calc_flux(self):
         center = self.position.value * (1.0 + self.redshift.value) * np.exp(self.offset.value / c_kms)
         fwhm_A = self.fwhm.value / c_kms * center
-        instfwhm_val = _instfwhm_val(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -366,7 +397,7 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = _instfwhm_val(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -382,7 +413,8 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
+        instfwhm_deriv = self.instfwhm_deriv(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -439,7 +471,7 @@ class VoigtLine(LineModelBase):
         fwhm_G_A = self.fwhm_G.value / c_kms * center
         fwhm_L_A = self.fwhm_L.value / c_kms * center
         
-        instfwhm_val = _instfwhm_val(self.instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -482,7 +514,7 @@ def _make_unique(names):
             result.append(name + suffix)
     return result
 
-class LineGroupBase(Fittable1DModel):
+class LineGroupBase(LineModelBase):
     """
     Base class for models defined from CSVs with columns: name, pos, weight.
     Lines with the same 'name' are tied together under a single amplitude parameter.
@@ -576,14 +608,13 @@ class LineGroupBase(Fittable1DModel):
 
             x_arr = np.atleast_1d(x)
             total = np.zeros_like(x_arr, dtype=float)
-            instfwhm_val = self.instfwhm
 
             for i in range(n_templates):
                 positions = _tmpl_positions[i]
                 weights = _tmpl_weights[i]
                 for j in range(len(positions)):
-                    profile_args = cls._single_profile_args(
-                        positions[j], amplitudes[i], weights[j], *shared, instfwhm=instfwhm_val)
+                    profile_args = self._single_profile_args(
+                        positions[j], amplitudes[i], weights[j], *shared)
                     total += cls._profile_func(x_arr, *profile_args)
 
             if np.ndim(x) == 0:
@@ -599,14 +630,13 @@ class LineGroupBase(Fittable1DModel):
             n_x = len(x_arr)
             grad = np.zeros((n_params, n_x))
             d_shared = [np.zeros(n_x) for _ in shared]
-            instfwhm_val = self.instfwhm
 
             for i in range(n_templates):
                 positions = _tmpl_positions[i]
                 weights = _tmpl_weights[i]
                 for j in range(len(positions)):
-                    derivs = cls._single_profile_deriv(
-                        x_arr, positions[j], amplitudes[i], weights[j], *shared, instfwhm=instfwhm_val)
+                    derivs = self._single_profile_deriv(
+                        x_arr, positions[j], amplitudes[i], weights[j], *shared)
                     grad[i] += derivs[1] * weights[j]
                     for k, d in enumerate(derivs[2:]):
                         d_shared[k] += d
@@ -616,13 +646,8 @@ class LineGroupBase(Fittable1DModel):
 
             return list(grad)
 
-        def __init__(self, *args, instfwhm=0.0, **kwargs):
-            self.instfwhm = instfwhm
-            super(model_class, self).__init__(*args, **kwargs)
-
         model_class = type(cls.__name__, (cls,), {
             **params,
-            '__init__': __init__,
             'evaluate': evaluate,
             'fit_deriv': fit_deriv,
             'n_inputs': 1,
@@ -664,7 +689,7 @@ class LineGroupBase(Fittable1DModel):
             total_flux = 0.0
             for pos, wt in zip(positions, weights):
                 amp_eff = amp.value * wt
-                total_flux += self._calc_flux(pos, amp_eff, *shared_values, instfwhm=self.instfwhm)
+                total_flux += self._calc_flux(pos, amp_eff, *shared_values)
                 
             # 2) Calculate Std (numerical parameter perturbation)
             flux_std = self._compute_group_flux_std(tmpl, pname, total_flux, positions, weights)
@@ -711,7 +736,7 @@ class LineGroupBase(Fittable1DModel):
                 
                 for pos, wt in zip(positions, weights):
                     amp_eff = amp_plus.value * wt
-                    flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus, instfwhm=self.instfwhm)
+                    flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus)
                 
                 # Restore parameter
                 param.value = orig_val
@@ -754,7 +779,7 @@ class LineGroupBase(Fittable1DModel):
             
             for pos, wt in zip(positions, weights):
                 amp_eff = amp_plus.value * wt
-                flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus, instfwhm=self.instfwhm)
+                flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus)
                 
             flux_values.append(flux_plus)
             
@@ -768,12 +793,11 @@ class GaussianLines(LineGroupBase):
     _shared_units = {'offset': u.km/u.s, 'fwhm': u.km/u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.gaussian)
     
-    @staticmethod
-    def _single_profile_args(pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
+    def _single_profile_args(self, pos, amp_template, weight, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val = _instfwhm_val(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -783,12 +807,12 @@ class GaussianLines(LineGroupBase):
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
         return (amplitude_eff, center, sigma_eff)
     
-    @staticmethod
-    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm, redshift, instfwhm=0.0):
+    def _single_profile_deriv(self, x, pos, amp_template, weight, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
+        instfwhm_deriv = self.instfwhm_deriv(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -829,12 +853,11 @@ class GaussianLines(LineGroupBase):
         
         return val, d_amp, d_offset, d_fwhm, d_redshift
 
-    @staticmethod
-    def _calc_flux(pos, amp, offset, fwhm, redshift, instfwhm=0.0):
+    def _calc_flux(self, pos, amp, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         
-        instfwhm_val = _instfwhm_val(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_A / sigma2fwhm
@@ -896,13 +919,12 @@ class VoigtLines(LineGroupBase):
     _shared_units = {'offset': u.km/u.s, 'fwhm_G': u.km/u.s, 'fwhm_L': u.km/u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
     
-    @staticmethod
-    def _single_profile_args(pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
+    def _single_profile_args(self, pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = _instfwhm_val(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -913,13 +935,13 @@ class VoigtLines(LineGroupBase):
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
         return (amplitude_eff, center, sigma_eff, gamma)
 
-    @staticmethod
-    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
+    def _single_profile_deriv(self, x, pos, amp_template, weight, offset, fwhm_G, fwhm_L, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val, instfwhm_deriv = _instfwhm_val_and_deriv(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
+        instfwhm_deriv = self.instfwhm_deriv(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm
@@ -966,13 +988,12 @@ class VoigtLines(LineGroupBase):
         
         return val, d_amp, d_offset, d_fwhmG, d_fwhmL, d_redshift
 
-    @staticmethod
-    def _calc_flux(pos, amp, offset, fwhm_G, fwhm_L, redshift, instfwhm=0.0):
+    def _calc_flux(self, pos, amp, offset, fwhm_G, fwhm_L, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_G_A = fwhm_G / c_kms * center
         fwhm_L_A = fwhm_L / c_kms * center
         
-        instfwhm_val = _instfwhm_val(instfwhm, center)
+        instfwhm_val = self.instfwhm_val(center)
         instfwhm_A = instfwhm_val / c_kms * center
         
         sigma_intrinsic = fwhm_G_A / sigma2fwhm

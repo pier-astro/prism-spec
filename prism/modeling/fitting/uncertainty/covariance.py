@@ -47,6 +47,8 @@ import warnings
 __all__ = [
     'attach',
     'detach',
+    'attach_uncertainties',
+    'detach_uncertainties',
     'covar',
     'stdevs',
     'correlation',
@@ -330,3 +332,13 @@ def detach(model):
         delattr(model, '_param_cov')
     if hasattr(model, '_fit_indices'):
         delattr(model, '_fit_indices')
+
+
+def attach_uncertainties(model, fitter, verbose=False):
+    """Alias for attach()."""
+    return attach(model, fitter, verbose=verbose)
+
+
+def detach_uncertainties(model):
+    """Alias for detach()."""
+    return detach(model)

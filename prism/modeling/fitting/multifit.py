@@ -15,7 +15,8 @@ import time
 import warnings
 import numpy as np
 import abc
-from multiprocess import Pool
+import os
+import multiprocess as mp
 from tqdm.auto import tqdm
 from astropy.modeling.fitting import model_to_fit_params
 
@@ -26,6 +27,13 @@ _MULTIFIT_STAT_KEYS = (
 __all__ = [
     'MultiFitParameter', 'SpectrumFitResult', 'MultiFitResult', 'MultiFitMixin'
 ]
+
+
+def _multifit_worker_initializer():
+    """Configure worker process runtime for stable linear algebra calls."""
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+    os.environ.setdefault('MKL_NUM_THREADS', '1')
+    os.environ.setdefault('OMP_NUM_THREADS', '1')
 
 
 # =============================================================================
@@ -1010,7 +1018,8 @@ class MultiFitMixin(abc.ABC):
             for task in it:
                 res.update(*self._fit_single_target(task))
         else:
-            with Pool(nproc) as pool:
+            ctx = mp.get_context('spawn')
+            with ctx.Pool(nproc, initializer=_multifit_worker_initializer) as pool:
                 chunksize = max(1, n_spaxels // (nproc * 4))
                 it = pool.imap_unordered(self._fit_single_target, task_generator(),
                                          chunksize=chunksize)

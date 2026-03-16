@@ -40,6 +40,8 @@ Usage
 from .covariance import (
     attach as covar_attach,
     detach as covar_detach,
+    attach_uncertainties as covar_attach_uncertainties,
+    detach_uncertainties as covar_detach_uncertainties,
     covar,
     stdevs,
     correlation,
@@ -47,6 +49,7 @@ from .covariance import (
 )
 
 from .resample import (
+    Bootstrap,
     bootstrap,
     attach as resample_attach,
     detach as resample_detach,
@@ -57,11 +60,14 @@ __all__ = [
     # Covariance
     'covar_attach',
     'covar_detach', 
+    'covar_attach_uncertainties',
+    'covar_detach_uncertainties',
     'covar',
     'stdevs',
     'correlation',
     'CovarianceError',
     # Resample
+    'Bootstrap',
     'bootstrap',
     'resample_attach',
     'resample_detach',

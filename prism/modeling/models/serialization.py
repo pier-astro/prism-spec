@@ -24,6 +24,9 @@ Strategy
 import warnings
 import numpy as np
 import pandas as pd
+import re
+
+from astropy.modeling.core import CompoundModel
 
 from astropy.io.misc.yaml import AstropyDumper, AstropyLoader
 
@@ -51,8 +54,10 @@ def _restore_param(model, name, state):
 
 def _linemodel_representer(dumper, obj):
     state = {pn: _param_state(getattr(obj, pn)) for pn in obj.param_names}
-    if hasattr(obj, 'instfwhm') and not callable(obj.instfwhm):
-        state['_instfwhm'] = float(obj.instfwhm)
+    instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
+    if isinstance(instfwhm_raw, np.ndarray):
+        instfwhm_raw = instfwhm_raw.tolist()
+    state['_instfwhm'] = instfwhm_raw
     if obj.name:
         state['_name'] = obj.name
     return dumper.represent_mapping(f'!prism.{obj.__class__.__name__}', state)
@@ -84,8 +89,10 @@ def _linegroup_representer(dumper, obj):
         '_base': base_name,
         '_df':   obj._df.to_dict(orient='records'),
     }
-    if hasattr(obj, 'instfwhm') and not callable(obj.instfwhm):
-        state['_instfwhm'] = float(obj.instfwhm)
+    instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
+    if isinstance(instfwhm_raw, np.ndarray):
+        instfwhm_raw = instfwhm_raw.tolist()
+    state['_instfwhm'] = instfwhm_raw
     if obj.name:
         state['_name'] = obj.name
 
@@ -131,6 +138,34 @@ def _continuum_constructor(loader, node, cls):
             _restore_param(obj, pn, state)
     return obj
 
+
+# ---------------------------------------------------------------------------
+# Compound models
+# ---------------------------------------------------------------------------
+
+def _compound_representer(dumper, obj):
+    state = {
+        '_expr': obj._format_expression(),
+        '_components': list(obj._leaflist),
+    }
+    if obj.name:
+        state['_name'] = obj.name
+    return dumper.represent_mapping('!prism.CompoundModel', state)
+
+
+def _compound_constructor(loader, node):
+    mapping = loader.construct_mapping(node, deep=True)
+    expr = mapping['_expr']
+    components = mapping['_components']
+    mdl_name = mapping.get('_name')
+
+    namespace = {f'c{i}': comp for i, comp in enumerate(components)}
+    py_expr = re.sub(r'\[(\d+)\]', lambda m: f"c{m.group(1)}", expr)
+    obj = eval(py_expr, {'__builtins__': {}}, namespace)
+    if mdl_name is not None:
+        obj.name = mdl_name
+    return obj
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -138,7 +173,7 @@ def _continuum_constructor(loader, node, cls):
 def register():
     """Register all prism models with the Astropy YAML loader/dumper."""
     from .lines import GaussianLine, VoigtLine, LorentzianLine
-    from .lines import GaussianLines, LorentzianLines, VoigtLines
+    from .lines import GaussianLines, LorentzianLines, VoigtLines, LineGroupBase
     from .continuum import Powerlaw, BrokenPowerlaw, BalmerContinuum
 
     line_models = [GaussianLine, VoigtLine, LorentzianLine]
@@ -158,20 +193,15 @@ def register():
             tag, lambda loader, node, cls=cls: _continuum_constructor(loader, node, cls)
         )
 
+    AstropyDumper.add_representer(CompoundModel, _compound_representer)
+    AstropyLoader.add_constructor('!prism.CompoundModel', _compound_constructor)
+
     # LineGroup - all dynamic subclasses share a single representer/constructor
     for cls in [GaussianLines, LorentzianLines, VoigtLines]:
         AstropyDumper.add_representer(cls, _linegroup_representer)
 
-    # Dynamic-subclass representer: catch *any* subclass of a group base
-    # by walking the MRO in the representer itself (already done above).
-    # We still need to handle instances whose __class__ is the dynamic sub:
-    AstropyDumper.add_multi_representer(
-        object,
-        lambda dumper, obj: _linegroup_representer(dumper, obj)
-            if any(b.__name__ in ('GaussianLines', 'LorentzianLines', 'VoigtLines')
-                   for b in type(obj).__mro__)
-            else AstropyDumper.yaml_representers.get(type(obj), AstropyDumper.represent_undefined)(dumper, obj)
-    )
+    # Dynamic subclasses created by LineGroupBase.from_templates inherit from LineGroupBase.
+    AstropyDumper.add_multi_representer(LineGroupBase, _linegroup_representer)
     AstropyLoader.add_constructor('!prism.LineGroup', _linegroup_constructor)
 
 
