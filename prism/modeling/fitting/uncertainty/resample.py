@@ -111,7 +111,7 @@ class Bootstrap:
 
     def __init__(self, model, fitter, x, y, yerr=None, weights=None,
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
-                 seed=None, verbose=True, nproc=1):
+                 seed=None, verbose=True, nproc=1, batch=False):
         self.model = model
         self.fitter = fitter
         self.x = np.asarray(x)
@@ -124,6 +124,7 @@ class Bootstrap:
         self.seed = seed
         self.verbose = bool(verbose)
         self.nproc = int(nproc)
+        self.batch = bool(batch)
 
     @staticmethod
     def _fit_param_names(model):
@@ -182,6 +183,7 @@ class Bootstrap:
             statistic=fit_stat,
             nproc=self.nproc,
             progress=self.verbose,
+            batch=self.batch,
             **self.fitter_kwargs,
         )
 
@@ -312,7 +314,7 @@ class Bootstrap:
 
 def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
              statistic='gauss', fitter_kwargs=None, seed=None,
-             verbose=True, nproc=1):
+             verbose=True, nproc=1, batch=False):
     """Compatibility wrapper around Bootstrap(...).run()."""
     return Bootstrap(
         model=model,
@@ -327,6 +329,7 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
         seed=seed,
         verbose=verbose,
         nproc=nproc,
+        batch=batch,
     ).run()
 
 

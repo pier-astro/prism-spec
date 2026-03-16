@@ -16,6 +16,7 @@ import warnings
 import numpy as np
 import abc
 import os
+import copy
 import multiprocess as mp
 from tqdm.auto import tqdm
 from astropy.modeling.fitting import model_to_fit_params
@@ -29,11 +30,60 @@ __all__ = [
 ]
 
 
-def _multifit_worker_initializer():
-    """Configure worker process runtime for stable linear algebra calls."""
+_MULTIFIT_WORKER_STATE = {}
+
+
+def _multifit_worker_initializer(fitter=None, template_model=None, x=None,
+                                 statistic=None, kwargs=None):
+    """Configure worker runtime and preload shared multifit state."""
     os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
     os.environ.setdefault('MKL_NUM_THREADS', '1')
     os.environ.setdefault('OMP_NUM_THREADS', '1')
+
+    if fitter is not None:
+        global _MULTIFIT_WORKER_STATE
+        _MULTIFIT_WORKER_STATE = {
+            'fitter': fitter,
+            'template_model': template_model,
+            'x': x,
+            'statistic': statistic,
+            'kwargs': {} if kwargs is None else kwargs,
+        }
+
+
+def _multifit_worker_task(args):
+    """Run one multifit target using preloaded worker state."""
+    idx, y_1d, yerr_1d, weights_1d, initpars_1d, bounds_1d = args
+    state = _MULTIFIT_WORKER_STATE
+    fitter = state['fitter']
+    model = state['template_model']
+    x = state['x']
+    statistic = state['statistic']
+    kwargs = state['kwargs']
+
+    try:
+        local_model = model.copy()
+        fitter._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
+        fitted = fitter(
+            model=local_model, x=x, y=y_1d, yerr=yerr_1d,
+            statistic=statistic, weights=weights_1d,
+            inplace=True, nproc=1, **kwargs
+        )
+        return (idx, fitted.parameters, fitter.stdevs,
+                fitter._multifit_entry_from_fit_info(), fitter.covariance)
+    except Exception as e:
+        if getattr(fitter, 'verbose', False):
+            print(f"Worker {idx} failed: {e}")
+        return (
+            idx,
+            np.full(len(model.parameters), np.nan),
+            None,
+            {
+                'success': False, 'nfev': 0, 'message': str(e),
+                **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
+            },
+            None,
+        )
 
 
 # =============================================================================
@@ -443,7 +493,11 @@ class MultiFitResult:
 
     def __getattr__(self, name):
         """Allow ``result.amplitude_0``, ``result.cost``, etc."""
-        if name in self.param_names:
+        try:
+            param_names = object.__getattribute__(self, 'param_names')
+        except Exception:
+            param_names = ()
+        if name in param_names:
             return self.get_param(name)
         if name in _MULTIFIT_STAT_KEYS:
             return self.get_stat(name)
@@ -600,10 +654,19 @@ class SpectrumFitResult:
         return self._parent.messages[self.index]
 
     def __getattr__(self, name):
-        if name in self._parent.param_names:
+        try:
+            parent = object.__getattribute__(self, '_parent')
+            param_names = object.__getattribute__(parent, 'param_names')
+        except Exception:
+            parent = None
+            param_names = ()
+
+        if name in param_names:
             return getattr(self.model, name)
         if name in _MULTIFIT_STAT_KEYS:
-            return self._parent.get_stat(name)[self.index]
+            if parent is None:
+                raise AttributeError(f"'SpectrumFitResult' has no attribute '{name}'")
+            return parent.get_stat(name)[self.index]
         raise AttributeError(f"'SpectrumFitResult' has no attribute '{name}'")
 
     def __repr__(self):
@@ -921,6 +984,42 @@ class MultiFitMixin(abc.ABC):
                 None,
             )
 
+    def _fit_single_direct(self, idx, model, x, y_1d, yerr_1d,
+                           statistic, weights_1d, initpars_1d, bounds_1d,
+                           kwargs):
+        """Direct in-process single-target fit used by the serial multifit path."""
+        try:
+            local_model = model.copy()
+            self._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
+            fitted = self(
+                model=local_model, x=x, y=y_1d, yerr=yerr_1d,
+                statistic=statistic, weights=weights_1d,
+                inplace=True, nproc=1, **kwargs
+            )
+            return (idx, fitted.parameters, self.stdevs,
+                    self._multifit_entry_from_fit_info(), self.covariance)
+        except Exception as e:
+            if getattr(self, 'verbose', False):
+                print(f"Worker {idx} failed: {e}")
+            return (
+                idx,
+                np.full(len(model.parameters), np.nan),
+                None,
+                {
+                    'success': False, 'nfev': 0, 'message': str(e),
+                    **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
+                },
+                None,
+            )
+
+    def _multifit_spawn_fitter(self):
+        """Build a lightweight fitter clone for spawn workers."""
+        worker_fitter = copy.copy(self)
+        worker_fitter.fit_info = {}
+        if hasattr(worker_fitter, '_template_model'):
+            worker_fitter._template_model = None
+        return worker_fitter
+
     # ------------------------------------------------------------------
     # Aggregate fit info
     # ------------------------------------------------------------------
@@ -956,12 +1055,22 @@ class MultiFitMixin(abc.ABC):
             entry[name] = self.fit_info.get(name, np.nan)
         return entry
 
+    def _multifit_chunksize(self, n_spaxels, nproc):
+        """Choose a low-overhead chunksize with predictable scheduling."""
+        if nproc <= 1:
+            return 1
+        if n_spaxels <= 32 * nproc:
+            return max(1, n_spaxels // nproc)
+        if n_spaxels <= 256 * nproc:
+            return max(1, n_spaxels // (2 * nproc))
+        return max(1, n_spaxels // (4 * nproc))
+
     # ------------------------------------------------------------------
     # Main batch fitting loop
     # ------------------------------------------------------------------
 
     def _fit_multi(self, model, x, y, yerr=None, statistic='chi2', weights=None,
-                   nproc=1, spectral_axis=None, progress=True,
+                   nproc=1, spectral_axis=None, progress=True, batch=False,
                    initpars=None, bounds=None, fixed=None, tied=None,
                    **kwargs):
         """Internal: run fits over all spaxels and accumulate a MultiFitResult."""
@@ -1012,16 +1121,38 @@ class MultiFitMixin(abc.ABC):
         t0 = time.perf_counter()
 
         if nproc <= 1:
-            it = task_generator()
+            indices = range(n_spaxels)
             if show_progress:
-                it = tqdm(it, total=n_spaxels, desc="Fitting spectra")
-            for task in it:
-                res.update(*self._fit_single_target(task))
+                indices = tqdm(indices, total=n_spaxels, desc="Fitting spectra")
+            for idx in indices:
+                ip, bo = self._multifit_task_overrides(idx, config)
+                res.update(*self._fit_single_direct(
+                    idx=idx,
+                    model=template_model,
+                    x=x,
+                    y_1d=y_flat[idx],
+                    yerr_1d=yerr_flat[idx],
+                    statistic=statistic,
+                    weights_1d=weights_flat[idx],
+                    initpars_1d=ip,
+                    bounds_1d=bo,
+                    kwargs=kwargs,
+                ))
         else:
             ctx = mp.get_context('spawn')
-            with ctx.Pool(nproc, initializer=_multifit_worker_initializer) as pool:
-                chunksize = max(1, n_spaxels // (nproc * 4))
-                it = pool.imap_unordered(self._fit_single_target, task_generator(),
+            worker_fitter = self._multifit_spawn_fitter()
+            with ctx.Pool(
+                nproc,
+                initializer=_multifit_worker_initializer,
+                initargs=(worker_fitter, template_model, x, statistic, kwargs),
+            ) as pool:
+                def worker_task_generator():
+                    for idx in range(n_spaxels):
+                        ip, bo = self._multifit_task_overrides(idx, config)
+                        yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], ip, bo)
+
+                chunksize = self._multifit_chunksize(n_spaxels, nproc) if batch else 1
+                it = pool.imap_unordered(_multifit_worker_task, worker_task_generator(),
                                          chunksize=chunksize)
                 if show_progress:
                     it = tqdm(it, total=n_spaxels, desc="Fitting spectra")
@@ -1044,7 +1175,7 @@ class MultiFitMixin(abc.ABC):
     # ------------------------------------------------------------------
 
     def multifit(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
-                 inplace=False, nproc=1, spectral_axis=None, progress=True,
+                 inplace=False, nproc=1, spectral_axis=None, progress=True, batch=False,
                  initpars=None, bounds=None, fixed=None, tied=None,
                  **kwargs) -> MultiFitResult:
         """
@@ -1079,6 +1210,13 @@ class MultiFitMixin(abc.ABC):
             Axis of ``y`` that is the spectral dimension.
         progress : bool, optional
             Show tqdm progress bar.  Defaults to ``fitter.verbose``.
+        batch : bool, optional
+            When ``True`` and ``nproc > 1``, results are delivered to the
+            progress bar in chunks (smarter scheduling, slightly lower IPC
+            overhead).  When ``False`` (default) the bar updates once per
+            completed fit.  The difference is negligible for real spectral
+            fits (>1 ms each); use ``batch=True`` only for very fast synthetic
+            fits where IPC dominates.
         initpars : dict, optional
             Per-parameter initial value overrides.
         bounds : dict, optional
@@ -1098,7 +1236,7 @@ class MultiFitMixin(abc.ABC):
             raise NotImplementedError("2-D fitting is not yet implemented.")
         return self._fit_multi(
             model, x, y, yerr=yerr, statistic=statistic, weights=weights,
-            nproc=nproc, spectral_axis=spectral_axis, progress=progress,
+            nproc=nproc, spectral_axis=spectral_axis, progress=progress, batch=batch,
             initpars=initpars, bounds=bounds, fixed=fixed, tied=tied,
             **kwargs
         )
