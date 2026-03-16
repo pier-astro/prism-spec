@@ -136,7 +136,8 @@ class SherpaFitter(FitterBase):
         weights = prep_data['weights']
         if weights is not None:
             # Back-calculate yerr from weights (weights = 1/yerr for chi2)
-            yerr = 1.0 / weights
+            with np.errstate(divide='ignore'):
+                yerr = np.where(weights > 0, 1.0 / weights, np.inf)
         
         has_tied = bool(tied_info)
         

@@ -1113,6 +1113,9 @@ class MultiFitMixin(abc.ABC):
                 yield (idx, template_model, x, y_flat[idx],
                        yerr_flat[idx], statistic, weights_flat[idx], ip, bo, kwargs)
 
+        if progress is None:
+            progress = True
+
         show_progress = progress
 
         if self.verbose:

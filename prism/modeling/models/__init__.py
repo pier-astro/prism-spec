@@ -38,3 +38,4 @@ from .continuum import *
 from .components import get_components, ModelComponents
 
 from .agn import *
+from .empirical import *
