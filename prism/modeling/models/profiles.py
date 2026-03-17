@@ -10,6 +10,8 @@ def gaussian(x, amplitude, center, sigma):
     """
     1D Gaussian function.
     """
+    if sigma == 0:
+        return np.where(x == center, amplitude, 0.0)
     return amplitude * np.exp(-0.5 * ((x - center) / sigma) ** 2)
 
 def gaussian_deriv(x, amplitude, center, sigma):
@@ -17,6 +19,10 @@ def gaussian_deriv(x, amplitude, center, sigma):
     Derivatives of Gaussian function w.r.t amplitude, center, sigma.
     Returns: (val, d_amp, d_center, d_sigma)
     """
+    if sigma == 0:
+        val = np.where(x == center, amplitude, 0.0)
+        return val, val / amplitude, np.zeros_like(x), np.zeros_like(x)
+
     z = (x - center) / sigma
     val = amplitude * np.exp(-0.5 * z ** 2)
     
@@ -30,6 +36,8 @@ def lorentzian(x, amplitude, center, gamma):
     """
     1D Lorentzian function.
     """
+    if gamma == 0:
+        return np.where(x == center, amplitude, 0.0)
     return amplitude * (gamma**2) / ((x - center)**2 + gamma**2)
 
 def lorentzian_deriv(x, amplitude, center, gamma):
@@ -37,6 +45,10 @@ def lorentzian_deriv(x, amplitude, center, gamma):
     Derivatives of Lorentzian function w.r.t amplitude, center, gamma.
     Returns: (val, d_amp, d_center, d_gamma)
     """
+    if gamma == 0:
+        val = np.where(x == center, amplitude, 0.0)
+        return val, val / amplitude, np.zeros_like(x), np.zeros_like(x)
+
     denom = (x - center)**2 + gamma**2
     val = amplitude * (gamma**2) / denom
     

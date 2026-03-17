@@ -287,7 +287,10 @@ def multifit_to_fits(result, filename: str, wcs=None, overwrite: bool = False,
             hdus.append(_image_hdu(_ext_name(pname) + EXT_ERR_SUFFIX, err, unit, wcs=wcs, cd_matrix=cd_matrix))
 
     for ext_name, data in custom_exts.items():
-        hdus.append(_image_hdu(ext_name.upper(), np.asarray(data), wcs=wcs, cd_matrix=cd_matrix))
+        arr = np.asarray(data)
+        if arr.ndim == 0:
+            arr = arr.reshape((1,))
+        hdus.append(_image_hdu(ext_name.upper(), arr, wcs=wcs, cd_matrix=cd_matrix))
 
     if model:
         yaml_str = _serialize_model(result._template_model)

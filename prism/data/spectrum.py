@@ -22,7 +22,7 @@ class Spectrum():
                  ra=None,
                  dec=None,
                  z=None,
-                 wunit=None,
+                 wave_unit=None,
                  unit=None,
                  _is_air_wave=True,
                  name='spectrum'):
@@ -52,18 +52,24 @@ class Spectrum():
         self.z = z
         self.ebv = None
 
-        # Accept astropy units or strings for wunit and unit
-        if wunit is not None and not isinstance(wunit, u.Unit):
-            try:
-                wunit = u.Unit(wunit)
-            except Exception:
-                raise ValueError(f"Could not convert wunit '{wunit}' to astropy Unit.")
+        # Accept astropy units or strings for wave_unit and unit
+        if wave_unit is not None and not isinstance(wave_unit, u.Unit):
+            if isinstance(wave_unit, u.Quantity):
+                wave_unit = wave_unit.unit
+            else:
+                try:
+                    wave_unit = u.Unit(wave_unit)
+                except Exception:
+                    raise ValueError(f"Could not convert wave_unit '{wave_unit}' to astropy Unit.")
         if unit is not None and not isinstance(unit, u.Unit):
-            try:
-                unit = u.Unit(unit)
-            except Exception:
-                raise ValueError(f"Could not convert unit '{unit}' to astropy Unit.")
-        self.wunit = wunit
+            if isinstance(unit, u.Quantity):
+                unit = unit.unit
+            else:
+                try:
+                    unit = u.Unit(unit)
+                except Exception:
+                    raise ValueError(f"Could not convert unit '{unit}' to astropy Unit.")
+        self.wave_unit = wave_unit
         self.unit = unit
 
         # --- Mask and Working Arrays ---
@@ -179,7 +185,7 @@ class Spectrum():
             raise RuntimeError("Operation requires the original wavelength grid, but spectrum has been rebinned.")
 
     @classmethod
-    def from_txt(cls, filename, ra=None, dec=None, z=None, wunit=None, unit=None, name=None):
+    def from_txt(cls, filename, ra=None, dec=None, z=None, wave_unit=None, unit=None, name=None):
         """Create a Spectrum from a text file."""
         try:
             try:
@@ -193,7 +199,7 @@ class Spectrum():
         if name is None:
             name = os.path.splitext(os.path.basename(filename))[0]
 
-        return cls(wave=wave, flux=flux, err=err, ra=ra, dec=dec, z=z, wunit=wunit, unit=unit, name=name)
+        return cls(wave=wave, flux=flux, err=err, ra=ra, dec=dec, z=z, wave_unit=wave_unit, unit=unit, name=name)
 
     @classmethod
     def from_fits(cls, filename, ext=1,
@@ -210,7 +216,7 @@ class Spectrum():
             flux = data[flux_col]
             err = data[err_col] if err_col in colnames else None
 
-            wunit = header.get(f'TUNIT{colnames.index(wave_col)+1}', None)
+            wave_unit = header.get(f'TUNIT{colnames.index(wave_col)+1}', None)
             unit = header.get(f'TUNIT{colnames.index(flux_col)+1}', None)
 
             ra = ra if ra is not None else header.get('RA')
@@ -219,7 +225,7 @@ class Spectrum():
             name = name if name is not None else os.path.splitext(os.path.basename(filename))[0]
 
             return cls(wave=wave, flux=flux, err=err, ra=ra, dec=dec, z=z,
-                       wunit=wunit, unit=unit, name=name)
+                       wave_unit=wave_unit, unit=unit, name=name)
         
     def deredden(self, ebv=None):
         """Deredden the flux using Fitzpatrick (1999) law."""
@@ -286,7 +292,7 @@ class Spectrum():
         if not np.all(self.err == 1):
             ax.errorbar(self.wave, self.flux, yerr=self.err, color="black", markersize=0, ls='none', alpha=0.5)
         ax.plot(self.wave, self.flux, label=self.name, color='black', drawstyle='steps-mid')
-        ax.set_xlabel(f'Wavelength [{self.wunit or "Unknown"}]')
+        ax.set_xlabel(f'Wavelength [{self.wave_unit or "Unknown"}]')
         ax.set_ylabel(f'Flux [{self.unit or "Unknown"}]')
         ax.legend(frameon=False)
         if created_fig:

@@ -165,6 +165,106 @@ class MultiFitParameter:
         return f"MultiFitParameter(name={self.name!r}, shape={self.shape}, dtype={self.value.dtype})"
 
 
+class _MultiFitComponentView:
+    """
+    Callable view of one component across all fitted spectra.
+
+    Instances are returned by ``MultiFitResult.comps[...]`` and
+    ``MultiFitResult.addcomps[...]``. Calling the view evaluates that
+    component over all fitted spaxels and returns a model cube.
+    """
+
+    __slots__ = ('_parent', '_key', '_additive', 'name')
+
+    def __init__(self, parent, key, additive, name):
+        self._parent = parent
+        self._key = key
+        self._additive = additive
+        self.name = name
+
+    def evaluate(self, x=None, spectral_axis=None):
+        return self._parent._result._evaluate_component(
+            self._key,
+            x=x,
+            spectral_axis=spectral_axis,
+            additive=self._additive,
+        )
+
+    def __call__(self, x=None, spectral_axis=None):
+        return self.evaluate(x=x, spectral_axis=spectral_axis)
+
+    def get_model(self, index):
+        return self._parent._result.get_component_model(
+            index,
+            self._key,
+            additive=self._additive,
+        )
+
+    def __repr__(self):
+        mode = 'additive' if self._additive else 'components'
+        return f"MultiFitComponentView(name={self.name!r}, mode={mode})"
+
+
+class _MultiFitComponentsAccessor:
+    """
+    Batch component accessor for MultiFitResult.
+
+    Supports key access by index or name. Returned values are callable views
+    that evaluate one selected component over all fitted spectra.
+    """
+
+    __slots__ = ('_result', '_additive', '_template_components', '_cache')
+
+    def __init__(self, result, additive=False):
+        self._result = result
+        self._additive = additive
+        self._template_components = result._get_template_components(additive=additive)
+        self._cache = {}
+
+    @property
+    def additive(self):
+        return self._additive
+
+    @property
+    def names(self):
+        return self._template_components.names
+
+    @property
+    def indices(self):
+        return self._template_components.indices
+
+    def to_list(self):
+        return [self[name] for name in self.names]
+
+    def get_model(self, key):
+        return self._template_components[key]
+
+    def __getitem__(self, key):
+        if key not in self._cache:
+            model = self._template_components[key]
+            component_name = getattr(model, 'name', None)
+            if not component_name:
+                component_name = str(key)
+            self._cache[key] = _MultiFitComponentView(
+                parent=self,
+                key=key,
+                additive=self._additive,
+                name=component_name,
+            )
+        return self._cache[key]
+
+    def __iter__(self):
+        for name in self.names:
+            yield self[name]
+
+    def __len__(self):
+        return len(self.names)
+
+    def __repr__(self):
+        mode = 'additive-only' if self._additive else 'all'
+        return f"MultiFitComponents({mode}, n={len(self.names)}, names={self.names})"
+
+
 # =============================================================================
 # MultiFitResult
 # =============================================================================
@@ -200,6 +300,15 @@ class MultiFitResult:
     shape, param_names, n_spaxels
     fit_info : dict
         Aggregate batch statistics set after fitting completes.
+
+    Additional component accessors
+    ------------------------------
+    comps : MultiFitComponents
+        Batch component accessor based on ``get_components(..., additive=False)``.
+        Access by index or name and evaluate a selected component over all
+        spaxels, e.g. ``result.comps['nlr'](x)``.
+    addcomps : MultiFitComponents
+        Additive-only component accessor (multiplicative terms expanded).
     """
 
     def __init__(self, shape, param_names, template_model=None, x=None,
@@ -213,6 +322,9 @@ class MultiFitResult:
         self._fit_indices = None if fit_indices is None else np.asarray(fit_indices)
         self._parameter_metadata = parameter_metadata or {}
         self.fit_info = {}
+        self._comps = None
+        self._addcomps = None
+        self._template_components = {}
 
         self.n_spaxels = int(np.prod(shape))
         self._params = {name: np.full(self.n_spaxels, np.nan) for name in param_names}
@@ -407,6 +519,88 @@ class MultiFitResult:
         info['param_cov'] = None if cov is None else cov[spatial_index]
         return info
 
+    def _get_template_components(self, additive=False):
+        if self._template_model is None:
+            raise ValueError("Component access requires a template model.")
+        key = bool(additive)
+        cached = self._template_components.get(key)
+        if cached is None:
+            from ..models.components import get_components
+            cached = get_components(self._template_model, additive=additive)
+            self._template_components[key] = cached
+        return cached
+
+    def get_component_model(self, index, component, additive=False):
+        """
+        Return one fitted component model for a single spaxel.
+
+        Parameters
+        ----------
+        index : int or tuple
+            Flat or spatial index of the spaxel.
+        component : int or str
+            Component index or name from ``.comps`` / ``.addcomps``.
+        additive : bool
+            If True, resolve from additive components.
+        """
+        from ..models.components import get_components
+        model = self.get_model(index)
+        return get_components(model, additive=additive)[component]
+
+    def _evaluate_component(self, component, x=None, spectral_axis=None, additive=False):
+        """Internal component-evaluation implementation shared by helpers."""
+        if self._template_model is None:
+            raise ValueError("Component evaluation requires a template model.")
+
+        eval_x = self._x if x is None else np.asarray(x)
+        if eval_x is None:
+            raise ValueError("Provide x= or construct with x= to enable component evaluation().")
+
+        out = np.empty(self.shape + (len(eval_x),), dtype=float)
+        for flat_index in range(self.n_spaxels):
+            spatial_index = np.unravel_index(flat_index, self.shape)
+            comp_model = self.get_component_model(flat_index, component, additive=additive)
+            out[spatial_index] = comp_model(eval_x)
+
+        target_axis = self.spectral_axis if spectral_axis is None else spectral_axis
+        if target_axis < 0:
+            target_axis += out.ndim
+        if target_axis != out.ndim - 1:
+            out = np.moveaxis(out, -1, target_axis)
+        return out
+
+    def evaluate_component(self, component, x=None, spectral_axis=None):
+        """
+        Evaluate one (non-additive) component across all spaxels.
+
+        Parameters
+        ----------
+        component : int or str
+            Component index or name from ``result.comps``.
+        x : array_like, optional
+            Spectral grid. Uses the stored grid when omitted.
+        spectral_axis : int, optional
+            Desired output spectral-axis position (same semantics as ``evaluate()``).
+        """
+        return self._evaluate_component(component, x=x, spectral_axis=spectral_axis,
+                                        additive=False)
+
+    def evaluate_addcomponent(self, component, x=None, spectral_axis=None):
+        """
+        Evaluate one additive component across all spaxels.
+
+        Parameters
+        ----------
+        component : int or str
+            Component index or name from ``result.addcomps``.
+        x : array_like, optional
+            Spectral grid. Uses the stored grid when omitted.
+        spectral_axis : int, optional
+            Desired output spectral-axis position (same semantics as ``evaluate()``).
+        """
+        return self._evaluate_component(component, x=x, spectral_axis=spectral_axis,
+                                        additive=True)
+
     # ------------------------------------------------------------------
     # Model evaluation
     # ------------------------------------------------------------------
@@ -536,6 +730,32 @@ class MultiFitResult:
         return {n: self.get_stat(n) for n in _MULTIFIT_STAT_KEYS}
 
     @property
+    def comps(self):
+        """
+        Access fitted model components (all leaf components).
+
+        Examples
+        --------
+        >>> comp = result.comps['line']
+        >>> cube = comp(x)                  # full cube for one component
+        >>> model_ij = comp.get_model((j, i))
+        """
+        if self._comps is None:
+            self._comps = _MultiFitComponentsAccessor(self, additive=False)
+        return self._comps
+
+    @property
+    def addcomps(self):
+        """
+        Access additive-only fitted components.
+
+        Multiplicative branches are expanded before evaluation.
+        """
+        if self._addcomps is None:
+            self._addcomps = _MultiFitComponentsAccessor(self, additive=True)
+        return self._addcomps
+
+    @property
     def success(self) -> np.ndarray:
         return self._success.reshape(self.shape)
 
@@ -608,6 +828,8 @@ class SpectrumFitResult:
         self._flat_index = parent._normalize_spaxel_index(index)
         self.index = np.unravel_index(self._flat_index, parent.shape)
         self._model = None
+        self._comps = None
+        self._addcomps = None
 
     @property
     def model(self):
@@ -652,6 +874,22 @@ class SpectrumFitResult:
     @property
     def message(self) -> str:
         return self._parent.messages[self.index]
+
+    @property
+    def comps(self):
+        """Model components for this fitted spaxel (all leaf components)."""
+        if self._comps is None:
+            from ..models.components import get_components
+            self._comps = get_components(self.model, additive=False)
+        return self._comps
+
+    @property
+    def addcomps(self):
+        """Additive-only model components for this fitted spaxel."""
+        if self._addcomps is None:
+            from ..models.components import get_components
+            self._addcomps = get_components(self.model, additive=True)
+        return self._addcomps
 
     def __getattr__(self, name):
         try:
@@ -1205,8 +1443,10 @@ class MultiFitMixin(abc.ABC):
             Statistic used to convert ``yerr`` to weights.
         weights : array_like, optional
             Explicit weight cube (overrides ``yerr``).
-        inplace : ignored
-            Kept for API symmetry; the template model is always copied.
+        inplace : bool
+            Kept for API symmetry, but ignored in multifit mode. Each spectrum
+            is always fit using its own model copy. Passing ``inplace=True``
+            emits a warning.
         nproc : int
             Number of worker processes.  ``1`` disables multiprocessing.
         spectral_axis : int, optional
@@ -1237,6 +1477,13 @@ class MultiFitMixin(abc.ABC):
         """
         if z is not None:
             raise NotImplementedError("2-D fitting is not yet implemented.")
+        if inplace:
+            warnings.warn(
+                "'inplace=True' has no effect in multifit mode: each spectrum is "
+                "fit on an independent model copy.",
+                UserWarning,
+                stacklevel=2,
+            )
         return self._fit_multi(
             model, x, y, yerr=yerr, statistic=statistic, weights=weights,
             nproc=nproc, spectral_axis=spectral_axis, progress=progress, batch=batch,

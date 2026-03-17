@@ -180,3 +180,5 @@ cython_debug/
 # Local testing
 mytests
 mydocs
+examples/lines
+examples/results

@@ -531,7 +531,8 @@ class FitterBase(Fitter, MultiFitMixin):
         weights : array_like, optional
             Explicit weights (overrides yerr).
         inplace : bool
-            Modify model in-place (single-spectrum only).
+            Modify model in-place (single-spectrum only). Ignored in
+            multi-spectrum mode.
         nproc : int
             Number of worker processes for multi-spectrum fitting.
         spectral_axis : int, optional
@@ -558,6 +559,13 @@ class FitterBase(Fitter, MultiFitMixin):
 
         y = np.asarray(y)
         if y.ndim > 1:
+            if inplace:
+                warnings.warn(
+                    "'inplace=True' has no effect in multifit mode: each spectrum "
+                    "is fit on an independent model copy.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             return self.multifit(model, x, y, yerr=yerr, statistic=statistic,
                                  weights=weights, nproc=nproc,
                                  spectral_axis=spectral_axis, progress=progress,

@@ -4,6 +4,8 @@ import os
 from astropy.io import fits
 from astropy.wcs import WCS
 import astropy.units as u
+import prism.config
+from prism.data.image import Image
 
 
 def wcs_to_cd_matrix(header):
@@ -37,6 +39,8 @@ def wcs_to_cd_matrix(header):
 
 
 class Cube:
+    __array_priority__ = 1000
+
     """
     A lightweight, Astropy-backed container for 3D integral field spectroscopic data,
     inspired by MPDAF and designed for robust spaxel-by-spaxel fitting.
@@ -77,10 +81,18 @@ class Cube:
             raise ValueError("Cannot provide both 'err' and 'var'. They are mutually exclusive.")
             
         if var is not None:
-            self._err = np.sqrt(np.asarray(var))
+            var_array = np.asarray(var)
+            if var_array.shape != self.shape:
+                raise ValueError(f"Variance shape mismatch: expected {self.shape}, got {var_array.shape}")
+            if np.any(var_array < 0):
+                raise ValueError("Variance must be non-negative.")
+            self._err = np.sqrt(var_array)
             self.is_var = True if is_var is None else is_var
         elif err is not None:
-            self._err = np.asarray(err)
+            err_array = np.asarray(err)
+            if err_array.shape != self.shape:
+                raise ValueError(f"Error shape mismatch: expected {self.shape}, got {err_array.shape}")
+            self._err = err_array
             self.is_var = False if is_var is None else is_var
         else:
             self._err = np.ones_like(self._data)
@@ -94,15 +106,21 @@ class Cube:
             self._wave = np.arange(self.shape[0], dtype=float)
 
         self.mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones_like(self._data, dtype=bool)
+        if self.mask.shape != self.shape:
+            raise ValueError(f"Mask shape mismatch: expected {self.shape}, got {self.mask.shape}")
         self.wcs = wcs
         
         self.header = header if header is not None else {}
         if isinstance(unit, str):
             self.unit = u.Unit(unit)
+        elif isinstance(unit, u.Quantity):
+            self.unit = unit.unit
         else:
             self.unit = unit
         if isinstance(wave_unit, str):
             self.wave_unit = u.Unit(wave_unit)
+        elif isinstance(wave_unit, u.Quantity):
+            self.wave_unit = wave_unit.unit
         else:
             self.wave_unit = wave_unit if wave_unit is not None else u.AA
         
@@ -114,21 +132,57 @@ class Cube:
     def data(self):
         """Return the flux data."""
         return self._data
+
+    @data.setter
+    def data(self, value):
+        data_array = np.asarray(value)
+        if data_array.shape != self.shape:
+            raise ValueError(f"Data shape mismatch: expected {self.shape}, got {data_array.shape}")
+        self._data = data_array
         
     @property
     def err(self):
         """Return the error (standard deviation) data."""
         return self._err
+
+    @err.setter
+    def err(self, value):
+        err_array = np.asarray(value)
+        if err_array.shape != self.shape:
+            raise ValueError(f"Error shape mismatch: expected {self.shape}, got {err_array.shape}")
+        self._err = err_array
+        self.is_var = False
         
     @property
     def var(self):
         """Return the variance (error squared)."""
         return self._err ** 2
+
+    @var.setter
+    def var(self, value):
+        var_array = np.asarray(value)
+        if var_array.shape != self.shape:
+            raise ValueError(f"Variance shape mismatch: expected {self.shape}, got {var_array.shape}")
+        if np.any(var_array < 0):
+            raise ValueError("Variance must be non-negative.")
+        self._err = np.sqrt(var_array)
+        self.is_var = True
         
     @property
     def wave(self):
         """Return the wavelength array."""
         return self._wave
+
+    def _as_operand_array(self, other):
+        if np.isscalar(other):
+            return "scalar", other
+        if isinstance(other, Cube):
+            return "cube", other
+        if isinstance(other, np.ndarray):
+            if other.shape != self.shape:
+                raise ValueError(f"Shape mismatch: {self.shape} vs {other.shape}")
+            return "array", other
+        raise TypeError(f"Operand must be a Cube, scalar, or numpy.ndarray, got {type(other)}")
 
     def get_masked(self):
         """
@@ -434,3 +488,174 @@ class Cube:
             
         hdulist = fits.HDUList(hdus)
         hdulist.writeto(filename, overwrite=overwrite)
+
+    def _check_compatibility(self, other):
+        kind, parsed_other = self._as_operand_array(other)
+        if kind in {"scalar", "array"}:
+            return True
+
+        if self.shape != parsed_other.shape:
+            if not prism.config.FORCE_OP_MISMATCH:
+                raise ValueError(f"Shape mismatch: {self.shape} vs {parsed_other.shape}")
+                
+        if hasattr(self, 'wave') and hasattr(parsed_other, 'wave'):
+            if not np.allclose(self.wave, parsed_other.wave, rtol=1e-5, atol=1e-5):
+                if not prism.config.FORCE_OP_MISMATCH:
+                    raise ValueError("Wavelength array mismatch. Set prism.config.FORCE_OP_MISMATCH = True to ignore.")
+        
+        if self.wcs is not None and parsed_other.wcs is not None:
+            wcs1 = self.wcs.to_header().tostring()
+            wcs2 = parsed_other.wcs.to_header().tostring()
+            if wcs1 != wcs2:
+                if not prism.config.FORCE_OP_MISMATCH:
+                    raise ValueError("WCS mismatch. Set prism.config.FORCE_OP_MISMATCH = True to ignore.")
+        return True
+
+    def _apply_op(self, other, op_data, op_err):
+        self._check_compatibility(other)
+
+        kind, parsed_other = self._as_operand_array(other)
+
+        if kind == "scalar":
+            new_data = op_data(self.data, parsed_other)
+            new_err = op_err(self.err, 0, self.data, parsed_other)
+            new_mask = self.mask.copy()
+        elif kind == "array":
+            new_data = op_data(self.data, parsed_other)
+            new_err = op_err(self.err, 0, self.data, parsed_other)
+            new_mask = self.mask.copy()
+        else:
+            new_data = op_data(self.data, parsed_other.data)
+            new_err = op_err(self.err, parsed_other.err, self.data, parsed_other.data)
+            new_mask = self.mask & parsed_other.mask
+            
+        return Cube(data=new_data, wave=self.wave, err=new_err, mask=new_mask,
+                    wcs=self.wcs, header=self.header, unit=self.unit,
+                    wave_unit=self.wave_unit, is_var=False)
+
+    def __add__(self, other):
+        import numpy as np
+        return self._apply_op(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
+
+    def __sub__(self, other):
+        import numpy as np
+        return self._apply_op(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
+
+    def __mul__(self, other):
+        import numpy as np
+        return self._apply_op(other, np.multiply, lambda e1, e2, d1, d2: np.sqrt((d2 * e1)**2 + (d1 * e2)**2))
+
+    def __truediv__(self, other):
+        import numpy as np
+        return self._apply_op(other, np.divide, lambda e1, e2, d1, d2: np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2))
+
+    def _apply_rop(self, other, op_data, op_err):
+        """Helper to apply reversed operations: other (op) self."""
+        kind, parsed_other = self._as_operand_array(other)
+        if kind == "cube":
+            return NotImplemented
+
+        if kind == "scalar":
+            left_data = parsed_other
+            left_err = 0
+            new_data = op_data(left_data, self.data)
+            new_err = op_err(left_err, self.err, left_data, self.data)
+            new_mask = self.mask.copy()
+        elif kind == "array":
+            left_data = parsed_other
+            left_err = 0
+            new_data = op_data(left_data, self.data)
+            new_err = op_err(left_err, self.err, left_data, self.data)
+            new_mask = self.mask.copy()
+        else:
+            return NotImplemented
+
+        return Cube(data=new_data, wave=self.wave, err=new_err, mask=new_mask,
+                    wcs=self.wcs, header=self.header, unit=self.unit,
+                    wave_unit=self.wave_unit, is_var=False)
+
+    def __radd__(self, other):
+        import numpy as np
+        return self._apply_rop(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
+
+    def __rsub__(self, other):
+        import numpy as np
+        return self._apply_rop(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
+
+    def __rmul__(self, other):
+        import numpy as np
+        return self._apply_rop(other, np.multiply, lambda e1, e2, d1, d2: np.sqrt((d2 * e1)**2 + (d1 * e2)**2))
+
+    def __rtruediv__(self, other):
+        import numpy as np
+        return self._apply_rop(other, np.divide, lambda e1, e2, d1, d2: np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2))
+
+    def to_image(self, wmask=None, wbounds=None, method='sum'):
+        """
+        Collapse the 3D cube along its spectral axis to create a 2D Image.
+
+        Parameters
+        ----------
+        wmask : array-like (bool), optional
+            1D mask along the spectral axis. True means to include the wavelength.
+        wbounds : tuple of float, optional
+            Tuple (wave_min, wave_max) to limit the wavelengths used.
+        method : {'sum', 'mean', 'median'}
+            The collapsing method to use.
+
+        Returns
+        -------
+        Image
+            The collapsed 2D Image.
+        """
+        import numpy as np
+        import warnings
+        from prism.data.image import Image
+
+        try:
+            image_wcs = self.wcs.celestial if self.wcs is not None else None
+        except Exception:
+            image_wcs = None
+
+        wave_mask = np.ones(self.shape[0], dtype=bool)
+        if wmask is not None:
+            wave_mask &= np.asarray(wmask, dtype=bool)
+        if wbounds is not None:
+            wave_mask &= (self.wave >= wbounds[0]) & (self.wave <= wbounds[1])
+
+        valid_data = self.data[wave_mask]
+        valid_err = self.err[wave_mask]
+        
+        if self.mask is not None:
+            pixel_mask = self.mask[wave_mask]
+        else:
+            pixel_mask = np.ones_like(valid_data, dtype=bool)
+
+        masked_data = np.where(pixel_mask, valid_data, np.nan)
+        masked_var = np.where(pixel_mask, valid_err**2, np.nan)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            if method == 'sum':
+                img_data = np.nansum(masked_data, axis=0)
+                img_var = np.nansum(masked_var, axis=0)
+                img_err = np.sqrt(img_var)
+            elif method == 'mean':
+                count = np.sum(pixel_mask, axis=0)
+                img_data = np.nanmean(masked_data, axis=0)
+                img_var = np.nansum(masked_var, axis=0) / np.maximum(count, 1)**2
+                img_err = np.sqrt(img_var)
+            elif method == 'median':
+                count = np.sum(pixel_mask, axis=0)
+                img_data = np.nanmedian(masked_data, axis=0)
+                img_var = np.nansum(masked_var, axis=0) / np.maximum(count, 1)**2
+                img_err = np.sqrt(img_var) * 1.2533
+            else:
+                raise ValueError(f"Method {method} not supported. Use 'sum', 'mean', or 'median'.")
+
+        img_mask = np.sum(pixel_mask, axis=0) > 0
+        img_data[~img_mask] = 0.0
+        img_err[~img_mask] = 0.0
+
+        return Image(data=img_data, err=img_err, mask=img_mask, wcs=image_wcs, 
+                     header=self.header.get("PRIMARY", None), unit=self.unit, is_var=False)
