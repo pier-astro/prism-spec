@@ -1,3 +1,36 @@
+"""
+prism.modeling.models.lines — emission-line spectral models.
+
+Provides three families of Astropy-compliant emission-line models:
+
+Single-line models
+------------------
+``GaussianLine``, ``LorentzianLine``, ``VoigtLine``
+    Each wraps the corresponding profile (Gaussian, Lorentzian, Voigt) and
+    parameterises the line by rest-frame ``position`` (fixed), velocity
+    ``offset`` [km s⁻¹], ``fwhm`` [km s⁻¹], and ``amplitude``.
+    Instrumental broadening is accepted via the ``instfwhm`` argument
+    (scalar or Nx2 wavelength-FWHM table); the instrument FWHM is added
+    in quadrature to the intrinsic width.
+
+Line-group models
+-----------------
+``GaussianLines``, ``LorentzianLines``, ``VoigtLines``
+    Dynamically created subclasses of ``LineGroupBase`` that collect many
+    lines from a CSV table.  Lines with the same ``name`` column share a
+    single amplitude parameter (weighted relative to each other by the
+    ``weight`` column).  Constructed via:
+    - ``from_csv(csv_files, ...)`` — load from package or local CSV files.
+    - ``from_arrays(names, pos, weights, ...)`` — build from arrays.
+    - ``from_templates(df, ...)`` — build from a pandas DataFrame.
+
+Global filters
+--------------
+``set_wavelength_range(wmin, wmax)``
+    Set a global wavelength filter applied when loading CSV line lists.
+``setup_local_lines(wmin, wmax, dirpath, ...)``
+    Create a filtered local copy of the package line CSV files.
+"""
 import os
 import numpy as np
 import pandas as pd

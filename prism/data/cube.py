@@ -1,3 +1,6 @@
+"""
+prism.data.cube — 3-D IFU data-cube container.
+"""
 import numpy as np
 import warnings
 import os
@@ -11,7 +14,16 @@ from prism.data.image import Image
 def wcs_to_cd_matrix(header):
     """
     Convert WCS PC matrix + CDELT to the legacy CD matrix format (ESO convention).
-    Modifies the header in-place.
+
+    Parameters
+    ----------
+    header : astropy.io.fits.Header
+        Header modified in-place.
+
+    Returns
+    -------
+    astropy.io.fits.Header
+        The same header instance, updated to CD-matrix form.
     """
     naxis = header.get('WCSAXES', 2)
     has_pc = any(f'PC{i}_{j}' in header
@@ -39,33 +51,43 @@ def wcs_to_cd_matrix(header):
 
 
 class Cube:
-    __array_priority__ = 1000
-
     """
-    A lightweight, Astropy-backed container for 3D integral field spectroscopic data,
-    inspired by MPDAF and designed for robust spaxel-by-spaxel fitting.
+    Lightweight Astropy-backed container for 3-D IFU spectroscopic data.
+
+    Data layout: axis-0 is the spectral axis; axes 1 & 2 are spatial (y, x).
+    A flattened 2-D layout ``(N_wave, N_spaxel)`` is also accepted.
+
+    Supports arithmetic operations (+, -, *, /) between compatible ``Cube``
+    instances and numpy arrays, FITS I/O, redshift correction, and
+    wavelength-consistent masked views for fitting.
 
     Parameters
     ----------
     data : array-like, shape (N_wave, N_y, N_x) or (N_wave, N_spaxel)
-        The 3D (or flattened 2D) flux data array.
+        Flux data array.
     wave : array-like, shape (N_wave,), optional
-        The 1D wavelength array.
-    err : array-like, same shape as data, optional
-        The standard deviation (error) array. Mutually exclusive with `var`.
-    var : array-like, same shape as data, optional
-        The variance array. Mutually exclusive with `err`.
-    mask : array-like (bool), same shape as data, optional
-        Boolean mask array (True means valid, False means masked).
-    wcs : `astropy.wcs.WCS`, optional
-        The spatial/spectral WCS.
+        Wavelength array.  If omitted, integer pixel indices are used.
+    err : array-like, same shape as ``data``, optional
+        Standard-deviation error array.  Mutually exclusive with ``var``.
+    var : array-like, same shape as ``data``, optional
+        Variance array.  Mutually exclusive with ``err``.
+    mask : array-like (bool), same shape as ``data``, optional
+        Boolean mask (``True`` = valid spaxel/channel).
+    wcs : `~astropy.wcs.WCS`, optional
+        Combined spatial+spectral WCS.
     header : dict, optional
-        A dictionary mapping extension names (e.g. 'PRIMARY', 'DATA') to `astropy.io.fits.Header` objects.
-    unit : `astropy.units.Unit` or str, optional
-        The physical unit of the data (e.g. from BUNIT).
+        Mapping of extension names (e.g. ``'DATA'``, ``'PRIMARY'``) to
+        `~astropy.io.fits.Header` objects.
+    unit : `~astropy.units.Unit` or str, optional
+        Physical unit of the flux data (from ``BUNIT``).
+    wave_unit : `~astropy.units.Unit` or str, optional
+        Unit of the wavelength array (default Å).
     is_var : bool, optional
-        Flag indicating if the source error data was natively variance (True) or standard deviation (False).
+        Whether the supplied error extension is variance (``True``) or
+        standard deviation (``False``).
     """
+
+    __array_priority__ = 1000
     def __init__(self, data, wave=None, err=None, var=None, mask=None, wcs=None,
                  header=None, unit=None, wave_unit=None, is_var=None):
         data = np.asarray(data)
@@ -174,6 +196,7 @@ class Cube:
         return self._wave
 
     def _as_operand_array(self, other):
+        """Normalize arithmetic operand type (scalar, ndarray, or ``Cube``)."""
         if np.isscalar(other):
             return "scalar", other
         if isinstance(other, Cube):
@@ -205,9 +228,26 @@ class Cube:
     def from_fits(cls, filename, ext_data=None, ext_err=None, ext_var=None, ext_mask=None,
                   wave=None, wave_ext=None, ext_wcs=None):
         """
-        Load a Cube from a FITS file.
-        Provides MPDAF-like flexibility for identifying extensions and
-        automatically applying WCS fixes for known instruments (like MUSE).
+        Build a ``Cube`` from a FITS file.
+
+        Parameters
+        ----------
+        filename : str
+            Input FITS path.
+        ext_data, ext_err, ext_var, ext_mask : int or str, optional
+            Extension selectors for flux, error/variance, and mask.
+            If omitted, common names (DATA/SCI, ERR/VAR/STAT, DQ/MASK)
+            are auto-detected.
+        wave : array-like, optional
+            External wavelength grid override.
+        wave_ext : int or str, optional
+            Extension used to load wavelength when ``wave`` is not provided.
+        ext_wcs : int or str, optional
+            Extension used to construct WCS (defaults to ``ext_data``).
+
+        Notes
+        -----
+        Applies instrument-specific WCS clean-up for known MUSE headers.
         """
         with fits.open(filename) as hdul:
             headers = {'PRIMARY': hdul[0].header.copy()}
@@ -347,7 +387,7 @@ class Cube:
         return cls(data=data, wave=wave, err=err, var=var, mask=mask, wcs=wcs, header=headers, unit=unit, wave_unit=u.AA)
 
     def zcorrect(self, redshift=None):
-        """Correct the cube spectra for redshift."""
+        """Shift cube spectra from observed to rest frame using ``1 + z``."""
         if self._zcorrected:
             warnings.warn("Cube is already redshift corrected. Skipping.", UserWarning)
             return
@@ -364,7 +404,7 @@ class Cube:
         self._zcorrected = True
 
     def undo_zcorrect(self):
-        """Undo the redshift correction and return the cube to the observed frame."""
+        """Undo ``zcorrect()`` and restore observed-frame arrays."""
         if not self._zcorrected:
             warnings.warn("Cube is not redshift corrected. Skipping.", UserWarning)
             return
@@ -380,7 +420,27 @@ class Cube:
 
     def write(self, filename, overwrite=False, err=True, mask=False, 
               cd_matrix=False, is_var=None, keep_keywords='default'):
-        """Save the cube data to a FITS file. Masked values are set to np.nan."""
+        """
+        Write cube data to a FITS file.
+
+        Parameters
+        ----------
+        filename : str
+            Output FITS path.
+        overwrite : bool
+            Overwrite existing file.
+        err : bool
+            Write uncertainty extension (``ERR`` or ``VAR``).
+        mask : bool
+            Write mask extension (``DQ``).
+        cd_matrix : bool
+            Export WCS in legacy CD-matrix convention.
+        is_var : bool, optional
+            Force error extension to variance (``True``) or stddev
+            (``False``). Defaults to ``self.is_var``.
+        keep_keywords : {'default', 'all', False, list}, optional
+            Header-propagation policy for selected metadata keywords.
+        """
         from datetime import datetime
         wcs_header = self.wcs.to_header() if self.wcs else fits.Header()
         
@@ -490,6 +550,7 @@ class Cube:
         hdulist.writeto(filename, overwrite=overwrite)
 
     def _check_compatibility(self, other):
+        """Validate shape, wavelength grid, and WCS compatibility for arithmetic."""
         kind, parsed_other = self._as_operand_array(other)
         if kind in {"scalar", "array"}:
             return True
@@ -512,6 +573,7 @@ class Cube:
         return True
 
     def _apply_op(self, other, op_data, op_err):
+        """Apply binary operation and propagate errors/mask to a new ``Cube``."""
         self._check_compatibility(other)
 
         kind, parsed_other = self._as_operand_array(other)
@@ -534,23 +596,27 @@ class Cube:
                     wave_unit=self.wave_unit, is_var=False)
 
     def __add__(self, other):
+        """Add scalar/array/cube with standard error propagation."""
         import numpy as np
         return self._apply_op(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __sub__(self, other):
+        """Subtract scalar/array/cube with standard error propagation."""
         import numpy as np
         return self._apply_op(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __mul__(self, other):
+        """Multiply scalar/array/cube with propagated uncertainties."""
         import numpy as np
         return self._apply_op(other, np.multiply, lambda e1, e2, d1, d2: np.sqrt((d2 * e1)**2 + (d1 * e2)**2))
 
     def __truediv__(self, other):
+        """Divide by scalar/array/cube with propagated uncertainties."""
         import numpy as np
         return self._apply_op(other, np.divide, lambda e1, e2, d1, d2: np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2))
 
     def _apply_rop(self, other, op_data, op_err):
-        """Helper to apply reversed operations: other (op) self."""
+        """Apply reversed binary op ``other op self`` for scalar/array operands."""
         kind, parsed_other = self._as_operand_array(other)
         if kind == "cube":
             return NotImplemented
@@ -575,18 +641,22 @@ class Cube:
                     wave_unit=self.wave_unit, is_var=False)
 
     def __radd__(self, other):
+        """Right-hand addition: ``other + self``."""
         import numpy as np
         return self._apply_rop(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __rsub__(self, other):
+        """Right-hand subtraction: ``other - self``."""
         import numpy as np
         return self._apply_rop(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __rmul__(self, other):
+        """Right-hand multiplication: ``other * self``."""
         import numpy as np
         return self._apply_rop(other, np.multiply, lambda e1, e2, d1, d2: np.sqrt((d2 * e1)**2 + (d1 * e2)**2))
 
     def __rtruediv__(self, other):
+        """Right-hand division: ``other / self``."""
         import numpy as np
         return self._apply_rop(other, np.divide, lambda e1, e2, d1, d2: np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2))
 

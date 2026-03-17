@@ -10,11 +10,16 @@ __all__ = ['FittingWithOutlierRemoval']
 
 class FittingWithOutlierRemoval(FitterBase):
     """
-    Fitter wrapper to perform iterative fitting with outlier removal.
-    
-    Compatible with any `prism` fitter (e.g. `AstroFitter`). Provides automatic 
-    batched operations across `MultiFitResult` arrays while maintaining 
-    full Astropy model compliance.
+    Iterative outlier-rejection wrapper around any prism fitter.
+
+    At each iteration:
+    1. fit model with wrapped fitter
+    2. compute residuals
+    3. flag outliers via ``outlier_func`` (default ``sigma_clip``)
+    4. zero-weight flagged samples
+    5. refit until convergence or ``niter`` reached
+
+    Works for both single-spectrum and multifit workflows.
     
     Parameters
     ----------
@@ -27,6 +32,19 @@ class FittingWithOutlierRemoval(FitterBase):
         Maximum number of outlier rejection iterations. Defaults to 3.
     **outlier_kwargs
         Additional kwargs forwarded to `outlier_func`.
+
+    Common call-time parameters
+    ---------------------------
+    Same parameters accepted by the wrapped fitter (``yerr``, ``weights``,
+    ``statistic``, backend-specific kwargs, plus multifit kwargs).
+
+    Example
+    -------
+    >>> from prism.modeling.fitting import AstroTRF, FittingWithOutlierRemoval
+    >>> base = AstroTRF(calc_uncertainties=True)
+    >>> fitter = FittingWithOutlierRemoval(base, niter=4, sigma=3.0)
+    >>> fitted = fitter(model, x, y, yerr=yerr)
+    >>> mask = fitter.outlier_mask
     """
     def __init__(self, fitter, outlier_func=sigma_clip, niter=3, **outlier_kwargs):
         # We steal the base fitter's flags dynamically so the wrapper integrates seamlessly

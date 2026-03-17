@@ -1,3 +1,10 @@
+"""
+prism.modeling.models.continuum — spectral continuum models.
+
+Provides Astropy ``Fittable1DModel`` subclasses for common AGN/galaxy
+spectral continuum shapes.  All models expose analytic ``fit_deriv``
+methods for efficient Jacobian-based fitting.
+"""
 import numpy as np
 from astropy.modeling import Fittable1DModel, Parameter
 from astropy.modeling.physical_models import BlackBody

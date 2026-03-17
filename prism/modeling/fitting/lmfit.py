@@ -15,30 +15,16 @@ __all__ = ['LMFitter']
 
 class LMFitter(FitterBase):
     """
-    Classic Levenberg-Marquardt fitter with bounds via parameter transformation.
-    
-    Uses scipy's leastsq (LM algorithm) with parameter transformations for
-    bounds support. Provides guaranteed native covariance extraction.
-    
-    **Key Features:**
-    - Native LM covariance (always available for successful fits)
-    - Parameter transformations for bounds (logistic/exponential)
-    - Automatic Jacobian transformation for bounded parameters
-    - Efficient handling of tied parameters
-    - Faster than bounded methods for well-conditioned problems
-    
-    **Algorithm:**
-    Classic LM minimizes: ||f(p)||² using damping λ diag(J.T @ J)
-    
-    For bounds, we transform parameters:
-    - Two-sided [a,b]:  internal = log((p-a)/(b-p))
-    - Lower [a,∞):      internal = log(p-a)  
-    - Upper (-∞,b]:     internal = log(b-p)
-    
-    **Covariance Extraction:**
-    scipy.optimize.leastsq returns native covariance:
-        x, cov_x, infodict, mesg, ier = leastsq(func, x0, full_output=True)
-    We extract cov_x directly and transform it to external parameter space.
+    Levenberg-Marquardt fitter with internal bound transforms.
+
+    Uses ``scipy.optimize.leastsq`` (classic LM) and maps bounded external
+    parameters to an unbounded internal space before optimization, then maps
+    best-fit values and covariance back to the original parameter space.
+
+    Internal transforms:
+    - two-sided ``[a, b]``: ``log((p-a)/(b-p))``
+    - lower-only ``[a, +inf)``: ``log(p-a)``
+    - upper-only ``(-inf, b]``: ``log(b-p)``
     
     Parameters
     ----------
@@ -51,6 +37,16 @@ class LMFitter(FitterBase):
         - maxfev : int (default: 0, no limit)
         - ftol, xtol, gtol : float (convergence tolerances)
         - epsfcn : float (step for numerical Jacobian)
+
+    Common call-time parameters
+    ---------------------------
+    ``max_nfev`` (mapped to ``maxfev``), plus standard
+    ``yerr/statistic/weights`` from ``FitterBase.__call__``.
+
+    Example
+    -------
+    >>> fitter = LMFitter(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=20000)
     
     Notes
     -----

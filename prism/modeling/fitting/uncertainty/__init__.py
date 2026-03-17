@@ -1,40 +1,31 @@
 """
-Parameter uncertainty estimation for FantasyLab.
+prism.modeling.fitting.uncertainty — parameter uncertainty utilities.
 
-This module provides tools for extracting and working with parameter uncertainties
-from fitted models.
+Two complementary approaches are provided:
 
-Available Methods
------------------
-- **Covariance**: Fast, from Jacobian at best-fit (covariance submodule)
-  Assumes Gaussian errors and linear model behavior near minimum.
-  
-- **Bootstrap**: Robust, via parametric resampling (resample submodule)
-  Generates synthetic datasets and refits to estimate parameter distributions.
+- covariance: fast, local approximation from the Jacobian/Hessian at best fit.
+- bootstrap: robust resampling-based intervals via repeated synthetic refits.
 
-Usage
------
-**Covariance-based (fast):**
+Typical usage
+-------------
+Covariance-based uncertainties:
 
-    from prism.modeling.fitting import AstropyTRF
-    from fantasylab.uncertainty import covariance
-    
-    fitter = AstropyTRF(calc_uncertainties=True)
-    fitted = fitter(model, x, y, yerr=yerr)
-    
-    covariance.attach(fitted, fitter)
-    print(f"{fitted.amplitude_0.value} ± {fitted.amplitude_0.std}")
+        from prism.modeling.fitting import AstroTRF
+        from prism.modeling.fitting.uncertainty import covar_attach
 
-**Bootstrap (robust):**
+        fitter = AstroTRF(calc_uncertainties=True)
+        fitted = fitter(model, x, y, yerr=yerr)
+        covar_attach(fitted, fitter)
 
-    from fantasylab.uncertainty import resample
-    
-    fitter = AstropyTRF()
-    fitted = fitter(model, x, y, yerr=yerr)
-    
-    samples = resample.bootstrap(fitted, fitter, x, y, yerr, n_samples=1000)
-    resample.attach(fitted, samples)
-    print(f"{fitted.amplitude_0.value} [{fitted.amplitude_0.lolim}, {fitted.amplitude_0.uplim}]")
+Bootstrap intervals:
+
+        from prism.modeling.fitting import AstroTRF
+        from prism.modeling.fitting.uncertainty import bootstrap, resample_attach
+
+        fitter = AstroTRF()
+        fitted = fitter(model, x, y, yerr=yerr)
+        samples = bootstrap(fitted, fitter, x, y, yerr, n_samples=500)
+        resample_attach(fitted, samples)
 """
 
 from .covariance import (

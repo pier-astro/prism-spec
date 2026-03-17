@@ -16,15 +16,11 @@ __all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
 
 class ScipyFitter(FitterBase):
     """
-    Wrapper around scipy.optimize.least_squares.
-    
-    **Covariance Extraction Strategy:**
-    - Uses native Jacobian from scipy (result.jac) to compute covariance
-    - Covariance = inv(J.T @ J) [standard least-squares approximation]
-    - If Jacobian is ill-conditioned (κ > 10¹²), uses pseudo-inverse
-    - Optional expensive numerical Hessian fallback (disabled by default)
-    
-    Supports bounds natively with 'trf' and 'dogbox' methods.
+    Wrapper around ``scipy.optimize.least_squares``.
+
+    Supports ``'trf'`` and ``'dogbox'`` methods with native bounds.
+    Covariance is estimated from the Jacobian (``J.T @ J`` inverse/pinv)
+    when ``calc_uncertainties=True``.
     
     Parameters
     ----------
@@ -36,6 +32,17 @@ class ScipyFitter(FitterBase):
         If True, compute numerical Hessian when Jacobian fails (expensive).
     verbose : bool
         Print diagnostic information.
+
+    Common call-time parameters
+    ---------------------------
+    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``x_scale``, ``loss``,
+    ``f_scale``, plus the standard ``yerr/statistic/weights`` from
+    ``FitterBase.__call__``.
+
+    Example
+    -------
+    >>> fitter = ScipyFitter(method='trf', calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=10000, xtol=1e-10)
     """
     
     def __init__(self, method='trf', calc_uncertainties=False, force_numerical_covariance=False,
@@ -208,18 +215,16 @@ class ScipyFitter(FitterBase):
 
 class ScipyTRF(ScipyFitter):
     """
-    Trust Region Reflective via scipy.optimize.least_squares (supports bounds, default).
-    
-    **Key Parameters (pass in __call__):**
-    - max_nfev : int - Maximum function evaluations (default: 100×n_params)
-    - ftol : float - Tolerance for cost function change (default: 1e-8)
-    - xtol : float - Tolerance for parameter change (default: 1e-8)
-    - gtol : float - Tolerance for gradient norm (default: 1e-8)
-    - verbose : int - Scipy verbosity level {0, 1, 2} (default: 0)
-    
-    Example:
-        fitter = ScipyTRF(calc_uncertainties=True, verbose=True)
-        result = fitter(model, x, y, max_nfev=10000, ftol=1e-10)
+    SciPy trust-region reflective fitter.
+
+    Call-time parameters
+    --------------------
+    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``loss``, ``x_scale``.
+
+    Example
+    -------
+    >>> fitter = ScipyTRF(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=10000, ftol=1e-10)
     """
     def __init__(self, **kwargs):
         super().__init__(method='trf', **kwargs)
@@ -227,18 +232,16 @@ class ScipyTRF(ScipyFitter):
 
 class ScipyDogBox(ScipyFitter):
     """
-    Dogleg with rectangular trust regions via scipy.optimize.least_squares (supports bounds).
-    
-    **Key Parameters (pass in __call__):**
-    - max_nfev : int - Maximum function evaluations (default: 100×n_params)
-    - ftol : float - Tolerance for cost function change (default: 1e-8)
-    - xtol : float - Tolerance for parameter change (default: 1e-8)
-    - gtol : float - Tolerance for gradient norm (default: 1e-8)
-    - verbose : int - Scipy verbosity level {0, 1, 2} (default: 0)
-    
-    Example:
-        fitter = ScipyDogBox(calc_uncertainties=True)
-        result = fitter(model, x, y, max_nfev=5000, xtol=1e-10)
+    SciPy dogbox fitter with rectangular trust regions.
+
+    Call-time parameters
+    --------------------
+    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``loss``, ``x_scale``.
+
+    Example
+    -------
+    >>> fitter = ScipyDogBox(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=5000, xtol=1e-10)
     """
     def __init__(self, **kwargs):
         super().__init__(method='dogbox', **kwargs)

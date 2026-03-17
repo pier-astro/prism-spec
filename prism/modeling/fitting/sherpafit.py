@@ -21,34 +21,17 @@ __all__ = ['SherpaFitter', 'SherpaLM', 'SherpaSimplex', 'SherpaMonCar', 'HAS_SHE
 
 class SherpaFitter(FitterBase):
     """
-    Wrapper around Sherpa optimizers with C++-backed statistics.
-    
-    Uses Sherpa's robust optimization algorithms (Levenberg-Marquardt, Nelder-Mead, Monte Carlo)
-    with Sherpa's C++-backed statistic functions for performance.
-    
-    **Statistics (statistic parameter):**
-    - 'chi2' (default): Uses Sherpa's Chi2DataVar (with yerr) or LeastSq (no yerr)
-      → Leverages C++ backend for fast computation
-    - 'poisson': Not yet implemented (raises NotImplementedError)
-      → Cash/CStat statistics require different data handling
-    
-    **Internal Sherpa Stats Selection:**
-    - No yerr provided → sherpa.stats.LeastSq() (uniform weighting)
-    - yerr provided → sherpa.stats.Chi2DataVar() (variance from data)
-    
-    **Covariance Extraction Strategy:**
-    - Levenberg-Marquardt: Extracts native covariance from Sherpa/MINPACK (fast)
-    - Nelder-Mead & Monte Carlo: Do NOT provide native covariance
-      Falls back to expensive numerical Hessian estimation (not recommended)
-    - Recommendation: Use SherpaLM for uncertainties, others for optimization only
-    
-    **Stored MINPACK Parameters:**
-    - nfev : Number of function evaluations
-    - ier (stored as 'info' in result): MINPACK termination flag
-    - covar : Native covariance matrix from MINPACK (LevMar only)
-    - num_parallel_map : Sherpa-specific parallelization info
-    
-    Note: ~5-10x slower than scipy/astropy due to numerical derivatives.
+        Wrapper around Sherpa optimizers with Sherpa statistics.
+
+        Supports ``'levmar'``, ``'neldermead'``, and ``'moncar'`` methods.
+        ``statistic='chi2'`` is currently supported; ``'poisson'`` is reserved
+        for future Cash/CStat integration.
+
+        Notes
+        -----
+        - ``SherpaLM`` can provide native covariance from MINPACK.
+        - ``SherpaSimplex``/``SherpaMonCar`` are optimization-oriented and may
+            require numerical covariance fallback for uncertainties.
     
     Parameters
     ----------
@@ -56,6 +39,16 @@ class SherpaFitter(FitterBase):
         'levmar' (default), 'neldermead', 'moncar'
     calc_uncertainties : bool
         Calculate parameter uncertainties (default: False).
+
+    Common call-time parameters
+    ---------------------------
+    ``statistic='chi2'``, ``yerr`` (recommended), plus Sherpa backend
+    optimizer kwargs such as ``maxfev``, ``ftol``, ``xtol``.
+
+    Example
+    -------
+    >>> fitter = SherpaFitter(method='levmar', calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, statistic='chi2', maxfev=10000)
     """
     
     def __init__(self, method='levmar', calc_uncertainties=False,
@@ -227,7 +220,7 @@ class SherpaFitter(FitterBase):
 
 class SherpaLM(SherpaFitter):
     """
-    Sherpa Levenberg-Marquardt optimizer (fast, local).
+    Sherpa Levenberg-Marquardt optimizer (local, covariance-capable).
     
     **Key Parameters (pass in __call__):**
     - ftol : float - Tolerance for cost function change (default: 1.19e-7)
@@ -248,7 +241,7 @@ class SherpaLM(SherpaFitter):
 
 class SherpaSimplex(SherpaFitter):
     """
-    Sherpa Nelder-Mead simplex optimizer (derivative-free, robust).
+    Sherpa Nelder-Mead simplex optimizer (derivative-free).
     
     **Key Parameters (pass in __call__):**
     - ftol : float - Tolerance for cost function change (default: 1.19e-4)
@@ -269,7 +262,7 @@ class SherpaSimplex(SherpaFitter):
 
 class SherpaMonCar(SherpaFitter):
     """
-    Sherpa Monte Carlo optimizer (global search, stochastic).
+    Sherpa Monte Carlo optimizer (global/stochastic search).
     
     **Key Parameters (pass in __call__):**
     - ftol : float - Tolerance for cost function change (default: 1.19e-4)

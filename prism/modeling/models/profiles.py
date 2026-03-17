@@ -1,3 +1,22 @@
+"""
+prism.modeling.models.profiles — analytic line profile functions.
+
+Provides vectorised 1-D profile functions and their analytic derivatives
+used by the line model classes.  All functions work with scalar or
+broadcast-compatible array inputs.
+
+Functions
+---------
+gaussian / gaussian_deriv
+    Gaussian profile and its derivatives w.r.t. amplitude, center, sigma.
+lorentzian / lorentzian_deriv
+    Lorentzian (Cauchy) profile and derivatives.
+voigt / voigt_deriv
+    Voigt profile (Gaussian ⊗ Lorentzian) via ``scipy.special.wofz``
+    and its complex-plane derivatives.
+gaussian_flux / lorentzian_flux / voigt_flux
+    Integrated flux from profile parameters.
+"""
 import numpy as np
 from scipy.special import wofz
 
@@ -8,7 +27,23 @@ SQRT_LN2 = np.sqrt(np.log(2))
 
 def gaussian(x, amplitude, center, sigma):
     """
-    1D Gaussian function.
+    1-D Gaussian profile.
+
+    Parameters
+    ----------
+    x : array-like
+        Evaluation points.
+    amplitude : float
+        Peak value.
+    center : float
+        Center position.
+    sigma : float
+        Standard deviation (width parameter).
+
+    Returns
+    -------
+    ndarray
+        Profile values at ``x``.
     """
     if sigma == 0:
         return np.where(x == center, amplitude, 0.0)
@@ -16,8 +51,13 @@ def gaussian(x, amplitude, center, sigma):
 
 def gaussian_deriv(x, amplitude, center, sigma):
     """
-    Derivatives of Gaussian function w.r.t amplitude, center, sigma.
-    Returns: (val, d_amp, d_center, d_sigma)
+    Gaussian profile and its analytic derivatives.
+
+    Returns
+    -------
+    tuple
+        ``(val, d_amp, d_center, d_sigma)`` — profile value and partial
+        derivatives w.r.t. amplitude, center, and sigma.
     """
     if sigma == 0:
         val = np.where(x == center, amplitude, 0.0)
@@ -34,7 +74,22 @@ def gaussian_deriv(x, amplitude, center, sigma):
 
 def lorentzian(x, amplitude, center, gamma):
     """
-    1D Lorentzian function.
+    1-D Lorentzian (Cauchy) profile.
+
+    Parameters
+    ----------
+    x : array-like
+        Evaluation points.
+    amplitude : float
+        Peak value.
+    center : float
+        Line center.
+    gamma : float
+        Half-width at half-maximum (HWHM).
+
+    Returns
+    -------
+    ndarray
     """
     if gamma == 0:
         return np.where(x == center, amplitude, 0.0)
@@ -42,8 +97,12 @@ def lorentzian(x, amplitude, center, gamma):
 
 def lorentzian_deriv(x, amplitude, center, gamma):
     """
-    Derivatives of Lorentzian function w.r.t amplitude, center, gamma.
-    Returns: (val, d_amp, d_center, d_gamma)
+    Lorentzian profile and its analytic derivatives.
+
+    Returns
+    -------
+    tuple
+        ``(val, d_amp, d_center, d_gamma)``.
     """
     if gamma == 0:
         val = np.where(x == center, amplitude, 0.0)
@@ -66,14 +125,26 @@ def lorentzian_deriv(x, amplitude, center, gamma):
 
 def voigt(x, amplitude, center, sigma, gamma):
     """
-    Voigt profile using scipy.special.wofz.
-    
+    Voigt profile evaluated via ``scipy.special.wofz``.
+
+    The profile is peak-normalised so that ``voigt(center, ...) = amplitude``.
+
     Parameters
     ----------
+    x : array-like
+        Evaluation points.
+    amplitude : float
+        Peak value.
+    center : float
+        Line center.
     sigma : float
         Gaussian standard deviation.
     gamma : float
-        Lorentzian half-width at half-maximum (HWHM).
+        Lorentzian HWHM.
+
+    Returns
+    -------
+    ndarray
     """
     if sigma == 0:
         return lorentzian(x, amplitude, center, gamma)
@@ -128,8 +199,14 @@ def voigt(x, amplitude, center, sigma, gamma):
 
 def voigt_deriv(x, amplitude, center, sigma, gamma):
     """
-    Derivatives of Voigt function w.r.t amplitude, center, sigma, gamma.
-    Using the property: dw/dz = -2z w + 2i/sqrt(pi)
+    Voigt profile and its analytic derivatives.
+
+    Uses the identity ``dw/dz = -2z w + 2i/√π`` for the Faddeeva function.
+
+    Returns
+    -------
+    tuple
+        ``(val, d_amp, d_center, d_sigma, d_gamma)``.
     """
     if sigma == 0:
         return lorentzian_deriv(x, amplitude, center, gamma)

@@ -14,20 +14,16 @@ __all__ = ['AstroFitter', 'AstroTRF', 'AstroDogBox', 'AstroLM', 'AstroSimplex']
 
 class AstroFitter(FitterBase):
     """
-    Base wrapper around native Astropy fitters.
-    
-    Provides standardized fit_info structure and covariance storage using
-    Astropy's native optimization algorithms with clean error handling.
-    
-    **Supported methods:**
-    - 'TRF': Trust Region Reflective (supports bounds & ties)
-    - 'DogBox': Dogleg with rectangular trust regions (supports bounds & ties)
-    - 'LevMar': Levenberg-Marquardt (**NO BOUNDS OR TIES SUPPORT**)
-    - 'Simplex': Nelder-Mead simplex (**NO BOUNDS OR TIES SUPPORT**)
-    
-    **Covariance Extraction:**
-    Uses native covariance from Astropy's `param_cov` (computed analytically 
-    during optimization). More reliable than numerical estimation.
+    Wrapper around native Astropy fitters.
+
+    Supported methods
+    -----------------
+    - ``'TRF'``: trust-region reflective (supports bounds and ties)
+    - ``'DogBox'``: dogleg with rectangular trust regions (supports bounds and ties)
+    - ``'LevMar'``: Levenberg-Marquardt (ignores bounds/ties)
+    - ``'Simplex'``: Nelder-Mead simplex (ignores bounds/ties)
+
+    Covariance uses Astropy's native ``fit_info['param_cov']`` when available.
     
     Parameters
     ----------
@@ -37,6 +33,23 @@ class AstroFitter(FitterBase):
         Calculate covariance matrix using native Astropy method.
     verbose : bool
         Print diagnostic information.
+
+    Common call-time parameters
+    ---------------------------
+    yerr, statistic, weights
+        Standard weighting controls from ``FitterBase.__call__``.
+    maxiter : int, optional
+        Maximum optimizer iterations (default 1000 in this wrapper).
+    estimate_jacobian : bool, optional
+        Use numerical Jacobian (where supported).
+
+    Examples
+    --------
+    >>> fitter = AstroFitter(method='TRF', calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, maxiter=5000)
+
+    >>> fitter = AstroFitter(method='DogBox')
+    >>> result = fitter(model, x, cube, yerr=cube_err, nproc=4, spectral_axis=0)
     """
     
     _methods = {
@@ -190,20 +203,16 @@ class AstroFitter(FitterBase):
 
 class AstroTRF(AstroFitter):
     """
-    Trust Region Reflective via Astropy (supports bounds & ties).
-    
-    **Key Parameters (pass in __call__):**
-    - maxiter : int - Maximum iterations (default: 1000)
-    - acc : float - Accuracy for termination (default: 1e-7)
-    - epsilon : float - Step size for numerical derivatives (default: 1.49e-8)
-    - estimate_jacobian : bool - Use numerical Jacobian (default: False)
-    
-    Note: Default maxiter has been increased from Astropy's 100 to 1000.
-    Increase further for complex multi-component fits: maxiter=10000
-    
-    Example:
-        fitter = AstroTRF(calc_uncertainties=True, verbose=True)
-        result = fitter(model, x, y, maxiter=10000, acc=1e-10)
+    Astropy TRF fitter (bounds/ties supported).
+
+    Call-time parameters
+    --------------------
+    ``maxiter``, ``acc``, ``epsilon``, ``estimate_jacobian``.
+
+    Example
+    -------
+    >>> fitter = AstroTRF(calc_uncertainties=True, verbose=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, maxiter=10000, acc=1e-10)
     """
     def __init__(self, **kwargs):
         super().__init__(method='TRF', **kwargs)
@@ -211,20 +220,16 @@ class AstroTRF(AstroFitter):
 
 class AstroDogBox(AstroFitter):
     """
-    Dogleg via Astropy (supports bounds & ties).
-    
-    **Key Parameters (pass in __call__):**
-    - maxiter : int - Maximum iterations (default: 1000)
-    - acc : float - Accuracy for termination (default: 1e-7)
-    - epsilon : float - Step size for numerical derivatives (default: 1.49e-8)
-    - estimate_jacobian : bool - Use numerical Jacobian (default: False)
-    
-    Note: Default maxiter has been increased from Astropy's 100 to 1000.
-    For complex models, consider increasing further: maxiter=5000
-    
-    Example:
-        fitter = AstroDogBox(calc_uncertainties=True)
-        result = fitter(model, x, y, maxiter=5000)
+    Astropy DogBox fitter (bounds/ties supported).
+
+    Call-time parameters
+    --------------------
+    ``maxiter``, ``acc``, ``epsilon``, ``estimate_jacobian``.
+
+    Example
+    -------
+    >>> fitter = AstroDogBox(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, maxiter=5000)
     """
     def __init__(self, **kwargs):
         super().__init__(method='DogBox', **kwargs)
@@ -232,25 +237,21 @@ class AstroDogBox(AstroFitter):
 
 class AstroLM(AstroFitter):
     """
-    Levenberg-Marquardt via Astropy.
-    
-    ⚠️  **WARNING: DOES NOT SUPPORT PARAMETER BOUNDS OR TIED PARAMETERS!**
-    
-    This is the classic LM algorithm without bounds support. If your model has
-    bounded or tied parameters, they will be IGNORED. Use AstroTRF or 
-    AstroDogBox for bounds/ties support.
-    
-    **Key Parameters (pass in __call__):**
-    - maxiter : int - Maximum iterations (default: 1000)
-    - acc : float - Relative error for termination (default: 1e-7)
-    - epsilon : float - Step size for numerical derivatives (default: 1.49e-8)
-    - estimate_jacobian : bool - Use numerical Jacobian (default: False)
-    
-    Note: Default maxiter has been increased from Astropy's 100 to 1000.
-    
-    Example:
-        fitter = AstroLM(calc_uncertainties=True)
-        result = fitter(model, x, y, maxiter=5000)
+    Astropy Levenberg-Marquardt fitter.
+
+    Notes
+    -----
+    Does not enforce parameter bounds/ties; prefer ``AstroTRF`` or
+    ``AstroDogBox`` for constrained fits.
+
+    Call-time parameters
+    --------------------
+    ``maxiter``, ``acc``, ``epsilon``, ``estimate_jacobian``.
+
+    Example
+    -------
+    >>> fitter = AstroLM(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, maxiter=5000)
     """
     def __init__(self, **kwargs):
         super().__init__(method='LevMar', **kwargs)
@@ -258,24 +259,21 @@ class AstroLM(AstroFitter):
 
 class AstroSimplex(AstroFitter):
     """
-    Nelder-Mead Simplex via Astropy (derivative-free).
-    
-    ⚠️  **WARNING: DOES NOT SUPPORT PARAMETER BOUNDS OR TIED PARAMETERS!**
-    
-    This is a derivative-free simplex algorithm. If your model has bounded or 
-    tied parameters, they will be IGNORED. Use AstroTRF or AstroDogBox for 
-    bounds/ties support.
-    
-    **Key Parameters (pass in __call__):**
-    - maxiter : int - Maximum iterations (default: 1000)
-    - acc : float - Convergence tolerance (default: 1e-7)
-    - Note: Does NOT support estimate_jacobian (derivative-free method)
-    
-    Note: Default maxiter has been increased from Astropy's 100 to 1000.
-    
-    Example:
-        fitter = AstroSimplex(verbose=True)
-        result = fitter(model, x, y, maxiter=5000, acc=1e-6)
+    Astropy Nelder-Mead simplex fitter (derivative-free).
+
+    Notes
+    -----
+    Does not enforce parameter bounds/ties and does not use
+    ``estimate_jacobian``.
+
+    Call-time parameters
+    --------------------
+    ``maxiter``, ``acc``.
+
+    Example
+    -------
+    >>> fitter = AstroSimplex(verbose=True)
+    >>> fitted = fitter(model, x, y, maxiter=5000, acc=1e-6)
     """
     def __init__(self, **kwargs):
         super().__init__(method='Simplex', **kwargs)

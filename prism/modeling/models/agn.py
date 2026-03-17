@@ -1,3 +1,27 @@
+"""
+prism.modeling.models.agn — AGN component factory functions.
+
+Provides convenience constructors that return pre-configured
+``GaussianLines`` (or related) models for the most common AGN emission
+components.  Each factory internally calls ``GaussianLines.from_csv()``
+with the appropriate CSV line list from the package resources.
+
+Factory functions
+-----------------
+nlr()
+    Narrow Line Region — ``narrow_basic.csv``.
+blr()
+    Broad Line Region — hydrogen + helium line lists.
+fe()
+    Optical/UV Fe ˳˳ pseudo-continuum — ``feII_model.csv``.
+fe_uv()
+    UV Fe ˳˳ emission — ``uvfe.csv``.
+balmer()
+    Balmer series with tied relative amplitudes — ``balmer.csv``.
+
+All factories forward extra keyword arguments to ``GaussianLines.from_csv()``
+(e.g. ``instfwhm``, ``bounds``, ``amplitude``).
+"""
 from .lines import GaussianLines
 from . import lines as lines_module
 

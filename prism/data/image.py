@@ -1,3 +1,6 @@
+"""
+prism.data.image — 2-D image container.
+"""
 import numpy as np
 import warnings
 import astropy.units as u
@@ -7,30 +10,35 @@ from datetime import datetime
 import prism.config
 
 class Image:
-    __array_priority__ = 1000
-
     """
-    Base object for storing and manipulating 2D astronomical image data.
+    Container for a 2-D astronomical image (flux, error, mask).
+
+    Designed to store spatially resolved maps of fitting results or
+    collapsed cube slices.  Supports arithmetic operations between
+    compatible ``Image`` objects and numpy arrays.
 
     Parameters
     ----------
     data : array-like, shape (N_y, N_x) or (N_spaxel,)
-        The 2D (or flattened 1D) flux data array.
+        The 2-D (or flattened 1-D) flux data array.
     err : array-like, same shape as data, optional
-        The standard deviation (error) array. Mutually exclusive with `var`.
+        Standard-deviation error array.  Mutually exclusive with ``var``.
     var : array-like, same shape as data, optional
-        The variance array. Mutually exclusive with `err`.
+        Variance array.  Mutually exclusive with ``err``.
     mask : array-like (bool), same shape as data, optional
-        Boolean mask array (True means valid, False means masked).
-    wcs : `astropy.wcs.WCS`, optional
-        The spatial WCS.
+        Boolean mask (``True`` = valid pixel).
+    wcs : `~astropy.wcs.WCS`, optional
+        Spatial WCS.
     header : dict, optional
-        A dictionary mapping extension names to `astropy.io.fits.Header` objects.
-    unit : `astropy.units.Unit` or str, optional
-        The physical unit of the data.
+        Mapping of extension names to `~astropy.io.fits.Header` objects.
+    unit : `~astropy.units.Unit` or str, optional
+        Physical unit of the data.
     is_var : bool, optional
-        Flag indicating if the source error data was natively variance (True) or standard deviation (False).
+        Whether the supplied error extension is variance (``True``) or
+        standard deviation (``False``).
     """
+
+    __array_priority__ = 1000
     def __init__(self, data, err=None, var=None, mask=None, wcs=None,
                  header=None, unit=None, is_var=None):
         data = np.asarray(data)
@@ -116,6 +124,7 @@ class Image:
         self.is_var = True
 
     def _as_operand_array(self, other):
+        """Normalize arithmetic operand type (scalar, ndarray, or ``Image``)."""
         if np.isscalar(other):
             return "scalar", other
         if isinstance(other, Image):
@@ -127,6 +136,7 @@ class Image:
         raise TypeError(f"Operand must be an Image, scalar, or numpy.ndarray, got {type(other)}")
 
     def _check_compatibility(self, other):
+        """Validate shape and WCS compatibility for image arithmetic."""
         kind, parsed_other = self._as_operand_array(other)
         if kind in {"scalar", "array"}:
             return True
@@ -145,7 +155,7 @@ class Image:
         return True
 
     def _apply_op(self, other, op_data, op_err):
-        """Helper to apply an operation with another Image or scalar."""
+        """Apply binary operation and propagate errors/mask to a new ``Image``."""
         self._check_compatibility(other)
 
         kind, parsed_other = self._as_operand_array(other)
@@ -167,23 +177,27 @@ class Image:
                      header=self.header, unit=self.unit, is_var=False)
 
     def __add__(self, other):
+        """Add scalar/array/image with standard error propagation."""
         return self._apply_op(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __sub__(self, other):
+        """Subtract scalar/array/image with standard error propagation."""
         return self._apply_op(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __mul__(self, other):
+        """Multiply by scalar/array/image with propagated uncertainties."""
         def err_mul(e1, e2, d1, d2):
             return np.sqrt((d2 * e1)**2 + (d1 * e2)**2)
         return self._apply_op(other, np.multiply, err_mul)
 
     def __truediv__(self, other):
+        """Divide by scalar/array/image with propagated uncertainties."""
         def err_div(e1, e2, d1, d2):
             return np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2)
         return self._apply_op(other, np.divide, err_div)
 
     def _apply_rop(self, other, op_data, op_err):
-        """Helper to apply reversed operations: other (op) self."""
+        """Apply reversed binary op ``other op self`` for scalar/array operands."""
         kind, parsed_other = self._as_operand_array(other)
         if kind == "image":
             return NotImplemented
@@ -207,17 +221,21 @@ class Image:
                      header=self.header, unit=self.unit, is_var=False)
 
     def __radd__(self, other):
+        """Right-hand addition: ``other + self``."""
         return self._apply_rop(other, np.add, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __rsub__(self, other):
+        """Right-hand subtraction: ``other - self``."""
         return self._apply_rop(other, np.subtract, lambda e1, e2, d1, d2: np.sqrt(e1**2 + e2**2))
 
     def __rmul__(self, other):
+        """Right-hand multiplication: ``other * self``."""
         def err_mul(e1, e2, d1, d2):
             return np.sqrt((d2 * e1)**2 + (d1 * e2)**2)
         return self._apply_rop(other, np.multiply, err_mul)
 
     def __rtruediv__(self, other):
+        """Right-hand division: ``other / self``."""
         def err_div(e1, e2, d1, d2):
             return np.sqrt((e1 / d2)**2 + ((d1 * e2) / d2**2)**2)
         return self._apply_rop(other, np.divide, err_div)
@@ -225,8 +243,15 @@ class Image:
     @classmethod
     def from_fits(cls, filename, ext_data=None, ext_err=None, ext_var=None, ext_mask=None, ext_wcs=None):
         """
-        Load an Image from a FITS file.
-        Uses naming conventions similar to Cube (DATA, ERR/STAT/VAR, MASK/DQ).
+        Build an ``Image`` from a FITS file.
+
+        Parameters
+        ----------
+        filename : str
+            Input FITS path.
+        ext_data, ext_err, ext_var, ext_mask, ext_wcs : int or str, optional
+            Extension selectors. If omitted, common extension names are
+            auto-detected (DATA, ERR/STAT/VAR, MASK/DQ).
         """
         headers = {}
         with fits.open(filename) as hdul:
@@ -329,7 +354,25 @@ class Image:
         return cls(data=data, err=err, var=var, mask=mask, wcs=wcs, header=headers, unit=unit)
 
     def write(self, filename, overwrite=False, err=True, mask=False, cd_matrix=False, is_var=None):
-        """Save the Image data to a FITS file."""
+        """
+        Write image data to a FITS file.
+
+        Parameters
+        ----------
+        filename : str
+            Output FITS path.
+        overwrite : bool
+            Overwrite existing file.
+        err : bool
+            Write uncertainty extension (``ERR`` or ``STAT``).
+        mask : bool
+            Write mask extension (``DQ``).
+        cd_matrix : bool
+            Export WCS in legacy CD-matrix convention.
+        is_var : bool, optional
+            Force uncertainty extension to variance (``True``) or standard
+            deviation (``False``). Defaults to ``self.is_var``.
+        """
         from prism.data.cube import wcs_to_cd_matrix
         
         phdu_header = fits.Header()

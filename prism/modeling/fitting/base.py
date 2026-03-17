@@ -121,16 +121,12 @@ class FitterBase(Fitter, MultiFitMixin):
     """
     Base class for all prism fitters.
 
-    Provides:
-    - Consistent interface across all fitter types
-    - Standardized fit_info dictionary with scipy.optimize.OptimizeResult-like structure
-    - Common parameter handling (bounds, ties, weights)
-    - Covariance matrix computation and storage
-    - Clean separation between generic logic and specific algorithms
-    - Batched multi-spectrum fitting via MultiFitMixin (multifit() / fitter(model, x, cube))
+    Implements the shared fitting pipeline used by all backends:
+    parameter preparation, tie handling, weight/statistic handling,
+    covariance/stdev attachment, diagnostics, and optional multi-spectrum
+    dispatch to ``multifit()``.
 
-    Subclasses only need to implement _fit_impl() method that receives
-    prepared model, data, and parameters and returns the fitted result.
+    Subclasses only implement ``_fit_impl(prep_data, **kwargs)``.
 
     Parameters
     ----------
@@ -142,6 +138,32 @@ class FitterBase(Fitter, MultiFitMixin):
         Print diagnostic information during fitting.
     filter_non_finite : bool
         Silently discard non-finite data points before fitting.
+
+    Common call-time parameters
+    ---------------------------
+    model, x, y : required
+        Astropy model, spectral grid, and data values.
+    yerr : array-like, optional
+        1-sigma uncertainties (used to derive weights).
+    statistic : {'chi2', 'poisson'}
+        Weighting/statistic mode.
+    weights : array-like, optional
+        Explicit weights (overrides ``yerr``-derived weights).
+    nproc, spectral_axis, progress : optional
+        Multi-spectrum controls used when ``y.ndim > 1``.
+    initpars, bounds, fixed, tied : optional
+        Multifit-only per-parameter overrides.
+
+    Examples
+    --------
+    Single spectrum:
+
+    >>> fitter = SomeFitter(calc_uncertainties=True)
+    >>> fitted = fitter(model, x, y, yerr=yerr, statistic='chi2')
+
+    Batch/cube fit:
+
+    >>> result = fitter(model, x, cube, yerr=cube_err, nproc=4, spectral_axis=0)
     """
 
     def __init__(self, calc_uncertainties=False, force_numerical_covariance=False,

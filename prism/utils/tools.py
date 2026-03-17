@@ -1,3 +1,5 @@
+"""General-purpose wavelength, resampling, and plotting helpers."""
+
 import numpy as np
 import warnings
 
@@ -7,6 +9,7 @@ from astropy import units as u
 from astropy import constants as const
 
 def make_bins(wavs):
+    """Return bin edges and widths for a monotonic wavelength grid."""
     edges = np.zeros(wavs.shape[0]+1)
     widths = np.zeros(wavs.shape[0])
     edges[0] = wavs[0] - (wavs[1] - wavs[0])/2
@@ -161,9 +164,7 @@ def air_to_vac(air_wave):
     return air_wave*convert_to_vacuum(air_wave)
 
 def get_mask(x, intervals, mask_inside=True):
-    """
-    Get a mask of the intervals
-    """
+    """Build a boolean mask from a list of inclusive wavelength intervals."""
     w_masks = np.array([np.logical_and(x >= i[0], x <= i[1]) for i in intervals])
     if mask_inside:
         return np.all(w_masks == False, axis=0)
@@ -198,6 +199,7 @@ def compute_reduced_chi2(data, data_err, model, npars):
 
 
 def plot_lines(component, ax=None, show_name=True, text_y_frac=0.95, color='grey', lw=0.75, ls='--', **kwargs):
+    """Overlay spectral-line markers from a line component on a Matplotlib axis."""
     if ax is None:
         ax = plt.gca()
     if not hasattr(component, 'dft'):

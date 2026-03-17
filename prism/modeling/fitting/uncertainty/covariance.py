@@ -1,44 +1,13 @@
 """
-Covariance-based uncertainty estimation for FantasyLab fitters.
+Covariance-based parameter uncertainty estimation.
 
-This module provides utilities to extract parameter uncertainties from covariance
-matrices computed during fitting. It works with:
-- All FantasyLab fitters (AstropyTRF, ScipyTRF, SherpaLevMar, etc.)
-- Native Astropy fitters (TRFLSQFitter, LevMarLSQFitter, etc.)
+This module extracts covariance matrices from fitters (stored under
+``fit_info['param_cov']``) and provides helpers to derive standard
+deviations and correlations, then attach them back to model parameters.
 
-Uses Astropy's standard naming: covariance stored in fit_info['param_cov'].
-
-Usage
------
-With FantasyLab fitters:
-
-    from prism.modeling.fitting import AstropyTRF
-    from fantasylab.uncertainty.covariance import attach
-    
-    fitter = AstropyTRF(calc_uncertainties=True)
-    fitted_model = fitter(model, x, y)
-    attach(fitted_model, fitter)
-    
-    print(fitted_model.amplitude_0.std)
-
-With native Astropy fitters:
-
-    from astropy.modeling import fitting
-    from fantasylab.uncertainty.covariance import attach
-    
-    fitter = fitting.TRFLSQFitter(calc_uncertainties=True)
-    fitted_model = fitter(model, x, y, weights=weights)
-    attach(fitted_model, fitter)
-    
-    print(fitted_model.amplitude_0.std)
-
-Or use lower-level functions:
-
-    from fantasylab.uncertainty import covariance
-    
-    cov_matrix = covariance.covar(fitter)
-    std = covariance.stdevs(cov_matrix)
-    corr = covariance.correlation(cov_matrix)
+Compatible with:
+- prism fitters inheriting from ``FitterBase``
+- native Astropy fitters that expose ``fit_info`` with ``param_cov``
 """
 
 import numpy as np
@@ -83,7 +52,7 @@ def covar(fitter):
     Notes
     -----
     Extracts covariance from fit_info['param_cov'], following Astropy's standard.
-    Compatible with both FantasyLab fitters and native Astropy fitters.
+    Compatible with both prism fitters and native Astropy fitters.
     """
     if not hasattr(fitter, 'fit_info'):
         raise CovarianceError(

@@ -1,3 +1,6 @@
+"""
+prism.data.spectrum — 1-D spectrum container.
+"""
 from astropy import units as u
 from astropy import constants as const
 from astropy.io import fits
@@ -15,6 +18,47 @@ script_dir = os.path.dirname(__file__)
 dustpath = os.path.join(script_dir, "..", "..", "resources", "dust")
 
 class Spectrum():
+    """
+    Container for a 1-D astronomical spectrum.
+
+    Internally maintains three data layers:
+
+    * **original** — immutable copy of the input arrays.
+    * **full** — the working arrays after corrections (z, dust, vac/air)
+      applied on the full grid.
+    * **working** — the masked view used for plotting and fitting
+      (``wave``, ``flux``, ``err`` public attributes).
+
+    Parameters
+    ----------
+    wave : array-like
+        Wavelength array.
+    flux : array-like
+        Flux array.
+    err : array-like, optional
+        1-sigma uncertainties.  If not provided, a unity array is used.
+    ra, dec : float, optional
+        Sky coordinates (degrees), used for dust-map queries.
+    z : float, optional
+        Source redshift.
+    wave_unit : `~astropy.units.Unit` or str, optional
+        Physical unit of the wavelength array.
+    unit : `~astropy.units.Unit` or str, optional
+        Physical unit of the flux array.
+    _is_air_wave : bool
+        Set to ``False`` if the wavelengths are in vacuum (default ``True``).
+    name : str
+        Label used in plots and output (default ``'spectrum'``).
+
+    Attributes
+    ----------
+    wave, flux, err : ndarray
+        Masked working arrays (update after every crop/correction).
+    velscale : float
+        Velocity scale per pixel [km s⁻¹] for a log-spaced grid.
+    fwhm : ndarray
+        FWHM at each pixel for a log-spaced grid [Å].
+    """
     def __init__(self,
                  wave,
                  flux,
@@ -112,8 +156,20 @@ class Spectrum():
     
     def crop(self, wbounds=None, wmask=None):
         """
-        Crop the spectrum. Operates on the CURRENT working wavelength.
-        The underlying mask is always on the original data grid.
+        Crop the current working spectrum by wavelength bounds or mask.
+
+        Parameters
+        ----------
+        wbounds : tuple(float, float), optional
+            Inclusive wavelength range ``(wmin, wmax)`` in the current
+            working frame.
+        wmask : array-like of bool, optional
+            Boolean mask on the current working arrays.
+
+        Notes
+        -----
+        Cropping updates the internal mask on the original grid and is not
+        allowed after ``rebin()``.
         """
         if self._rebinned:
             raise RuntimeError("Cannot crop after rebinning.")
@@ -138,7 +194,23 @@ class Spectrum():
 
     def rebin(self, factor:int=None, new_wave=None, fill=np.nan, method='flux-conserving'):
         """
-        Rebin the spectrum. This is a permanent change that prevents further cropping or resets.
+        Rebin the spectrum onto a new wavelength grid.
+
+        Parameters
+        ----------
+        factor : int, optional
+            Downsampling factor for regular grouping of current pixels.
+        new_wave : array-like, optional
+            Target wavelength grid.
+        fill : float
+            Fill value used for out-of-range bins.
+        method : {'flux-conserving', 'mean', 'median'}
+            Resampling strategy.
+
+        Notes
+        -----
+        Rebinning is treated as permanent for this instance: subsequent
+        ``crop()`` and ``reset()`` operations are disabled.
         """
         if new_wave is not None:
             new_flux, new_err = resample_spectrum(self.wave, self.flux, self.err, new_wave=new_wave, fill=fill, method=method)
@@ -180,13 +252,17 @@ class Spectrum():
         self._update_working_arrays()
 
     def require_original_grid(self):
-        """Raise an error if not on the original wavelength grid."""
+        """Raise ``RuntimeError`` if the spectrum has been rebinned."""
         if self._rebinned:
             raise RuntimeError("Operation requires the original wavelength grid, but spectrum has been rebinned.")
 
     @classmethod
     def from_txt(cls, filename, ra=None, dec=None, z=None, wave_unit=None, unit=None, name=None):
-        """Create a Spectrum from a text file."""
+        """
+        Build a ``Spectrum`` from a plain-text file.
+
+        Expects two or three columns: ``wave flux [err]``.
+        """
         try:
             try:
                 wave, flux, err = np.genfromtxt(filename, unpack=True)
@@ -205,7 +281,16 @@ class Spectrum():
     def from_fits(cls, filename, ext=1,
                   wave_col='WAVELENGTH', flux_col='FLUX', err_col='ERROR',
                   ra=None, dec=None, z=None, name=None):
-        """Load a spectrum from a FITS file."""
+        """
+        Build a ``Spectrum`` from a table-like FITS extension.
+
+        Parameters
+        ----------
+        ext : int or str
+            FITS extension index/name containing tabular spectral columns.
+        wave_col, flux_col, err_col : str
+            Column names used to load wavelength, flux, and uncertainty.
+        """
         with fits.open(filename) as hdul:
             hdu = hdul[ext]
             data = hdu.data
@@ -228,7 +313,12 @@ class Spectrum():
                        wave_unit=wave_unit, unit=unit, name=name)
         
     def deredden(self, ebv=None):
-        """Deredden the flux using Fitzpatrick (1999) law."""
+        """
+        Apply Galactic dereddening to flux and error arrays.
+
+        If ``ebv`` is not provided, ``ra/dec`` must be available and an
+        ``SFDMap`` query is performed.
+        """
         if self._dereddened:
             warnings.warn("Spectrum is already dereddened. Skipping.", UserWarning)
             return
@@ -248,7 +338,12 @@ class Spectrum():
         self._update_working_arrays()
 
     def zcorrect(self, redshift=None):
-        """Correct the spectrum for redshift."""
+        """
+        Shift spectrum from observed to rest frame using ``1 + z``.
+
+        Wavelength is divided by ``(1+z)`` while flux/error are multiplied
+        by ``(1+z)``.
+        """
         if self._zcorrected:
             warnings.warn("Spectrum is already redshift corrected. Skipping.", UserWarning)
             return
@@ -266,7 +361,7 @@ class Spectrum():
         self._update_working_arrays()
 
     def vac_to_air(self):
-        """Convert vacuum to air wavelengths."""
+        """Convert wavelength array from vacuum to air scale in-place."""
         if self._is_air_wave:
             warnings.warn("Spectrum is already in air wavelengths. Skipping.", UserWarning)
             return
@@ -275,7 +370,7 @@ class Spectrum():
         self._update_working_arrays()
 
     def air_to_vac(self):
-        """Convert air to vacuum wavelengths."""
+        """Convert wavelength array from air to vacuum scale in-place."""
         if not self._is_air_wave:
             warnings.warn("Spectrum is already in vacuum wavelengths. Skipping.", UserWarning)
             return
@@ -284,7 +379,14 @@ class Spectrum():
         self._update_working_arrays()
 
     def plot_spectrum(self, ax=None):
-        """Plot the spectrum using matplotlib."""
+        """
+        Plot the working spectrum using Matplotlib.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Target axis. If omitted, a new figure/axis is created.
+        """
         created_fig = False
         if ax is None:
             fig, ax = plt.subplots()
