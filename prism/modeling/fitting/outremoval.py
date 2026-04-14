@@ -2,121 +2,79 @@ import warnings
 import numpy as np
 from astropy.stats import sigma_clip
 from astropy.utils.exceptions import AstropyUserWarning
+from astropy.modeling.fitting import Fitter, model_to_fit_params
 
-from .base import FitterBase, _apply_tied_fast
+from .utils import _apply_tied_fast, _get_tied_info
 import copy
 
 __all__ = ['FittingWithOutlierRemoval']
 
-class FittingWithOutlierRemoval(FitterBase):
+class FittingWithOutlierRemoval(Fitter):
     """
-    Iterative outlier-rejection wrapper around any prism fitter.
-
-    At each iteration:
-    1. fit model with wrapped fitter
-    2. compute residuals
-    3. flag outliers via ``outlier_func`` (default ``sigma_clip``)
-    4. zero-weight flagged samples
-    5. refit until convergence or ``niter`` reached
-
-    Works for both single-spectrum and multifit workflows.
-    
-    Parameters
-    ----------
-    fitter : FitterBase
-        Instantiated FitterBase object to wrap.
-    outlier_func : callable, optional
-        Function to compute outliers (must return a masked array).
-        Defaults to `astropy.stats.sigma_clip`.
-    niter : int, optional
-        Maximum number of outlier rejection iterations. Defaults to 3.
-    **outlier_kwargs
-        Additional kwargs forwarded to `outlier_func`.
-
-    Common call-time parameters
-    ---------------------------
-    Same parameters accepted by the wrapped fitter (``yerr``, ``weights``,
-    ``statistic``, backend-specific kwargs, plus multifit kwargs).
-
-    Example
-    -------
-    >>> from prism.modeling.fitting import AstroTRF, FittingWithOutlierRemoval
-    >>> base = AstroTRF(calc_uncertainties=True)
-    >>> fitter = FittingWithOutlierRemoval(base, niter=4, sigma=3.0)
-    >>> fitted = fitter(model, x, y, yerr=yerr)
-    >>> mask = fitter.outlier_mask
+    Iterative outlier-rejection wrapper around any prism correlation fitter.
     """
     def __init__(self, fitter, outlier_func=sigma_clip, niter=3, **outlier_kwargs):
         # We steal the base fitter's flags dynamically so the wrapper integrates seamlessly
-        calc_unc = getattr(fitter, 'calc_uncertainties', False)
-        force_num_cov = getattr(fitter, 'force_numerical_covariance', False)
-        verbose = getattr(fitter, 'verbose', False)
-        filter_non_finite = getattr(fitter, 'filter_non_finite', False)
-
-        super().__init__(
-            calc_uncertainties=calc_unc,
-            force_numerical_covariance=force_num_cov,
-            verbose=verbose,
-            filter_non_finite=filter_non_finite
-        )
+        self.calc_uncertainties = getattr(fitter, 'calc_uncertainties', False)
+        self.verbose = getattr(fitter, 'verbose', False)
         
         self._fitter = fitter
         self.outlier_func = outlier_func
         self.niter = niter
         self.outlier_kwargs = outlier_kwargs
-        
-        # Store mask explicitly for single target fits
         self.outlier_mask = None
 
     def _multifit_spawn_fitter(self):
         # Override to ensure the nested fitter is safely cloned for parallel workers
-        worker_fitter = super()._multifit_spawn_fitter()
+        import copy
+        worker_fitter = copy.copy(self)
         if hasattr(self._fitter, '_multifit_spawn_fitter'):
             worker_fitter._fitter = self._fitter._multifit_spawn_fitter()
         else:
             worker_fitter._fitter = copy.copy(self._fitter)
         return worker_fitter
 
-    def _fit_impl(self, prep_data, **kwargs):
-        # Create a transient prep_data to manipulate weights locally
-        prep_data_iter = prep_data.copy()
-        
-        # If no weights, create default array to hold iteration modifications
-        if prep_data_iter['weights'] is None:
-            prep_data_iter['weights'] = np.ones_like(prep_data['y'], dtype=float)
+    def __call__(self, model, x, y, z=None, weights=None, **kwargs):
+        # We assume _prepare_fitting logic has run or isn't needed here 
+        # because the internal Fitter will get the wrapped call.
+        if weights is None:
+            weights = np.ones_like(y, dtype=float)
         else:
-            prep_data_iter['weights'] = np.copy(prep_data_iter['weights'])
+            weights = np.copy(weights)
             
-        best_result = None
-        last_mask = np.zeros_like(prep_data['y'], dtype=bool)
+        best_model = None
+        last_mask = np.zeros_like(y, dtype=bool)
         
-        # Fit logic over n interactions
         for i in range(self.niter + 1):
             
-            # Handle the wrapped fitter. We pass down exact kwargs.
-            result = self._fitter._fit_impl(prep_data_iter, **kwargs)
-            best_result = result
+            # Pass to inner fitter
+            call_weights = np.copy(weights)
             
-            # If things went pear-shaped or no free parameters, just abort loop
-            if not result['success'] or len(prep_data['fit_indices']) == 0:
+            try:
+                # The underlying fitter might be patched with wrapped_call
+                # and accept filter_non_finite, yerr etc.
+                result_model = self._fitter(model, x, y, z=z, weights=call_weights, **kwargs)
+            except Exception as e:
+                if self.verbose:
+                    print(f"FittingWithOutlierRemoval iteration {i} failed: {e}")
                 break
                 
-            # Stop if iterations complete
+            best_model = result_model
+            fit_info = getattr(self._fitter, 'fit_info', {})
+            
+            # If things went pear-shaped, jump out
+            if not fit_info.get('success', False):
+                break
+                
             if i == self.niter:
                 break
                 
-            # Re-apply parameters safely to evaluate our residual model
-            fit_model = prep_data['model'].copy()
-            
-            fit_model.parameters[prep_data['fit_indices']] = result['fitted_params']
-            _apply_tied_fast(fit_model, prep_data['tied_info'], fit_model.parameters)
-            
             # Calculate residuals
-            y_fit = fit_model(prep_data['x'])
-            residuals = prep_data['y'] - y_fit
+            y_fit = result_model(x)
+            residuals = y - y_fit
             
-            # Isolate valid elements for correct statistics evaluation!
-            valid_mask = (prep_data_iter['weights'] > 0)
+            # Isolate valid elements
+            valid_mask = (weights > 0)
             if not np.any(valid_mask):
                 break 
                 
@@ -137,10 +95,10 @@ class FittingWithOutlierRemoval(FitterBase):
             
             last_mask = current_mask.copy()
             
-            # Force weights of newly identified outliers instantly to zero!
-            prep_data_iter['weights'][current_mask] = 0.0
+            # Force weights of newly identified outliers to zero
+            weights[current_mask] = 0.0
 
-        # Output the outlier mask on our wrapper level for single-fit inquiries
         self.outlier_mask = last_mask
+        self.fit_info = getattr(self._fitter, 'fit_info', {})
         
-        return best_result
+        return best_model

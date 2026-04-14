@@ -115,6 +115,16 @@ def _get_param_limits(param):
     hi = param.uplim if has_hi else param.value
     return lo, hi, has_lo, has_hi
 
+
+def _voigt_eval_and_deriv(x, amplitude, center, sigma, gamma):
+    """Return Voigt value and derivatives with a stable 5-tuple signature."""
+    out = profiles.voigt_deriv(x, amplitude, center, sigma, gamma)
+    if len(out) == 5:
+        return out
+    val, d_amp, d_center, d_gamma = out
+    d_sigma = np.zeros_like(val)
+    return val, d_amp, d_center, d_sigma, d_gamma
+
 class LineModelBase(Fittable1DModel):
     """Base class for line models providing common derivative logic."""
 
@@ -290,7 +300,7 @@ class GaussianLine(LineModelBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = amplitude / (1.0 + redshift)
         return profiles.gaussian(x, amplitude_eff, center, sigma_eff)
 
@@ -304,41 +314,41 @@ class GaussianLine(LineModelBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = amplitude / (1.0 + redshift)
-        
+
         val, d_amp_eff, d_center, d_sigma_eff = profiles.gaussian_deriv(x, amplitude_eff, center, sigma_eff)
-        
+
         d_amp = d_amp_eff / (1.0 + redshift)
-        
+
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
         d_center_d_off = center / c_kms
-        
+
         safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
         d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
-        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst = np.where(sigma_eff != 0, sigma_inst / safe_sigma_eff, 0.0)
         d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
-        
+
         d_sigma_intrinsic_d_pos = (fwhm / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhm = (center / c_kms) / sigma2fwhm
-        
+
         d_sigma_eff_d_pos = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
                              + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_pos)
         d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
                              + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhm = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhm
-        
+
         d_position = d_center * d_center_d_pos + d_sigma_eff * d_sigma_eff_d_pos
         d_offset = d_center * d_center_d_off + d_sigma_eff * d_sigma_eff_d_off
         d_fwhm = d_sigma_eff * d_sigma_eff_d_fwhm
-        
+
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
         d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
         d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
                                   + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
-        
+
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
         d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift
         
@@ -353,7 +363,7 @@ class GaussianLine(LineModelBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = self.amplitude.value / (1.0 + self.redshift.value)
         return profiles.gaussian_flux(amplitude_eff, sigma_eff)
 
@@ -369,48 +379,45 @@ class LorentzianLine(LineModelBase):
     
     _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm': u.km/u.s}
 
-    @staticmethod
-    def evaluate(x, amplitude, position, offset, fwhm, redshift):
+    def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         center = position * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         gamma = fwhm_A / 2.0
+        instfwhm_val = self.instfwhm_val(center)
+        sigma_inst = (instfwhm_val / c_kms * center) / sigma2fwhm
+
         amplitude_eff = amplitude / (1.0 + redshift)
-        return profiles.lorentzian(x, amplitude_eff, center, gamma)
+        if sigma_inst == 0.0:
+            return profiles.lorentzian(x, amplitude_eff, center, gamma)
+
+        return profiles.voigt(x, amplitude_eff, center, sigma_inst, gamma)
 
     def fit_deriv(self, x, amplitude, position, offset, fwhm, redshift):
-        center = position * (1.0 + redshift) * np.exp(offset / c_kms)
-        fwhm_A = fwhm / c_kms * center
-        gamma = fwhm_A / 2.0
-        amplitude_eff = amplitude / (1.0 + redshift)
-        
-        val, d_amp_eff, d_center, d_gamma = profiles.lorentzian_deriv(x, amplitude_eff, center, gamma)
-        
-        d_amp = d_amp_eff / (1.0 + redshift)
-        
-        d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
-        d_center_d_off = center / c_kms
-        
-        d_gamma_d_pos = (fwhm / c_kms * d_center_d_pos) / 2.0
-        d_gamma_d_off = (fwhm / c_kms * d_center_d_off) / 2.0
-        d_gamma_d_fwhm = (center / c_kms) / 2.0
-        
-        d_position = d_center * d_center_d_pos + d_gamma * d_gamma_d_pos
-        d_offset = d_center * d_center_d_off + d_gamma * d_gamma_d_off
-        d_fwhm = d_gamma * d_gamma_d_fwhm
-        
-        d_center_d_redshift = center / (1.0 + redshift)
-        d_gamma_d_redshift = gamma / (1.0 + redshift)
-        d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
-        d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_gamma * d_gamma_d_redshift
-        
-        return [d_amp, d_position, d_offset, d_fwhm, d_redshift]
+        params = [amplitude, position, offset, fwhm, redshift]
+        base = self.evaluate(x, *params)
+        derivs = []
+        eps = 1e-6
+
+        for i, pval in enumerate(params):
+            delta = abs(pval) * eps if pval != 0 else eps
+            shifted = list(params)
+            shifted[i] = pval + delta
+            derivs.append((self.evaluate(x, *shifted) - base) / delta)
+
+        return derivs
 
     def _calc_flux(self):
         center = self.position.value * (1.0 + self.redshift.value) * np.exp(self.offset.value / c_kms)
         fwhm_A = self.fwhm.value / c_kms * center
         gamma = fwhm_A / 2.0
+        instfwhm_val = self.instfwhm_val(center)
+        sigma_inst = (instfwhm_val / c_kms * center) / sigma2fwhm
+
         amplitude_eff = self.amplitude.value / (1.0 + self.redshift.value)
-        return profiles.lorentzian_flux(amplitude_eff, gamma)
+        if sigma_inst == 0.0:
+            return profiles.lorentzian_flux(amplitude_eff, gamma)
+
+        return profiles.voigt_flux(amplitude_eff, sigma_inst, gamma)
 
 class VoigtLine(LineModelBase):
     """
@@ -456,9 +463,15 @@ class VoigtLine(LineModelBase):
         
         gamma = fwhm_L_A / 2.0
         amplitude_eff = amplitude / (1.0 + redshift)
-        
-        val, d_amp_eff, d_center, d_sigma_eff, d_gamma = profiles.voigt_deriv(x, amplitude_eff, center, sigma_eff, gamma)
-        
+
+        val, d_amp_eff, d_center, d_profile_sigma_eff, d_profile_gamma = _voigt_eval_and_deriv(
+            x,
+            amplitude_eff,
+            center,
+            sigma_eff,
+            gamma,
+        )
+
         d_amp = d_amp_eff / (1.0 + redshift)
         
         d_center_d_pos = (1.0 + redshift) * np.exp(offset / c_kms)
@@ -466,27 +479,39 @@ class VoigtLine(LineModelBase):
         
         safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
         d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
-        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst = np.where(sigma_eff != 0, sigma_inst / safe_sigma_eff, 0.0)
         d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_pos = (fwhm_G / c_kms * d_center_d_pos) / sigma2fwhm
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhmG = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_pos = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
-                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_pos)
-        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
-                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
+        d_sigma_eff_d_pos = (
+            d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_pos
+            + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_pos
+        )
+        d_sigma_eff_d_off = (
+            d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+            + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off
+        )
         d_sigma_eff_d_fwhmG = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhmG
         
         d_gamma_d_pos = (fwhm_L / c_kms * d_center_d_pos) / 2.0
         d_gamma_d_off = (fwhm_L / c_kms * d_center_d_off) / 2.0
         d_gamma_d_fwhmL = (center / c_kms) / 2.0
         
-        d_position = d_center * d_center_d_pos + d_sigma_eff * d_sigma_eff_d_pos + d_gamma * d_gamma_d_pos
-        d_offset = d_center * d_center_d_off + d_sigma_eff * d_sigma_eff_d_off + d_gamma * d_gamma_d_off
-        d_fwhmG = d_sigma_eff * d_sigma_eff_d_fwhmG
-        d_fwhmL = d_gamma * d_gamma_d_fwhmL
+        d_position = (
+            d_center * d_center_d_pos
+            + d_profile_sigma_eff * d_sigma_eff_d_pos
+            + d_profile_gamma * d_gamma_d_pos
+        )
+        d_offset = (
+            d_center * d_center_d_off
+            + d_profile_sigma_eff * d_sigma_eff_d_off
+            + d_profile_gamma * d_gamma_d_off
+        )
+        d_fwhmG = d_profile_sigma_eff * d_sigma_eff_d_fwhmG
+        d_fwhmL = d_profile_gamma * d_gamma_d_fwhmL
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
@@ -494,8 +519,14 @@ class VoigtLine(LineModelBase):
         d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
                                   + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         d_gamma_d_redshift = gamma / (1.0 + redshift)
+
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
-        d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift + d_gamma * d_gamma_d_redshift
+        d_redshift = (
+            d_amp_eff * d_amp_eff_d_redshift
+            + d_center * d_center_d_redshift
+            + d_profile_sigma_eff * d_sigma_eff_d_redshift
+            + d_profile_gamma * d_gamma_d_redshift
+        )
         
         return [d_amp, d_position, d_offset, d_fwhmG, d_fwhmL, d_redshift]
 
@@ -836,7 +867,7 @@ class GaussianLines(LineGroupBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
         return (amplitude_eff, center, sigma_eff)
     
@@ -851,36 +882,36 @@ class GaussianLines(LineGroupBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
-        
+
         val, d_amp_eff, d_center, d_sigma_eff = profiles.gaussian_deriv(x, amplitude_eff, center, sigma_eff)
-        
-        d_amp = d_amp_eff / (1.0 + redshift)
-        
+
+        d_amp = d_amp_eff * (weight / (1.0 + redshift))
+
         d_center_d_off = center / c_kms
-        
+
         safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
         d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
-        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst = np.where(sigma_eff != 0, sigma_inst / safe_sigma_eff, 0.0)
         d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
-        
+
         d_sigma_intrinsic_d_off = (fwhm / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhm = (center / c_kms) / sigma2fwhm
-        
+
         d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
                              + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
         d_sigma_eff_d_fwhm = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhm
-        
+
         d_offset = d_center * d_center_d_off + d_sigma_eff * d_sigma_eff_d_off
         d_fwhm = d_sigma_eff * d_sigma_eff_d_fwhm
-        
+
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
         d_sigma_inst_d_redshift = d_sigma_inst_d_center * d_center_d_redshift
         d_sigma_eff_d_redshift = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_redshift
                                   + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
-        
+
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
         d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift
         
@@ -896,55 +927,63 @@ class GaussianLines(LineGroupBase):
         sigma_intrinsic = fwhm_A / sigma2fwhm
         sigma_inst = instfwhm_A / sigma2fwhm
         sigma_eff = np.sqrt(sigma_intrinsic**2 + sigma_inst**2)
-        
+
         amplitude_eff = amp / (1.0 + redshift)
         return profiles.gaussian_flux(amplitude_eff, sigma_eff)
 
 class LorentzianLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km/u.s, 'fwhm': u.km/u.s, 'redshift': None}
-    _profile_func = staticmethod(profiles.lorentzian)
-    
-    @staticmethod
-    def _single_profile_args(pos, amp_template, weight, offset, fwhm, redshift):
-        center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
-        fwhm_A = fwhm / c_kms * center
-        gamma = fwhm_A / 2.0
-        amplitude_eff = (amp_template * weight) / (1.0 + redshift)
-        return (amplitude_eff, center, gamma)
+    _profile_func = staticmethod(profiles.voigt)
 
-    @staticmethod
-    def _single_profile_deriv(x, pos, amp_template, weight, offset, fwhm, redshift):
+    def _single_profile_args(self, pos, amp_template, weight, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         gamma = fwhm_A / 2.0
+        instfwhm_val = self.instfwhm_val(center)
+        sigma_inst = (instfwhm_val / c_kms * center) / sigma2fwhm
+
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
-        
-        val, d_amp_eff, d_center, d_gamma = profiles.lorentzian_deriv(x, amplitude_eff, center, gamma)
-        
-        d_amp = d_amp_eff / (1.0 + redshift)
-        
-        d_center_d_off = center / c_kms
-        d_gamma_d_off = (fwhm / c_kms * d_center_d_off) / 2.0
-        d_gamma_d_fwhm = (center / c_kms) / 2.0
-        
-        d_offset = d_center * d_center_d_off + d_gamma * d_gamma_d_off
-        d_fwhm = d_gamma * d_gamma_d_fwhm
-        
-        d_center_d_redshift = center / (1.0 + redshift)
-        d_gamma_d_redshift = gamma / (1.0 + redshift)
-        d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
-        d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_gamma * d_gamma_d_redshift
-        
+        return (amplitude_eff, center, sigma_inst, gamma)
+
+    def _single_profile_deriv(self, x, pos, amp_template, weight, offset, fwhm, redshift):
+        eps = 1e-6
+
+        def _eval(amp_t, off, fw, z):
+            args = self._single_profile_args(pos, amp_t, weight, off, fw, z)
+            return self._profile_func(x, *args)
+
+        val = _eval(amp_template, offset, fwhm, redshift)
+
+        d_amp_step = abs(amp_template) * eps if amp_template != 0 else eps
+        d_off_step = abs(offset) * eps if offset != 0 else eps
+        d_fwhm_step = abs(fwhm) * eps if fwhm != 0 else eps
+        d_z_step = abs(redshift) * eps if redshift != 0 else eps
+
+        d_amp_true = (_eval(amp_template + d_amp_step, offset, fwhm, redshift) - val) / d_amp_step
+        d_offset = (_eval(amp_template, offset + d_off_step, fwhm, redshift) - val) / d_off_step
+        d_fwhm = (_eval(amp_template, offset, fwhm + d_fwhm_step, redshift) - val) / d_fwhm_step
+        d_redshift = (_eval(amp_template, offset, fwhm, redshift + d_z_step) - val) / d_z_step
+
+        if weight != 0:
+            d_amp = d_amp_true / weight
+        else:
+            d_amp = np.zeros_like(val)
+
         return val, d_amp, d_offset, d_fwhm, d_redshift
 
-    @staticmethod
-    def _calc_flux(pos, amp, offset, fwhm, redshift):
+    def _calc_flux(self, pos, amp, offset, fwhm, redshift):
         center = pos * (1.0 + redshift) * np.exp(offset / c_kms)
         fwhm_A = fwhm / c_kms * center
         gamma = fwhm_A / 2.0
+        instfwhm_val = self.instfwhm_val(center)
+        sigma_inst = (instfwhm_val / c_kms * center) / sigma2fwhm
+
         amplitude_eff = amp / (1.0 + redshift)
-        return profiles.lorentzian_flux(amplitude_eff, gamma)
+        if sigma_inst == 0.0:
+            return profiles.lorentzian_flux(amplitude_eff, gamma)
+
+        return profiles.voigt_flux(amplitude_eff, sigma_inst, gamma)
 
 
 class VoigtLines(LineGroupBase):
@@ -983,31 +1022,43 @@ class VoigtLines(LineGroupBase):
         
         gamma = fwhm_L_A / 2.0
         amplitude_eff = (amp_template * weight) / (1.0 + redshift)
-        
-        val, d_amp_eff, d_center, d_sigma_eff, d_gamma = profiles.voigt_deriv(x, amplitude_eff, center, sigma_eff, gamma)
-        
-        d_amp = d_amp_eff / (1.0 + redshift)
+
+        val, d_amp_eff, d_center, d_profile_sigma_eff, d_profile_gamma = _voigt_eval_and_deriv(
+            x,
+            amplitude_eff,
+            center,
+            sigma_eff,
+            gamma,
+        )
+
+        d_amp = d_amp_eff * (weight / (1.0 + redshift))
         
         d_center_d_off = center / c_kms
         
         safe_sigma_eff = np.where(sigma_eff != 0, sigma_eff, 1.0)
         d_sigma_eff_d_sigma_intrinsic = np.where(sigma_eff != 0, sigma_intrinsic / safe_sigma_eff, 0.0)
-        d_sigma_eff_d_sigma_inst      = np.where(sigma_eff != 0, sigma_inst      / safe_sigma_eff, 0.0)
+        d_sigma_eff_d_sigma_inst = np.where(sigma_eff != 0, sigma_inst / safe_sigma_eff, 0.0)
         d_sigma_inst_d_center = (instfwhm_val + instfwhm_deriv * center) / (c_kms * sigma2fwhm)
         
         d_sigma_intrinsic_d_off = (fwhm_G / c_kms * d_center_d_off) / sigma2fwhm
         d_sigma_intrinsic_d_fwhmG = (center / c_kms) / sigma2fwhm
         
-        d_sigma_eff_d_off = (d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
-                             + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off)
+        d_sigma_eff_d_off = (
+            d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_off
+            + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_center * d_center_d_off
+        )
         d_sigma_eff_d_fwhmG = d_sigma_eff_d_sigma_intrinsic * d_sigma_intrinsic_d_fwhmG
         
         d_gamma_d_off = (fwhm_L / c_kms * d_center_d_off) / 2.0
         d_gamma_d_fwhmL = (center / c_kms) / 2.0
         
-        d_offset = d_center * d_center_d_off + d_sigma_eff * d_sigma_eff_d_off + d_gamma * d_gamma_d_off
-        d_fwhmG = d_sigma_eff * d_sigma_eff_d_fwhmG
-        d_fwhmL = d_gamma * d_gamma_d_fwhmL
+        d_offset = (
+            d_center * d_center_d_off
+            + d_profile_sigma_eff * d_sigma_eff_d_off
+            + d_profile_gamma * d_gamma_d_off
+        )
+        d_fwhmG = d_profile_sigma_eff * d_sigma_eff_d_fwhmG
+        d_fwhmL = d_profile_gamma * d_gamma_d_fwhmL
         
         d_center_d_redshift = center / (1.0 + redshift)
         d_sigma_intrinsic_d_redshift = sigma_intrinsic / (1.0 + redshift)
@@ -1016,8 +1067,14 @@ class VoigtLines(LineGroupBase):
                                   + d_sigma_eff_d_sigma_inst * d_sigma_inst_d_redshift)
         
         d_gamma_d_redshift = gamma / (1.0 + redshift)
+
         d_amp_eff_d_redshift = -amplitude_eff / (1.0 + redshift)
-        d_redshift = d_amp_eff * d_amp_eff_d_redshift + d_center * d_center_d_redshift + d_sigma_eff * d_sigma_eff_d_redshift + d_gamma * d_gamma_d_redshift
+        d_redshift = (
+            d_amp_eff * d_amp_eff_d_redshift
+            + d_center * d_center_d_redshift
+            + d_profile_sigma_eff * d_sigma_eff_d_redshift
+            + d_profile_gamma * d_gamma_d_redshift
+        )
         
         return val, d_amp, d_offset, d_fwhmG, d_fwhmL, d_redshift
 

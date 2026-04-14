@@ -9,51 +9,27 @@ import warnings
 import numpy as np
 from scipy import optimize
 from numpy.linalg import LinAlgError
-from .base import FitterBase, _apply_tied_fast
+from astropy.modeling.fitting import Fitter, model_to_fit_params
+from .utils import _get_tied_info, _apply_tied_fast
 
 __all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
 
 
-class ScipyFitter(FitterBase):
+class ScipyFitter(Fitter):
     """
     Wrapper around ``scipy.optimize.least_squares``.
 
     Supports ``'trf'`` and ``'dogbox'`` methods with native bounds.
     Covariance is estimated from the Jacobian (``J.T @ J`` inverse/pinv)
     when ``calc_uncertainties=True``.
-    
-    Parameters
-    ----------
-    method : str
-        'trf' (default) or 'dogbox'.
-    calc_uncertainties : bool
-        Whether to compute parameter uncertainties.
-    force_numerical_covariance : bool
-        If True, compute numerical Hessian when Jacobian fails (expensive).
-    verbose : bool
-        Print diagnostic information.
-
-    Common call-time parameters
-    ---------------------------
-    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``x_scale``, ``loss``,
-    ``f_scale``, plus the standard ``yerr/statistic/weights`` from
-    ``FitterBase.__call__``.
-
-    Example
-    -------
-    >>> fitter = ScipyFitter(method='trf', calc_uncertainties=True)
-    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=10000, xtol=1e-10)
     """
     
-    def __init__(self, method='trf', calc_uncertainties=False, force_numerical_covariance=False,
-                 verbose=False, filter_non_finite=False):
-        super().__init__(calc_uncertainties=calc_uncertainties,
-                        force_numerical_covariance=force_numerical_covariance,
-                        verbose=verbose,
-                        filter_non_finite=filter_non_finite)
+    def __init__(self, method='trf', calc_uncertainties=False, verbose=False):
+        self.method = method
+        self.calc_uncertainties = calc_uncertainties
+        self.verbose = verbose
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
-        self.method = method
 
     def _build_jacobian(self, model, x, fit_indices, tied_info, params_cache, weights):
         """Build Jacobian function with proper error handling."""
@@ -88,8 +64,6 @@ class ScipyFitter(FitterBase):
                     raise ValueError("Invalid derivatives encountered")
                 
                 # Select only free parameters
-                # fit_deriv returns (n_params, n_points)
-                # We need (n_points, n_free_params)
                 J = J_all[fit_indices].T
                 
                 if weights is not None:
@@ -103,33 +77,20 @@ class ScipyFitter(FitterBase):
                 print(f"Note: Using numeric Jacobian due to: {type(e).__name__}")
             return '2-point'
 
-    def _fit_impl(self, prep_data, max_nfev=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, **kwargs):
         """
         Implement SciPy least_squares fitting.
-        
-        Parameters
-        ----------
-        prep_data : dict
-            Prepared fitting data from _prepare_fitting()
-        max_nfev : int, optional
-            Maximum function evaluations (replaces deprecated maxiter).
-        **kwargs : dict
-            Additional arguments to scipy.optimize.least_squares
-            
-        Returns
-        -------
-        result : dict
-            Fitting results with standardized keys
         """
-        model = prep_data['model']
-        x = prep_data['x']
-        y = prep_data['y']
-        weights = prep_data['weights']
-        init_values = prep_data['init_values']
-        fit_indices = prep_data['fit_indices']
-        param_bounds = prep_data['param_bounds']
-        tied_info = prep_data['tied_info']
-        params_cache = prep_data['params_cache']
+        model = model.copy()
+        init_values, fit_indices, _ = model_to_fit_params(model)
+        bounds_list = [getattr(model, n).bounds for n in model.param_names]
+        all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
+                                b[1] if b[1] is not None else np.inf)
+                               for b in bounds_list])
+        param_bounds = all_bounds[fit_indices]
+
+        tied_info = _get_tied_info(model)
+        params_cache = model.parameters.copy()
         
         has_tied = bool(tied_info)
         
@@ -203,45 +164,27 @@ class ScipyFitter(FitterBase):
                 if self.verbose:
                     print(f"⚠ Failed to calculate covariance: {e}")
         
-        return {
-            'fitted_params': result.x,
+        self.fit_info = {
             'success': result.success,
             'nfev': result.nfev,
             'message': getattr(result, 'message', ''),
             'native_result': result,
-            'native_cov': native_cov
+            'param_cov': native_cov
         }
+        params_cache[fit_indices] = result.x
+        model.parameters = params_cache
+        if tied_info:
+            _apply_tied_fast(model, tied_info, params_cache)
+        return model
 
 
 class ScipyTRF(ScipyFitter):
-    """
-    SciPy trust-region reflective fitter.
-
-    Call-time parameters
-    --------------------
-    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``loss``, ``x_scale``.
-
-    Example
-    -------
-    >>> fitter = ScipyTRF(calc_uncertainties=True)
-    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=10000, ftol=1e-10)
-    """
+    """SciPy trust-region reflective fitter."""
     def __init__(self, **kwargs):
         super().__init__(method='trf', **kwargs)
 
 
 class ScipyDogBox(ScipyFitter):
-    """
-    SciPy dogbox fitter with rectangular trust regions.
-
-    Call-time parameters
-    --------------------
-    ``max_nfev``, ``ftol``, ``xtol``, ``gtol``, ``loss``, ``x_scale``.
-
-    Example
-    -------
-    >>> fitter = ScipyDogBox(calc_uncertainties=True)
-    >>> fitted = fitter(model, x, y, yerr=yerr, max_nfev=5000, xtol=1e-10)
-    """
+    """SciPy dogbox fitter with rectangular trust regions."""
     def __init__(self, **kwargs):
         super().__init__(method='dogbox', **kwargs)

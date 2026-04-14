@@ -9,8 +9,8 @@ models
     empirical templates (B-spline, fixed interpolation table), and
     pre-built AGN component factories.
 operators
-    Linear operators applied to source models: ``ConvolvedModel`` for
-    generic matrix convolution, ``InstrumentResponse`` / ``SpectralResponse``
+    Linear operators applied to source models: ``LinearOperatorCompoundModel``
+    for matrix transforms and ``InstrumentResponse`` / ``SpectralResponse``
     for LSF-based instrumental broadening.
 fitting
     Fitter hierarchy built on Astropy's ``Fitter`` base.  Single-spectrum
@@ -19,5 +19,5 @@ fitting
 io
     FITS I/O for fitted models and ``MultiFitResult`` output.
 """
-from .operators.convolved import ConvolvedModel
-from .operators.instrument import InstrumentResponse, SpectralResponse, ResponseOperator, ResponseModel
+from .operators.convolved import LinearOperator, MatrixLinearOperator, LinearOperatorCompoundModel
+from .operators.instrument import InstrumentResponse, SpectralResponse, ResponseOperator

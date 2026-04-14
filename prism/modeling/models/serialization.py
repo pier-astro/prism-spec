@@ -36,17 +36,36 @@ from astropy.io.misc.yaml import AstropyDumper, AstropyLoader
 
 def _param_state(param):
     """Compact serialisable dict for one Astropy Parameter."""
-    return {
+    state = {
         'value':  float(param.value),
         'fixed':  bool(param.fixed),
         'bounds': list(param.bounds) if param.bounds != (None, None) else [None, None],
     }
+    # Persist prism uncertainty attributes when available; scalars only.
+    for attr in ('std', 'lolim', 'uplim', 'median'):
+        raw = getattr(param, attr, None)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+            if np.isfinite(val):
+                state[attr] = val
+        except (TypeError, ValueError):
+            pass  # skip array-valued or non-serialisable extras
+    return state
 
 def _restore_param(model, name, state):
     param = getattr(model, name)
     param.value = state['value']
     param.fixed = state['fixed']
     param.bounds = tuple(state['bounds'])
+    # Restore prism uncertainty attributes if present.
+    for attr in ('std', 'lolim', 'uplim', 'median'):
+        if attr in state:
+            try:
+                setattr(param, attr, float(state[attr]))
+            except (TypeError, ValueError):
+                pass
 
 # ---------------------------------------------------------------------------
 # LineModelBase  (GaussianLine, VoigtLine, LorentzianLine)

@@ -67,7 +67,7 @@ def _multifit_worker_task(args):
         fitted = fitter(
             model=local_model, x=x, y=y_1d, yerr=yerr_1d,
             statistic=statistic, weights=weights_1d,
-            inplace=True, nproc=1, **kwargs
+            inplace=True, **kwargs
         )
         return (idx, fitted.parameters, fitter.stdevs,
                 fitter._multifit_entry_from_fit_info(), fitter.covariance)
@@ -955,7 +955,7 @@ class SpectrumFitResult:
 
 class MultiFitMixin(abc.ABC):
     """
-    Mixin that adds batched spectral fitting to any FitterBase subclass.
+    Mixin that adds batched spectral fitting to any Fitter subclass.
 
     Mixing this in gives the fitter three user-facing entry points:
 
@@ -1013,6 +1013,19 @@ class MultiFitMixin(abc.ABC):
     # ------------------------------------------------------------------
     # Validation helpers
     # ------------------------------------------------------------------
+
+    def _resolve_spectral_axis(self, y, wave_len, spectral_axis=None):
+        if spectral_axis is not None:
+            axis = np.lib.array_utils.normalize_axis_index(spectral_axis, y.ndim)
+            if y.shape[axis] != wave_len:
+                raise ValueError(f"spectral_axis={spectral_axis} has length {y.shape[axis]}, expected {wave_len}.")
+            return axis
+        matches = [axis for axis, size in enumerate(y.shape) if size == wave_len]
+        if not matches:
+            raise ValueError(f"Could not match wave axis length ({wave_len}) to any dimension in y shape {y.shape}.")
+        if len(matches) > 1:
+            raise ValueError("Ambiguous spectral axis. Pass spectral_axis explicitly.")
+        return matches[0]
 
     def _validate_multifit_param_name(self, model, name, control_name):
         if name not in model.param_names:
@@ -1204,7 +1217,7 @@ class MultiFitMixin(abc.ABC):
             fitted = self(
                 model=local_model, x=x, y=y_1d, yerr=yerr_1d,
                 statistic=statistic, weights=weights_1d,
-                inplace=True, nproc=1, **kwargs
+                inplace=True, **kwargs
             )
             return (idx, fitted.parameters, self.stdevs,
                     self._multifit_entry_from_fit_info(), self.covariance)
@@ -1232,7 +1245,7 @@ class MultiFitMixin(abc.ABC):
             fitted = self(
                 model=local_model, x=x, y=y_1d, yerr=yerr_1d,
                 statistic=statistic, weights=weights_1d,
-                inplace=True, nproc=1, **kwargs
+                inplace=True, **kwargs
             )
             return (idx, fitted.parameters, self.stdevs,
                     self._multifit_entry_from_fit_info(), self.covariance)

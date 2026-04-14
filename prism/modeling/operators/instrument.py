@@ -7,31 +7,19 @@ matrices (Line Spread Functions) to Astropy models.
 Classes:
 --------
 - InstrumentResponse: Build/load/save response matrices
-- SpectralResponse: Wrap models with instrumental convolution
-- ResponseModel: Instrumental response wrapper (inherits from ConvolvedModel)
+- SpectralResponse: Build linear-operator model nodes from response matrices
 
 The key concept is that instruments observe spectra convolved with their LSF. 
 This module allows proper modeling of observed spectra by applying the instrumental
 response to intrinsic source models.
 
-ResponseModel and ConvolvedModel:
----------------------------------
-The base ConvolvedModel class (in convolved.py) handles general linear operators
-(useful for velocity broadening, smoothing, etc.). ResponseModel inherits from it
-and provides instrument-specific functionality with a default name of 'rsp'.
-
 Astropy's pipe operator `|` does not propagate analytic derivatives (fit_deriv),
 forcing numeric jacobian estimation which is slow for many parameters.
-ResponseModel/ConvolvedModel solve this by applying the chain rule:
+The linear-operator node solves this by applying the chain rule:
 
     For h(x) = R @ f(x, θ), the Jacobian is: J_h = R @ J_f
 
 This preserves analytic derivatives since R is a fixed matrix.
-
-Files modified to handle ConvolvedModel unwrapping:
-- prism/modeling/models/lines.py: extract_fluxes()
-
-See myresources/convolved_model.md for full documentation.
 
 When working with redshifted sources:
 - Data is typically z-corrected to rest frame for modeling convenience
@@ -70,6 +58,8 @@ from scipy.sparse import csr_matrix, issparse
 from scipy.special import erf
 from astropy.io import fits
 from astropy.modeling import Fittable1DModel, Parameter
+
+from .convolved import LinearOperatorCompoundModel, MatrixLinearOperator
 
 
 # --- Path utilities ---
@@ -594,86 +584,6 @@ class ResponseOperator(Fittable1DModel):
         return f"<ResponseOperator({shape[0]}x{shape[1]}{grid_info})>"
 
 
-# --- ResponseModel ---
-
-from .convolved import ConvolvedModel
-
-
-class ResponseModel(ConvolvedModel):
-    """
-    Instrumental response model wrapper with analytic derivative propagation.
-    
-    This is a specialized ConvolvedModel for instrumental response applications.
-    It wraps a source model with a response matrix (LSF) and provides:
-    
-    1. Proper model behavior (via delegation to source)
-    2. Analytic derivatives via chain rule: d(R @ f)/d(params) = R @ df/d(params)
-    3. Grid flexibility through interpolation (with caching)
-    4. Default name 'rsp' for display purposes
-    
-    Parameters
-    ----------
-    source_model : Model
-        The underlying model to convolve
-    response_matrix : sparse matrix
-        The instrumental response matrix (n_out × n_in)
-    wave : array-like
-        Wavelength grid for interpolation support
-    name : str, optional
-        Name for display (default: 'rsp')
-        
-    Attributes
-    ----------
-    source_model : Model
-        The underlying source model (read-only access via property)
-    response_matrix : sparse matrix
-        The instrumental response matrix (alias for operator_matrix)
-        
-    Example
-    -------
-    >>> from prism.modeling.operators.instrument import ResponseModel, InstrumentResponse
-    >>> 
-    >>> # Build response matrix
-    >>> rsp = InstrumentResponse.from_fixed_resolution(wave, R=2000)
-    >>> 
-    >>> # Create response model
-    >>> model = continuum + emission_lines
-    >>> rsp_model = ResponseModel(model, rsp.response_matrix, wave=wave)
-    >>> 
-    >>> # Access source
-    >>> rsp_model.source_model  # Returns original compound model
-    >>> 
-    >>> # Evaluate (applies response)
-    >>> flux = rsp_model(wave)
-    """
-    
-    def __init__(self, source_model, response_matrix, wave=None, name=None):
-        # Default name for response models is 'rsp'
-        super().__init__(
-            source_model=source_model,
-            operator_matrix=response_matrix,
-            wave=wave,
-            name=name or 'rsp'
-        )
-    
-    @property
-    def response_matrix(self):
-        """Alias for operator_matrix (instrument-specific terminology)."""
-        return self._operator_matrix
-    
-    def copy(self):
-        """Return a copy of this model."""
-        return ResponseModel(
-            self._source.copy(),
-            self._operator_matrix,
-            wave=self._wave.copy() if self._wave is not None else None,
-            name=self._name
-        )
-    
-    def __repr__(self):
-        return f"<ResponseModel[{self._name}]({self._source!r})>"
-
-
 # --- SpectralResponse class ---
 
 class SpectralResponse:
@@ -776,7 +686,7 @@ class SpectralResponse:
             self.wavelength_grid, self.wavelength_grid, dense, kx=1, ky=1
         )
 
-    def __call__(self, source_model, use_analytic_deriv=True, name=None):
+    def __call__(self, source_model, name=None):
         """
         Wrap a source model with instrumental convolution.
         
@@ -784,35 +694,21 @@ class SpectralResponse:
         ----------
         source_model : Model
             Any Astropy model (simple or compound)
-        use_analytic_deriv : bool, default=True
-            If True, use ResponseModel which properly propagates
-            analytic derivatives through the response matrix (faster fitting).
-            If False, use pipe operator (|) which falls back to numeric jacobian.
         name : str, optional
-            Name for the response model (default: 'rsp')
+            Name for the response model node (default: 'rsp')
             
         Returns
         -------
         Model
-            The convolved model (ResponseModel or CompoundModel)
+            The convolved model node.
             
         Notes
         -----
-        The `use_analytic_deriv=True` option is recommended for fitting as it
-        avoids the overhead of numeric jacobian estimation, especially with
-        many free parameters.
+        The returned node preserves analytic derivatives via
+        J = M @ J_source.
         """
-        if use_analytic_deriv:
-            return ResponseModel(
-                source_model, 
-                self.response_matrix,
-                wave=self.wavelength_grid,
-                name=name or 'rsp'
-            )
-        else:
-            # Fall back to pipe operator (numeric jacobian)
-            rsp_op = ResponseOperator(self.response_matrix, wave=self.wavelength_grid, name='response')
-            return source_model | rsp_op
+        operator = MatrixLinearOperator(self.response_matrix, wave=self.wavelength_grid)
+        return LinearOperatorCompoundModel(source_model, operator, name=name or 'rsp')
 
     def __repr__(self) -> str:
         shape = self.wavelength_grid.shape if self.wavelength_grid is not None else None
@@ -826,8 +722,8 @@ __all__ = [
     'InstrumentResponse',
     'SpectralResponse',
     'ResponseOperator',
-    'ResponseModel',
-    'ConvolvedModel',
+    'LinearOperatorCompoundModel',
+    'MatrixLinearOperator',
     'load_responses_mapping',
     'add_response_to_archive',
     'list_instruments'

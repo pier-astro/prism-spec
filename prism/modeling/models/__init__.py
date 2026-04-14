@@ -43,11 +43,12 @@ Utilities
 ---------
 ``get_components()`` / ``ModelComponents``
     Extract and iterate over components of a compound model.
-    Handles ``ConvolvedModel``-wrapped models transparently.
+    Handles linear-operator model nodes transparently.
 ``count_free(model)``
     Count the number of free (unfixed, untied) parameters.
 """
 from .lines import *
+from .line_analysis import *
 from .continuum import *
 from .components import get_components, ModelComponents
 

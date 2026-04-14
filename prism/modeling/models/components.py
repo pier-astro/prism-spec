@@ -1,76 +1,63 @@
-"""
-Component decomposition utilities for Astropy CompoundModel instances.
-
-This module provides tools to extract and access individual components from
-compound models, with support for both all-component and additive-only extraction.
-
-ConvolvedModel support: If model is wrapped in ConvolvedModel (e.g., rsp(A + B*C)),
-the extracted components are also wrapped: rsp(A), rsp(B*C).
-This ensures components are evaluated consistently with the original model.
-"""
+"""Component decomposition utilities for Astropy compound models."""
 
 import numpy as np
 from astropy.modeling import CompoundModel
 from astropy.modeling.models import Const1D
 
+from ..operators.convolved import LinearOperatorCompoundModel
+
 
 def _get_source_model(model):
     """
-    Unwrap ConvolvedModel to get the source model.
-    
-    If model is a ConvolvedModel (from instrument convolution), return the
-    underlying source model. Otherwise return the model unchanged.
+    Unwrap LinearOperatorCompoundModel to get the source model.
+
+    If model is a linear-operator node, return its left/source model.
+    Otherwise return the model unchanged.
     """
-    # Import here to avoid circular imports
-    from ..operators.convolved import ConvolvedModel
-    
-    if isinstance(model, ConvolvedModel):
-        return model._source
+    if isinstance(model, LinearOperatorCompoundModel):
+        return model.left
     return model
 
 
-def _get_convolution_info(model):
+def _get_operator_info(model):
     """
-    Extract convolution parameters if model is wrapped in ConvolvedModel.
+    Extract linear operator info if model is a linear-operator node.
     
     Parameters
     ----------
     model : Model
-        Input model (possibly ConvolvedModel-wrapped)
+        Input model.
         
     Returns
     -------
-    tuple or None
-        (ConvolvedModelClass, operator_matrix, wave, name) if wrapped, else None
+    LinearOperatorCompoundModel or None
     """
-    from ..operators.convolved import ConvolvedModel
-    
-    if isinstance(model, ConvolvedModel):
-        return (type(model), model._operator_matrix, model._wave, model._name)
+    if isinstance(model, LinearOperatorCompoundModel):
+        return model
     return None
 
 
-def _wrap_component(component, conv_info):
+def _wrap_component(component, op_info):
     """
-    Wrap a component with ConvolvedModel if original was convolved.
+    Wrap a component with the same linear operator if original was convolved.
     
     Parameters
     ----------
     component : Model
         Extracted component model
-    conv_info : tuple or None
-        (ConvolvedModelClass, operator_matrix, wave, name) or None
+    op_info : LinearOperatorCompoundModel or None
+        Operator node template or None.
         
     Returns
     -------
     Model
-        Component wrapped in ConvolvedModel (if conv_info), else unchanged
+        Component wrapped in LinearOperatorCompoundModel (if op_info),
+        else unchanged.
     """
-    if conv_info is None:
+    if op_info is None:
         return component
-    
-    cls, matrix, wave, name = conv_info
-    return cls(component, matrix, wave=wave, name=name)
+
+    return op_info.with_left(component)
 
 
 def _make_unique_name(name, existing_names):
@@ -126,9 +113,9 @@ class ModelComponents(dict):
         
     Notes
     -----
-    If the input model is wrapped in ConvolvedModel (e.g., rsp(A + B*C)),
-    each extracted component is also wrapped: rsp(A), rsp(B*C).
-    This ensures component evaluation is consistent with the full model.
+    If the input model is a LinearOperatorCompoundModel (e.g., rsp(A + B*C)),
+    each extracted component is also wrapped with the same operator:
+    rsp(A), rsp(B*C).
         
     Examples
     --------
@@ -145,9 +132,9 @@ class ModelComponents(dict):
     
     def __init__(self, model, additive=False):
         super().__init__()
-        # Store convolution info before unwrapping
-        self._conv_info = _get_convolution_info(model)
-        # Unwrap ConvolvedModel if present
+        # Store operator node before unwrapping
+        self._op_info = _get_operator_info(model)
+        # Unwrap linear-operator node if present
         self._model = _get_source_model(model)
         self._additive_only = additive
         self._indices = []
@@ -200,18 +187,21 @@ class ModelComponents(dict):
         idx = [0]
         used_names = set()
         
-        def traverse(submodel):
+        def traverse(submodel, active_op):
+            if isinstance(submodel, LinearOperatorCompoundModel):
+                traverse(submodel.left, submodel)
+                return
             if isinstance(submodel, CompoundModel):
-                traverse(submodel.left)
-                traverse(submodel.right)
+                traverse(submodel.left, active_op)
+                traverse(submodel.right, active_op)
             else:
                 # Leaf node
                 name = self._get_component_name(submodel)
                 unique_name = _make_unique_name(name, used_names)
                 used_names.add(unique_name)
                 
-                # Wrap with convolution if original was convolved
-                wrapped = _wrap_component(submodel, self._conv_info)
+                # Wrap with the original operator node when present
+                wrapped = _wrap_component(submodel, active_op)
                 
                 # Store with dual keys
                 self[idx[0]] = wrapped
@@ -223,7 +213,7 @@ class ModelComponents(dict):
                 
                 idx[0] += 1
         
-        traverse(self._model)
+        traverse(self._model, self._op_info)
     
     def _build_additive(self):
         """Build list of additive components (expand multiplicative terms)."""
@@ -235,8 +225,8 @@ class ModelComponents(dict):
             unique_name = _make_unique_name(name, used_names)
             used_names.add(unique_name)
             
-            # Wrap with convolution if original was convolved
-            wrapped = _wrap_component(comp, self._conv_info)
+            # Wrap with the original operator node when present
+            wrapped = _wrap_component(comp, self._op_info)
             
             self[idx] = wrapped
             self[unique_name] = wrapped
@@ -265,6 +255,10 @@ class ModelComponents(dict):
         """
         if not isinstance(model, CompoundModel):
             return [model]
+
+        if isinstance(model, LinearOperatorCompoundModel):
+            left_expanded = self._expand_additive(model.left)
+            return [model.with_left(comp) for comp in left_expanded]
         
         left = self._expand_additive(model.left)
         right = self._expand_additive(model.right)
