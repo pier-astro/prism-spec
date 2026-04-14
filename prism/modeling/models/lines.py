@@ -35,6 +35,7 @@ import os
 import numpy as np
 import pandas as pd
 import glob
+from dataclasses import dataclass
 from pathlib import Path
 import re
 from scipy.interpolate import CubicSpline
@@ -47,6 +48,28 @@ from . import profiles
 
 c_kms = const.c.to(u.km/u.s).value # Speed of light in km/s
 sigma2fwhm = 2 * np.sqrt(2 * np.log(2))
+
+
+@dataclass(frozen=True)
+class Metric:
+    """A single measured quantity with optional uncertainty bounds.
+
+    Attributes
+    ----------
+    value  : nominal (best-fit or integrated) measurement.
+    std    : standard deviation (NaN when unavailable).
+    lolim  : lower confidence limit (NaN when unavailable).
+    uplim  : upper confidence limit (NaN when unavailable).
+    """
+    value: float
+    std: float = float('nan')
+    lolim: float = float('nan')
+    uplim: float = float('nan')
+
+    def __repr__(self) -> str:
+        if not np.isfinite(self.std):
+            return f"{self.value:.4g}"
+        return f"{self.value:.4g} \u00b1 {self.std:.4g}  [{self.lolim:.4g}, {self.uplim:.4g}]"
 
 script_dir = os.path.dirname(__file__) # get the directory of the current script
 resource_path = os.path.join(script_dir, "..", "..", "..", "resources", "lines")
@@ -189,90 +212,207 @@ class LineModelBase(Fittable1DModel):
             return center_arr * 0.0
         return self._instfwhm_spline_deriv(center)
         
-    @property
-    def flux(self):
-        """Return a pandas.Series containing flux value, uncertainty, and bounds."""
-        flux_val = self._calc_flux()
-        flux_std = self._compute_flux_std(flux_val)
-        flux_limits = self._compute_flux_limits()
-        
-        data = {'value': flux_val}
-        if flux_std is not None:
-            data['std'] = flux_std
-        if flux_limits[0] is not None:
-            data['lolim'] = flux_limits[0]
-        if flux_limits[1] is not None:
-            data['uplim'] = flux_limits[1]
-        
-        return pd.Series(data)
+    # Subclasses override to list params that govern flux magnitude.
+    _flux_governing_params = ('amplitude',)
 
-    def _compute_flux_std(self, flux_val) -> float:
+    @property
+    def flux(self) -> Metric:
+        """Return a Metric with flux value, uncertainty, and confidence limits."""
+        flux_val = self._calc_flux()
+        flux_std = self._propagate_flux_std(flux_val)
+        flux_lo, flux_hi = self._propagate_flux_limits()
+        return Metric(
+            value=float(flux_val),
+            std=float(flux_std) if flux_std is not None else float('nan'),
+            lolim=float(flux_lo) if flux_lo is not None else float('nan'),
+            uplim=float(flux_hi) if flux_hi is not None else float('nan'),
+        )
+
+    def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096) -> Metric:
+        """Compute and store the equivalent width of the line.
+
+        The result is stored on the model as the ``.ew`` attribute for
+        subsequent access via ``model.ew.value``, ``model.ew.std``, etc.
+
+        Parameters
+        ----------
+        continuum : float, callable, or None
+            Local continuum level.  For ``method='constant-continuum'``, a
+            scalar float is required and uncertainty is propagated from the
+            flux ``Metric``.  For ``method='integration'``, a scalar float
+            or any callable ``continuum(x)`` (e.g. an astropy model) is
+            accepted; no uncertainty is propagated in this case.
+
+            ``None`` (default) — auto-detect: the model is evaluated at
+            the line centre (accounting for redshift and velocity offset)
+            and the result is used as a constant continuum level.  For a
+            line sitting on a zero baseline this equals the peak amplitude.
+            This is a single-point estimate; pass an explicit value when a
+            more accurate continuum level is needed.
+        method : {'constant-continuum', 'integration'}
+            ``'constant-continuum'`` (default): EW = flux / continuum.
+            Analytic; fully propagates std, lolim, uplim.
+            ``'integration'``: EW = ∫ line(x)/continuum(x) dx numerically.
+            Requires a wavelength grid (x or window + num); no uncertainty
+            is propagated.
+        x : array-like, optional
+            Wavelength grid for ``method='integration'``.
+        window : (float, float), optional
+            Wavelength window ``(min, max)`` used to build a grid when *x* is
+            not provided (``method='integration'`` only).  Defaults to
+            ``±6 × FWHM_Å`` around the line centre.
+        num : int
+            Number of grid points when *window* is used.
+
+        Returns
+        -------
+        Metric
+            EW with uncertainties (``method='constant-continuum'`` only).
+            Positive for emission, negative for absorption.
+            Also stored as ``self.ew``.
         """
-        Compute flux standard deviation from covariance using numerical parameter perturbation.
-        var(flux) = sum(df/dp_i)^2 * var(p_i)
+        if continuum is None:
+            center, _ = self._infer_center_fwhm_aa()
+            continuum = float(np.asarray(self(np.array([center])), dtype=float).ravel()[0])
+        if method == 'constant-continuum':
+            continuum_val = float(continuum)
+            if not np.isfinite(continuum_val) or continuum_val == 0.0:
+                result = Metric(value=float('nan'))
+                self.ew = result
+                return result
+            f = self.flux
+            ew_val = f.value / continuum_val
+            ew_std = float(f.std / abs(continuum_val)) if np.isfinite(f.std) else float('nan')
+            ew_lo = float(f.lolim / continuum_val) if np.isfinite(f.lolim) else float('nan')
+            ew_hi = float(f.uplim / continuum_val) if np.isfinite(f.uplim) else float('nan')
+            result = Metric(value=ew_val, std=ew_std, lolim=ew_lo, uplim=ew_hi)
+
+        elif method == 'integration':
+            if x is None:
+                center, fwhm_aa = self._infer_center_fwhm_aa()
+                if window is None:
+                    hw = 6.0 * fwhm_aa
+                    window = (center - hw, center + hw)
+                x_arr = np.linspace(float(window[0]), float(window[1]), int(num), dtype=float)
+            else:
+                x_arr = np.asarray(x, dtype=float)
+            y_line = np.asarray(self(x_arr), dtype=float)
+            if callable(continuum):
+                y_cont = np.asarray(continuum(x_arr), dtype=float)
+            else:
+                y_cont = np.full_like(x_arr, float(continuum))
+            safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
+            try:
+                ew_val = float(np.trapezoid(y_line / safe, x_arr))
+            except AttributeError:
+                ew_val = float(np.trapz(y_line / safe, x_arr))
+            result = Metric(value=ew_val)
+
+        else:
+            raise ValueError("method must be 'constant-continuum' or 'integration'.")
+
+        self.ew = result
+        return result
+
+    def _infer_center_fwhm_aa(self):
+        """Return (center_Å, fwhm_Å) from current parameter values."""
+        center = self.position.value * (1.0 + self.redshift.value) * np.exp(self.offset.value / c_kms)
+        if hasattr(self, 'fwhm'):
+            fwhm_aa = self.fwhm.value / c_kms * center
+        elif hasattr(self, 'fwhm_G'):
+            fwhm_aa = self.fwhm_G.value / c_kms * center
+        else:
+            fwhm_aa = 10.0
+        return center, max(fwhm_aa, 0.1)
+
+    def _flux_jacobian(self, flux_val):
+        """Numerical Jacobian dF/dp for every free parameter."""
+        from astropy.modeling.fitting import model_to_fit_params
+        _, fit_indices, _ = model_to_fit_params(self)
+        eps = 1e-6
+        jac = np.zeros(len(fit_indices))
+        all_params = self.parameters
+
+        for j, idx in enumerate(fit_indices):
+            orig = float(all_params[idx])
+            delta = abs(orig) * eps if orig != 0 else eps
+            all_params[idx] = orig + delta
+            self.parameters = all_params
+            jac[j] = (self._calc_flux() - flux_val) / delta
+            all_params[idx] = orig
+        self.parameters = all_params
+        return jac, fit_indices
+
+    def _propagate_flux_std(self, flux_val) -> float | None:
+        """Propagate parameter uncertainties to flux std.
+
+        Uses full covariance matrix when available (J C J^T),
+        otherwise falls back to diagonal propagation.
         """
+        cov = getattr(self, '_param_cov', None)
+        if cov is not None:
+            jac, _ = self._flux_jacobian(flux_val)
+            var = float(jac @ cov @ jac)
+            return np.sqrt(var) if var > 0 else None
+
+        # Diagonal fallback: sum (dF/dp_i)^2 * std_i^2
         eps = 1e-6
         var_flux = 0.0
-        has_any_std = False
-        
+        has_any = False
         for pname in self.param_names:
             param = getattr(self, pname)
-            if _has_param_std(param):
-                has_any_std = True
-                orig_val = param.value
-                delta = orig_val * eps if orig_val != 0 else eps
-                
-                # Perturb parameter forward
-                param.value = orig_val + delta
-                flux_plus = self._calc_flux()
-                # Restore parameter
-                param.value = orig_val
-                
-                d_flux_dp = (flux_plus - flux_val) / delta
-                var_flux += (d_flux_dp * param.std) ** 2
-                
-        return np.sqrt(var_flux) if has_any_std and var_flux > 0 else None
-
-    def _compute_flux_limits(self):
-        """
-        Compute flux limits from parameter limits for single line model.
-        Evaluates flux at parameter limit corners locally.
-        """
-        import itertools
-        param_limits = []
-        has_any_limit = False
-        
-        # We find combinations only for relevant active parameters that govern strength
-        for pname in self.param_names:
-            if pname in ['position', 'redshift', 'offset']:
+            if not _has_param_std(param):
                 continue
-            param = getattr(self, pname)
-            lo, hi, has_lo, has_hi = _get_param_limits(param)
-            if has_lo or has_hi:
-                has_any_limit = True
-            param_limits.append((lo, hi))
-            
-        if not has_any_limit:
+            has_any = True
+            orig = param.value
+            delta = abs(orig) * eps if orig != 0 else eps
+            param.value = orig + delta
+            df = (self._calc_flux() - flux_val) / delta
+            param.value = orig
+            var_flux += (df * param.std) ** 2
+
+        return np.sqrt(var_flux) if has_any and var_flux > 0 else None
+
+    def _propagate_flux_limits(self):
+        """Propagate parameter confidence limits to flux limits.
+
+        Flux is monotonically increasing in amplitude and width parameters.
+        For each limit direction (lo/hi), we use the parameter's limit if
+        available, otherwise its best-fit value.  A flux limit is reported
+        only when at least one governing parameter has that limit defined.
+        """
+        governing = list(self._flux_governing_params)
+        amp_pname = governing[0]  # amplitude always gates flux magnitude
+        amp_param = getattr(self, amp_pname)
+        _, _, amp_has_lo, amp_has_hi = _get_param_limits(amp_param)
+
+        if not amp_has_lo and not amp_has_hi:
             return None, None
-            
-        test_params = [p for p in self.param_names if p not in ['position', 'redshift', 'offset']]
-        
-        combos = list(itertools.product(*param_limits))
-        flux_values = []
-        
-        for combo in combos:
+
+        def _eval_at(overrides):
             orig = {}
-            for pname, pval in zip(test_params, combo):
-                param = getattr(self, pname)
-                orig[pname] = param.value
-                param.value = pval
-                
-            flux_values.append(self._calc_flux())
-            
-            for pname, oval in orig.items():
-                getattr(self, pname).value = oval
-                
-        return np.min(flux_values), np.max(flux_values)
+            for p, v in overrides.items():
+                orig[p] = getattr(self, p).value
+                getattr(self, p).value = v
+            f = self._calc_flux()
+            for p, v in orig.items():
+                getattr(self, p).value = v
+            return f
+
+        def _compute(use_lo):
+            has_amp = amp_has_lo if use_lo else amp_has_hi
+            if not has_amp:
+                return None
+            overrides = {amp_pname: amp_param.lolim if use_lo else amp_param.uplim}
+            for p in governing[1:]:
+                _, _, has_lo, has_hi = _get_param_limits(getattr(self, p))
+                if use_lo and has_lo:
+                    overrides[p] = getattr(self, p).lolim
+                elif not use_lo and has_hi:
+                    overrides[p] = getattr(self, p).uplim
+            return _eval_at(overrides)
+
+        return _compute(True), _compute(False)
 
 # -------------
 
@@ -288,6 +428,7 @@ class GaussianLine(LineModelBase):
     offset = Parameter(default=0.0)
     fwhm = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    _flux_governing_params = ('amplitude', 'fwhm')
     
     _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm': u.km/u.s}
 
@@ -376,6 +517,7 @@ class LorentzianLine(LineModelBase):
     offset = Parameter(default=0.0)
     fwhm = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    _flux_governing_params = ('amplitude', 'fwhm')
     
     _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm': u.km/u.s}
 
@@ -429,6 +571,7 @@ class VoigtLine(LineModelBase):
     fwhm_G = Parameter(default=1000.0)
     fwhm_L = Parameter(default=1000.0)
     redshift = Parameter(default=0.0, fixed=True)
+    _flux_governing_params = ('amplitude', 'fwhm_G', 'fwhm_L')
     
     _parameter_units = {'position': u.AA, 'offset': u.km/u.s, 'fwhm_G': u.km/u.s, 'fwhm_L': u.km/u.s}
 
@@ -736,121 +879,265 @@ class LineGroupBase(LineModelBase):
 
     @property
     def flux(self) -> pd.DataFrame:
-        """
-        Get theoretical fluxes for all fitted templates with uncertainties.
-        Returns a pandas DataFrame where index is template name.
-        """
-        data = []
-        shared_values = [getattr(self, pname).value for pname in self._shared_params.keys()]
-        
-        for i, (tmpl, pname) in enumerate(zip(self._templates, self._param_names_list)):
-            amp = getattr(self, pname)
-            df_tmpl = self._df[self._df['name'] == tmpl]
-            positions = df_tmpl['pos'].values
-            weights = df_tmpl['weight'].values
-            
-            # 1) Calculate Value
-            total_flux = 0.0
-            for pos, wt in zip(positions, weights):
-                amp_eff = amp.value * wt
-                total_flux += self._calc_flux(pos, amp_eff, *shared_values)
-                
-            # 2) Calculate Std (numerical parameter perturbation)
-            flux_std = self._compute_group_flux_std(tmpl, pname, total_flux, positions, weights)
-            
-            # 3) Calculate limits
-            flux_limits = self._compute_group_flux_limits(pname, positions, weights)
-            
-            row = {'value': total_flux}
-            if flux_std is not None:
-                row['std'] = flux_std
-            if flux_limits[0] is not None:
-                row['lolim'] = flux_limits[0]
-            if flux_limits[1] is not None:
-                row['uplim'] = flux_limits[1]
-                
-            data.append((tmpl, row))
-            
-        df = pd.DataFrame([r[1] for r in data], index=[r[0] for r in data])
-        return df
+        """Theoretical fluxes for all templates with uncertainties.
 
-    def _compute_group_flux_std(self, tmpl, amp_pname, flux_val, positions, weights) -> float:
-        """Numerical parameter perturbation for a single template group."""
+        Returns a DataFrame indexed by template name with columns
+        ``value``, ``std``, ``lolim``, ``uplim``.
+        """
+        shared_values = [getattr(self, pname).value for pname in self._shared_params.keys()]
+        rows = []
+
+        for tmpl, pname in zip(self._templates, self._param_names_list):
+            amp = getattr(self, pname)
+            positions = self._tmpl_positions[self._param_names_list.index(pname)]
+            weights = self._tmpl_weights[self._param_names_list.index(pname)]
+
+            total_flux = sum(
+                self._calc_flux(pos, amp.value * wt, *shared_values)
+                for pos, wt in zip(positions, weights)
+            )
+
+            flux_std = self._propagate_template_flux_std(
+                pname, total_flux, positions, weights)
+            flux_lo, flux_hi = self._propagate_template_flux_limits(
+                pname, positions, weights)
+
+            rows.append({
+                'value': total_flux,
+                'std': float(flux_std) if flux_std is not None else float('nan'),
+                'lolim': float(flux_lo) if flux_lo is not None else float('nan'),
+                'uplim': float(flux_hi) if flux_hi is not None else float('nan'),
+            })
+
+        return pd.DataFrame(rows, index=list(self._templates))
+
+    def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096) -> 'pd.DataFrame':
+        """Compute and store the equivalent width for all templates.
+
+        The result is stored as the ``.ew`` attribute (a DataFrame) for
+        subsequent access via ``model.ew``, ``model.ew.loc['Ha', 'value']``, etc.
+
+        Parameters
+        ----------
+        continuum : float, callable, or None
+            Continuum level.  For ``method='constant-continuum'``, a scalar
+            float is required and uncertainty is propagated from the flux
+            DataFrame.  For ``method='integration'``, a scalar float or any
+            callable ``continuum(x)`` (e.g. an astropy model) is accepted;
+            no uncertainty is propagated in this case.
+
+            ``None`` (default) — auto-detect: each template is evaluated at
+            its own mean observed centre and that peak value is used as the
+            per-template continuum level.  This is a single-point estimate;
+            pass an explicit value when a more accurate continuum level is
+            needed.
+        method : {'constant-continuum', 'integration'}
+            ``'constant-continuum'`` (default): EW = flux / continuum per
+            template.  Propagates std, lolim, uplim.
+            ``'integration'``: EW = ∫ template(x)/continuum(x) dx
+            numerically.  No uncertainty propagated.
+        x : array-like, optional
+            Wavelength grid for ``method='integration'``.
+        window : (float, float), optional
+            Wavelength window used when *x* is not provided.  Defaults to
+            a range spanning all template positions ± 6 × FWHM.
+        num : int
+            Number of grid points when *window* is used.
+
+        Returns
+        -------
+        pd.DataFrame
+            Indexed by template name; columns ``value``, ``std``,
+            ``lolim``, ``uplim``.  Positive values indicate emission.
+            Also stored as ``self.ew``.
+        """
+        if continuum is None:
+            shared_values = [getattr(self, pname).value for pname in self._shared_params.keys()]
+            redshift = shared_values[-1]
+            flux_df = self.flux
+            rows = []
+            for idx, (tmpl, pname) in enumerate(zip(self._templates, self._param_names_list)):
+                positions = self._tmpl_positions[idx]
+                weights = self._tmpl_weights[idx]
+                amplitude = getattr(self, pname).value
+                center_aa = float(np.mean(positions)) * (1.0 + redshift)
+                x_c = np.array([center_aa])
+                peak = 0.0
+                for pos, weight in zip(positions, weights):
+                    args = self._single_profile_args(pos, amplitude, weight, *shared_values)
+                    peak += float(self._profile_func(x_c, *args).ravel()[0])
+                if np.isfinite(peak) and peak > 0.0:
+                    f_row = flux_df.loc[tmpl]
+                    rows.append({
+                        'value': float(f_row['value']) / peak,
+                        'std': float(f_row['std']) / peak if np.isfinite(f_row['std']) else float('nan'),
+                        'lolim': float(f_row['lolim']) / peak if np.isfinite(f_row['lolim']) else float('nan'),
+                        'uplim': float(f_row['uplim']) / peak if np.isfinite(f_row['uplim']) else float('nan'),
+                    })
+                else:
+                    rows.append({'value': float('nan'), 'std': float('nan'),
+                                 'lolim': float('nan'), 'uplim': float('nan')})
+            result = pd.DataFrame(rows, index=list(self._templates))
+            self.ew = result
+            return result
+        if method == 'constant-continuum':
+            continuum_val = float(continuum)
+            if not np.isfinite(continuum_val) or continuum_val == 0.0:
+                rows = [{'value': float('nan'), 'std': float('nan'),
+                         'lolim': float('nan'), 'uplim': float('nan')}
+                        for _ in self._templates]
+                result = pd.DataFrame(rows, index=list(self._templates))
+                self.ew = result
+                return result
+
+            flux_df = self.flux
+            result = flux_df / continuum_val
+            self.ew = result
+            return result
+
+        elif method == 'integration':
+            shared_values = [getattr(self, pname).value for pname in self._shared_params.keys()]
+            rows = []
+            for idx, (tmpl, pname) in enumerate(zip(self._templates, self._param_names_list)):
+                positions = self._tmpl_positions[idx]
+                weights = self._tmpl_weights[idx]
+                amplitude = getattr(self, pname).value
+
+                if x is None:
+                    centers = [pos * (1.0 + shared_values[-1]) for pos in positions]
+                    mean_c = float(np.mean(centers))
+                    if window is None:
+                        shared_fwhm = shared_values[list(self._shared_params.keys()).index('fwhm')
+                                                    if 'fwhm' in self._shared_params else 0] if self._shared_params else 10.0
+                        fwhm_aa = (shared_fwhm / c_kms * mean_c) if self._shared_params else 10.0
+                        hw = 6.0 * max(fwhm_aa, 0.1)
+                        _window = (mean_c - hw, mean_c + hw)
+                    else:
+                        _window = window
+                    x_arr = np.linspace(float(_window[0]), float(_window[1]), int(num), dtype=float)
+                else:
+                    x_arr = np.asarray(x, dtype=float)
+
+                y_line = np.zeros_like(x_arr)
+                for pos, weight in zip(positions, weights):
+                    args = self._single_profile_args(pos, amplitude, weight, *shared_values)
+                    y_line += self._profile_func(x_arr, *args)
+
+                if callable(continuum):
+                    y_cont = np.asarray(continuum(x_arr), dtype=float)
+                else:
+                    y_cont = np.full_like(x_arr, float(continuum))
+                safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
+                try:
+                    ew_val = float(np.trapezoid(y_line / safe, x_arr))
+                except AttributeError:
+                    ew_val = float(np.trapz(y_line / safe, x_arr))
+                rows.append({'value': ew_val, 'std': float('nan'),
+                             'lolim': float('nan'), 'uplim': float('nan')})
+
+            result = pd.DataFrame(rows, index=list(self._templates))
+            self.ew = result
+            return result
+
+        else:
+            raise ValueError("method must be 'constant-continuum' or 'integration'.")
+
+    def _template_flux(self, amp_pname, positions, weights):
+        """Total flux for one template at current parameter values."""
+        shared = [getattr(self, sp).value for sp in self._shared_params.keys()]
+        amp = getattr(self, amp_pname).value
+        return sum(
+            self._calc_flux(pos, amp * wt, *shared)
+            for pos, wt in zip(positions, weights)
+        )
+
+    def _propagate_template_flux_std(self, amp_pname, flux_val, positions, weights):
+        """Propagate parameter std to template flux.
+
+        Uses full covariance when available, else diagonal std.
+        """
+        cov = getattr(self, '_param_cov', None)
+        if cov is not None:
+            return self._propagate_template_flux_std_cov(
+                amp_pname, flux_val, positions, weights, cov)
+
         eps = 1e-6
         var_flux = 0.0
-        has_any_std = False
-        
-        # We need to perturb the specific amplitude and all shared params
-        relevant_params = [amp_pname] + list(self._shared_params.keys())
-        
-        for p_name in relevant_params:
-            param = getattr(self, p_name)
-            if _has_param_std(param):
-                has_any_std = True
-                orig_val = param.value
-                delta = orig_val * eps if orig_val != 0 else eps
-                
-                # Perturb parameter forward
-                param.value = orig_val + delta
-                
-                # Recalculate flux
-                flux_plus = 0.0
-                shared_values_plus = [getattr(self, sp).value for sp in self._shared_params.keys()]
-                amp_plus = getattr(self, amp_pname)
-                
-                for pos, wt in zip(positions, weights):
-                    amp_eff = amp_plus.value * wt
-                    flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus)
-                
-                # Restore parameter
-                param.value = orig_val
-                
-                d_flux_dp = (flux_plus - flux_val) / delta
-                var_flux += (d_flux_dp * param.std) ** 2
-                
-        return np.sqrt(var_flux) if has_any_std and var_flux > 0 else None
+        has_any = False
+        relevant = [amp_pname] + list(self._shared_params.keys())
 
-    def _compute_group_flux_limits(self, amp_pname, positions, weights):
-        """Compute flux limits by iterating bound corners."""
-        import itertools
-        param_limits = []
-        has_any_limit = False
-        relevant_params = [amp_pname] + [sp for sp in self._shared_params.keys() if sp not in ['offset', 'redshift']]
-        
-        for p_name in relevant_params:
+        for p_name in relevant:
             param = getattr(self, p_name)
-            lo, hi, has_lo, has_hi = _get_param_limits(param)
-            if has_lo or has_hi:
-                has_any_limit = True
-            param_limits.append((lo, hi))
-            
-        if not has_any_limit:
+            if not _has_param_std(param):
+                continue
+            has_any = True
+            orig = param.value
+            delta = abs(orig) * eps if orig != 0 else eps
+            param.value = orig + delta
+            df = (self._template_flux(amp_pname, positions, weights) - flux_val) / delta
+            param.value = orig
+            var_flux += (df * param.std) ** 2
+
+        return np.sqrt(var_flux) if has_any and var_flux > 0 else None
+
+    def _propagate_template_flux_std_cov(self, amp_pname, flux_val, positions, weights, cov):
+        """Covariance-aware flux std for one template."""
+        from astropy.modeling.fitting import model_to_fit_params
+        _, fit_indices, _ = model_to_fit_params(self)
+        eps = 1e-6
+        jac = np.zeros(len(fit_indices))
+        all_params = self.parameters
+
+        for j, idx in enumerate(fit_indices):
+            orig = float(all_params[idx])
+            delta = abs(orig) * eps if orig != 0 else eps
+            all_params[idx] = orig + delta
+            self.parameters = all_params
+            jac[j] = (self._template_flux(amp_pname, positions, weights) - flux_val) / delta
+            all_params[idx] = orig
+        self.parameters = all_params
+
+        var = float(jac @ cov @ jac)
+        return np.sqrt(var) if var > 0 else None
+
+    def _propagate_template_flux_limits(self, amp_pname, positions, weights):
+        """Propagate parameter limits to template flux using monotonicity.
+
+        Amplitude gates whether each direction's limit is computed.
+        Width parameters contribute their CI if available, else best-fit.
+        """
+        width_params = [sp for sp in self._shared_params
+                        if sp not in ('offset', 'redshift')]
+        amp_param = getattr(self, amp_pname)
+        _, _, amp_has_lo, amp_has_hi = _get_param_limits(amp_param)
+
+        if not amp_has_lo and not amp_has_hi:
             return None, None
-            
-        combos = list(itertools.product(*param_limits))
-        flux_values = []
-        
-        for combo in combos:
+
+        def _eval_at(overrides):
             orig = {}
-            for pname, pval in zip(relevant_params, combo):
-                param = getattr(self, pname)
-                orig[pname] = param.value
-                param.value = pval
-                
-            flux_plus = 0.0
-            shared_values_plus = [getattr(self, sp).value for sp in self._shared_params.keys()]
-            amp_plus = getattr(self, amp_pname)
-            
-            for pos, wt in zip(positions, weights):
-                amp_eff = amp_plus.value * wt
-                flux_plus += self._calc_flux(pos, amp_eff, *shared_values_plus)
-                
-            flux_values.append(flux_plus)
-            
-            for pname, oval in orig.items():
-                getattr(self, pname).value = oval
-                
-        return np.min(flux_values), np.max(flux_values)
+            for p, v in overrides.items():
+                orig[p] = getattr(self, p).value
+                getattr(self, p).value = v
+            f = self._template_flux(amp_pname, positions, weights)
+            for p, v in orig.items():
+                getattr(self, p).value = v
+            return f
+
+        def _compute(use_lo):
+            has_amp = amp_has_lo if use_lo else amp_has_hi
+            if not has_amp:
+                return None
+            overrides = {amp_pname: amp_param.lolim if use_lo else amp_param.uplim}
+            for p in width_params:
+                _, _, has_lo, has_hi = _get_param_limits(getattr(self, p))
+                if use_lo and has_lo:
+                    overrides[p] = getattr(self, p).lolim
+                elif not use_lo and has_hi:
+                    overrides[p] = getattr(self, p).uplim
+            return _eval_at(overrides)
+
+        return _compute(True), _compute(False)
 
 class GaussianLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}

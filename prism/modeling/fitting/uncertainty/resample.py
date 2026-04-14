@@ -111,7 +111,8 @@ class Bootstrap:
 
     def __init__(self, model, fitter, x, y, yerr=None, weights=None,
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
-                 seed=None, verbose=True, nproc=1, batch=False):
+                 seed=None, verbose=True, nproc=1, batch=False,
+                 inplace=True, confidence=68, set_values=True):
         self.model = model
         self.fitter = fitter
         self.x = np.asarray(x)
@@ -125,6 +126,9 @@ class Bootstrap:
         self.verbose = bool(verbose)
         self.nproc = int(nproc)
         self.batch = bool(batch)
+        self.inplace = bool(inplace)
+        self.confidence = confidence
+        self.set_values = bool(set_values)
 
     @staticmethod
     def _fit_param_names(model):
@@ -182,7 +186,7 @@ class Bootstrap:
             weights=weights_batch,
             statistic=fit_stat,
             nproc=self.nproc,
-            progress=self.verbose,
+            progress=True,
             batch=self.batch,
             **self.fitter_kwargs,
         )
@@ -210,7 +214,7 @@ class Bootstrap:
             n_success += 1
 
         success_rate = n_success / self.n_samples
-        if success_rate < 0.5:
+        if success_rate < 0.9:
             warnings.warn(
                 f"Only {success_rate * 100:.1f}% of bootstrap iterations succeeded. "
                 "Results may be unreliable.",
@@ -219,6 +223,14 @@ class Bootstrap:
 
         if self.verbose:
             print(f"✓ Bootstrap complete: {n_success}/{self.n_samples} successful")
+
+        if self.inplace:
+            Bootstrap.attach(
+                self.model, samples,
+                confidence=self.confidence,
+                set_values=self.set_values,
+                verbose=self.verbose,
+            )
 
         return samples
 
@@ -314,8 +326,20 @@ class Bootstrap:
 
 def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
              statistic='gauss', fitter_kwargs=None, seed=None,
-             verbose=True, nproc=1, batch=False):
-    """Compatibility wrapper around Bootstrap(...).run()."""
+             verbose=False, nproc=1, batch=False,
+             inplace=True, confidence=68, set_values=True):
+    """Run parametric bootstrap and optionally attach results to model.
+
+    Parameters
+    ----------
+    inplace : bool
+        When True (default), attach std/lolim/uplim directly to *model*
+        parameters after sampling.  The samples dict is still returned.
+    confidence : float
+        Confidence interval percentage used when *inplace* is True.
+    set_values : bool
+        When *inplace* is True, update parameter values to bootstrap medians.
+    """
     return Bootstrap(
         model=model,
         fitter=fitter,
@@ -330,6 +354,9 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
         verbose=verbose,
         nproc=nproc,
         batch=batch,
+        inplace=inplace,
+        confidence=confidence,
+        set_values=set_values,
     ).run()
 
 

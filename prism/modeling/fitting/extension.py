@@ -98,7 +98,7 @@ def _wrap_fitter_call(original_call):
     accepts_maxfun = 'maxfun' in params
 
     def wrapped_call(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
-                     filter_non_finite=False, verbose=False, inplace=False, **kwargs):
+                     filter_non_finite=False, verbose=False, inplace=True, **kwargs):
         
         # 1. Handle non-finite
         if filter_non_finite:

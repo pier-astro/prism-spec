@@ -15,6 +15,7 @@ from .lines import (
     LineGroupBase,
     LorentzianLine,
     LorentzianLines,
+    Metric,
     VoigtLine,
     VoigtLines,
     sigma2fwhm,
@@ -145,28 +146,6 @@ class _SelectionParameter:
     uplim: float = float('nan')
     bounds: tuple = (None, None)
     parent_name: str | None = None
-
-
-@dataclass(frozen=True)
-class Metric:
-    """A single measured quantity with optional uncertainty bounds.
-
-    Attributes
-    ----------
-    value  : nominal (best-fit or integrated) measurement.
-    std    : standard deviation from sampling (NaN when unavailable).
-    lolim  : lower percentile limit from sampling (NaN when unavailable).
-    uplim  : upper percentile limit from sampling (NaN when unavailable).
-    """
-    value: float
-    std: float = float('nan')
-    lolim: float = float('nan')
-    uplim: float = float('nan')
-
-    def __repr__(self) -> str:
-        if not np.isfinite(self.std):
-            return f"{self.value:.4g}"
-        return f"{self.value:.4g} \u00b1 {self.std:.4g}  [{self.lolim:.4g}, {self.uplim:.4g}]"
 
 
 def _as_metric(value) -> Metric:
@@ -325,6 +304,30 @@ class SelectedLineCollection:
 
     def measure(self, x=None, window=None, num=4096):
         return measure_line(self, x=x, window=window, num=num)
+
+    def eqw(self, continuum=None, x=None, window=None, num=2048) -> np.ndarray:
+        """Equivalent width for every spaxel; returns a shaped numpy array.
+
+        Parameters
+        ----------
+        continuum : None | float | callable, optional
+            Same semantics as :meth:`SelectedLineProfile.eqw`.
+            ``None`` auto-detects from each spaxel's model.
+        x, window, num : see :meth:`SelectedLineProfile.eqw`.
+
+        Returns
+        -------
+        np.ndarray
+            Shaped array of EW values (one per spaxel).  NaN where the
+            continuum is zero or the fit failed.
+        """
+        out = np.full(self.shape, np.nan, dtype=float)
+        for flat_index in range(self.source_result.n_spaxels):
+            spatial_index = np.unravel_index(flat_index, self.shape)
+            prof = self.get_profile(flat_index)
+            m = prof.eqw(continuum=continuum, x=x, window=window, num=num)
+            out[spatial_index] = m.value
+        return out
 
 
 def _is_multifit_like(obj) -> bool:
@@ -502,6 +505,265 @@ class SelectedLineProfile:
             method=method, distribution=distribution,
             random_state=random_state, return_samples=return_samples,
         )
+
+    def eqw(self, continuum=None, x=None, window=None, num=2048) -> Metric:
+        """Equivalent width of the selected line profile.
+
+        Parameters
+        ----------
+        continuum : None | float | callable, optional
+            Continuum level evaluated on the wavelength grid.
+
+            ``None`` (default) — auto-detect from the composite model:
+            ``continuum(λ) = source_model(λ) − selected_line(λ)``.
+            This works when the selection is part of a compound model
+            that includes continuum components.
+
+            scalar ``float`` — constant continuum (useful for a pre-normalised
+            spectrum where the continuum level is known independently).
+
+            callable — any object with a ``__call__(x)`` signature, e.g. an
+            astropy model representing the continuum component.  It is
+            evaluated on the same wavelength grid as the line.
+
+        x : array-like, optional
+            Wavelength grid.  If not provided, a grid is built from *window*
+            (or inferred from the line width) with *num* points.
+        window : (float, float), optional
+            ``(min_wavelength, max_wavelength)`` defining the integration range.
+        num : int
+            Number of grid points when the grid is constructed internally.
+
+        Returns
+        -------
+        Metric
+            Nominal EW value only (no uncertainty).  Use :meth:`sample_eqw`
+            to obtain uncertainties via Monte Carlo sampling.
+            Result is also stored as ``self.ew``.
+            Positive for emission, negative for absorption.
+        """
+        if x is None:
+            if window is None:
+                window = self.infer_window()
+            x_arr = np.linspace(float(window[0]), float(window[1]), int(num), dtype=float)
+        else:
+            x_arr = np.asarray(x, dtype=float)
+
+        y_line = np.asarray(self.evaluate(x_arr), dtype=float)
+        flux = float(_trapezoid(y_line, x_arr))
+
+        if continuum is None:
+            # Robust auto-detect: median of (source_model − line) over ±sigma around centroid
+            _wb = window if window is not None else self.infer_window()
+            sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)  # window ≈ ±6×FWHM
+            centroid = float(self.position)
+            x_cont = np.linspace(centroid - sigma_est, centroid + sigma_est, 17, dtype=float)
+            cont_vals = (np.asarray(self.source_model(x_cont), dtype=float)
+                         - np.asarray(self.evaluate(x_cont), dtype=float))
+            _fin = cont_vals[np.isfinite(cont_vals)]
+            cont_c = float(np.median(_fin)) if _fin.size > 0 else float('nan')
+            ew_val = (flux / cont_c) if (np.isfinite(cont_c) and cont_c > 0.0) else float('nan')
+            result = Metric(value=ew_val)
+        elif callable(continuum):
+            y_cont = np.asarray(continuum(x_arr), dtype=float)
+            result = Metric(value=_compute_ew_numerical(x_arr, y_line, y_cont))
+        else:
+            cont_val = float(continuum)
+            ew_val = (flux / cont_val) if (np.isfinite(cont_val) and cont_val != 0.0) else float('nan')
+            result = Metric(value=ew_val)
+
+        self.ew = result
+        return result
+
+    def sample_eqw(self, continuum=None, n_samples=256, confidence=68,
+                   x=None, window=None, num=2048,
+                   method='auto', distribution='auto',
+                   perturb_continuum=False,
+                   random_state=None) -> Metric:
+        """Equivalent width with Monte Carlo uncertainty propagation.
+
+        Parameters
+        ----------
+        continuum : None | float | callable, optional
+            Continuum specification — same semantics as :meth:`eqw`.
+
+            ``None`` — auto-detect from the composite model.  When
+            *perturb_continuum* is ``True``, the non-line components of
+            the model are perturbed in each MC draw alongside the line
+            parameters.
+
+            scalar ``float`` — constant continuum; its value is fixed across
+            all draws (uncertainties on an externally fixed continuum must
+            be accounted for separately).
+
+            callable — evaluated on *x* in every draw at nominal parameter
+            values unless it is itself an astropy model whose parameters have
+            uncertainties set; in that case enable *perturb_continuum* to
+            propagate those as well (the callable must be the
+            ``source_model`` for this to take effect).
+
+        n_samples : int
+            Number of Monte Carlo draws.
+        confidence : float
+            Confidence level in percent for the reported confidence interval.
+        x, window, num : see :meth:`eqw`.
+        method : {'auto', 'covariance', 'limits', 'std'}
+            Sampling strategy for line parameters (forwarded to
+            :func:`_draw_selection_samples`).
+        distribution : {'auto', 'uniform', 'gaussian'}
+            Distribution used when drawing from limits or std.
+        perturb_continuum : bool, default False
+            When ``True`` and *continuum* is ``None``, also perturb the free
+            parameters of the non-line components during sampling.  This
+            propagates continuum-parameter uncertainties into the EW error
+            budget.  Requires those parameters to have std, lolim, or uplim
+            set.
+        random_state : int or numpy.random.Generator, optional
+            Seed or generator for reproducibility.
+
+        Returns
+        -------
+        Metric
+            EW with nominal value, standard deviation, and confidence limits.
+            Result is also stored as ``self.ew``.
+        """
+        if x is None:
+            if window is None:
+                window = self.infer_window()
+            x_arr = np.linspace(float(window[0]), float(window[1]), int(num), dtype=float)
+        else:
+            x_arr = np.asarray(x, dtype=float)
+
+        # --- Nominal EW (same logic as eqw()) ---
+        y_line_nom = np.asarray(self.evaluate(x_arr), dtype=float)
+        flux_nom = float(_trapezoid(y_line_nom, x_arr))
+
+        # Pre-compute ±sigma continuum grid (used for nominal EW and per-draw)
+        _wb = window if window is not None else self.infer_window()
+        if continuum is None:
+            sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
+            centroid = float(self.position)
+            x_cont = np.linspace(centroid - sigma_est, centroid + sigma_est, 17, dtype=float)
+            _cont_vals_nom = (np.asarray(self.source_model(x_cont), dtype=float)
+                              - np.asarray(self.evaluate(x_cont), dtype=float))
+            _fin_nom = _cont_vals_nom[np.isfinite(_cont_vals_nom)]
+            _cont_c_nom = float(np.median(_fin_nom)) if _fin_nom.size > 0 else float('nan')
+            ew_nominal = (flux_nom / _cont_c_nom) if (np.isfinite(_cont_c_nom) and _cont_c_nom > 0.0) else float('nan')
+            y_cont_nom_arr = None
+        elif callable(continuum):
+            y_cont_nom_arr = np.asarray(continuum(x_arr), dtype=float)
+            ew_nominal = _compute_ew_numerical(x_arr, y_line_nom, y_cont_nom_arr)
+            x_cont = None
+        else:
+            _cont_val = float(continuum)
+            ew_nominal = (flux_nom / _cont_val) if (np.isfinite(_cont_val) and _cont_val != 0.0) else float('nan')
+            y_cont_nom_arr = None
+            x_cont = None
+
+        # --- Draw line parameter samples ---
+        # Derive independent seeds for line and continuum sampling so that
+        # parameter draws are uncorrelated even when a fixed random_state is used.
+        if isinstance(random_state, np.random.Generator):
+            line_random_state = random_state
+            _cont_rng = np.random.default_rng()
+        else:
+            _ss = np.random.SeedSequence(random_state)
+            _line_child, _cont_child = _ss.spawn(2)
+            line_random_state = int(_line_child.generate_state(1)[0] & 0x7FFFFFFF)
+            _cont_rng = np.random.default_rng(_cont_child)
+
+        specs, draws = _draw_selection_samples(
+            self, n_samples=n_samples,
+            method=method, distribution=distribution,
+            random_state=line_random_state,
+        )
+
+        # --- Optional continuum parameter specs ---
+        cont_specs = []
+        cont_draws = None
+        if perturb_continuum and continuum is None:
+            cont_specs = _non_line_parameter_specs(self.source_model, self)
+            if cont_specs:
+                cont_draws = np.empty((int(n_samples), len(cont_specs)), dtype=float)
+                for j, spec in enumerate(cont_specs):
+                    lo, up = spec.lolim, spec.uplim
+                    has_limits = np.isfinite(lo) and np.isfinite(up) and up > lo
+                    has_std = np.isfinite(spec.std) and spec.std > 0.0
+                    if has_limits:
+                        cont_draws[:, j] = _cont_rng.uniform(lo, up, size=int(n_samples))
+                    elif has_std:
+                        cont_draws[:, j] = _cont_rng.normal(spec.value, spec.std, size=int(n_samples))
+                    else:
+                        cont_draws[:, j] = spec.value
+                _clip_draws_to_bounds(cont_specs, cont_draws)
+
+        # --- Sampling loop ---
+        working_model = self.source_model.copy()
+        working_comps = get_components(working_model, additive=self.additive)
+        all_comps_flat = get_components(working_model, additive=False)
+
+        eval_plan = [
+            (entry, working_comps[entry.component_key])
+            for entry in self.entries
+        ]
+
+        ew_samples = np.empty(int(n_samples), dtype=float)
+        for i, draw in enumerate(draws):
+            for spec, value in zip(specs, draw):
+                getattr(working_comps[spec.component_key], spec.param_name).value = value
+
+            if cont_draws is not None:
+                for spec, value in zip(cont_specs, cont_draws[i]):
+                    comp = all_comps_flat.get(spec.component_key, None)
+                    if comp is not None:
+                        getattr(comp, spec.param_name).value = value
+
+            y_line = np.zeros_like(x_arr, dtype=float)
+            for entry, comp in eval_plan:
+                if entry.template_name is None:
+                    vals, _, _ = _evaluate_component_profile(comp, x_arr)
+                else:
+                    vals, _, _, _ = _evaluate_linegroup_template(comp, entry.template_name, x_arr)
+                y_line += vals
+
+            flux_draw = float(_trapezoid(y_line, x_arr))
+
+            if continuum is None:
+                # Median continuum over ±sigma interval per draw
+                y_line_xc = np.zeros(len(x_cont), dtype=float)
+                for entry, comp in eval_plan:
+                    if entry.template_name is None:
+                        vals_c, _, _ = _evaluate_component_profile(comp, x_cont)
+                    else:
+                        vals_c, _, _, _ = _evaluate_linegroup_template(comp, entry.template_name, x_cont)
+                    y_line_xc += np.asarray(vals_c, dtype=float).ravel()[:len(x_cont)]
+                cont_vals_draw = np.asarray(working_model(x_cont), dtype=float) - y_line_xc
+                _fin_draw = cont_vals_draw[np.isfinite(cont_vals_draw)]
+                cont_c = float(np.median(_fin_draw)) if _fin_draw.size > 0 else float('nan')
+                ew_samples[i] = (flux_draw / cont_c) if (np.isfinite(cont_c) and cont_c > 0.0) else float('nan')
+            elif callable(continuum):
+                ew_samples[i] = _compute_ew_numerical(x_arr, y_line, y_cont_nom_arr)
+            else:
+                ew_samples[i] = (flux_draw / _cont_val) if (np.isfinite(_cont_val) and _cont_val != 0.0) else float('nan')
+
+        # --- Aggregate ---
+        finite = ew_samples[np.isfinite(ew_samples)]
+        if finite.size == 0:
+            result = Metric(value=float(ew_nominal))
+            self.ew = result
+            return result
+
+        alpha = (100.0 - float(confidence)) / 2.0
+        from ..fitting.uncertainty.resample import extract_limits
+        lo, up = extract_limits(_NO_BOUNDS, ew_samples, alpha, 100.0 - alpha)
+        result = Metric(
+            value=float(ew_nominal),
+            std=float(np.std(finite, ddof=1)) if finite.size > 1 else 0.0,
+            lolim=float(lo),
+            uplim=float(up),
+        )
+        self.ew = result
+        return result
 
 
 def _component_name(component, fallback):
@@ -746,6 +1008,90 @@ def _compute_profile_metrics(x_arr, y_arr) -> dict:
         'fw80m': fw80m,
         'bisector_span': bisector_span,
     }
+
+
+def _compute_ew_numerical(x_arr, y_line, y_continuum) -> float:
+    """Numerically integrate EW = ∫ F_line / F_cont dλ.
+
+    Pixels where the continuum is zero or negative are excluded.
+    """
+    safe = np.where(y_continuum > 0.0, y_continuum, np.nan)
+    return float(_trapezoid(y_line / safe, x_arr))
+
+
+def _continuum_array(continuum, selection, x_arr) -> np.ndarray:
+    """Evaluate the continuum on *x_arr*.
+
+    Parameters
+    ----------
+    continuum : None | float | callable
+        ``None``  — auto-detect: ``source_model(x) − selected_line(x)``.
+        scalar ``float``  — constant continuum level.
+        callable — evaluated as ``continuum(x_arr)`` (e.g. astropy model).
+    selection : SelectedLineProfile
+        Used when *continuum* is ``None``.
+    x_arr : np.ndarray
+        Wavelength grid.
+    """
+    if continuum is None:
+        y_total = np.asarray(selection.source_model(x_arr), dtype=float)
+        y_line = np.asarray(selection.evaluate(x_arr), dtype=float)
+        return y_total - y_line
+    if callable(continuum):
+        return np.asarray(continuum(x_arr), dtype=float)
+    return np.full_like(x_arr, float(continuum))
+
+
+def _non_line_parameter_specs(model, selection):
+    """Collect free parameter specs for non-line components of *model*.
+
+    Returns a list of ``_SelectionParameter`` for every free parameter in
+    components that are NOT part of the line selection and have uncertainty
+    information (std, lolim, or uplim).
+    """
+    all_comps = get_components(model, additive=False)
+    line_keys = {entry.component_key for entry in selection.entries}
+    specs = []
+    seen = set()
+
+    for key, name in zip(all_comps.indices, all_comps.names):
+        if name in line_keys:
+            continue
+        component = all_comps[key]
+        if not hasattr(component, 'param_names'):
+            continue
+        for param_name in component.param_names:
+            param = getattr(component, param_name)
+            if getattr(param, 'fixed', False):
+                continue
+            uid = (name, param_name)
+            if uid in seen:
+                continue
+            pvalue = float(np.asarray(param.value, dtype=float))
+            std_raw = getattr(param, 'std', None)
+            std_val = float(np.asarray(std_raw, dtype=float)) if std_raw is not None else float('nan')
+            lolim_raw = getattr(param, 'lolim', None)
+            uplim_raw = getattr(param, 'uplim', None)
+            lolim_val = float(np.asarray(lolim_raw, dtype=float)) if lolim_raw is not None else float('nan')
+            uplim_val = float(np.asarray(uplim_raw, dtype=float)) if uplim_raw is not None else float('nan')
+            has_std = np.isfinite(std_val) and std_val > 0.0
+            has_limits = np.isfinite(lolim_val) and np.isfinite(uplim_val) and uplim_val > lolim_val
+            if not (has_std or has_limits):
+                continue
+            raw_bounds = getattr(param, 'bounds', (None, None))
+            specs.append(
+                _SelectionParameter(
+                    component_key=name,
+                    param_name=param_name,
+                    value=pvalue,
+                    std=std_val,
+                    lolim=lolim_val,
+                    uplim=uplim_val,
+                    bounds=tuple(raw_bounds) if raw_bounds is not None else (None, None),
+                )
+            )
+            seen.add(uid)
+    return specs
 
 
 def measure_line(model_or_selection, selector=None, mode='auto', components=None,
