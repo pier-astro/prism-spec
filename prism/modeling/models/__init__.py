@@ -60,4 +60,7 @@ from .display import (
     get_model_expression,
     format_model_text,
     format_model_html,
+    format_fit_text,
+    format_fit_html,
+    show_model,
 )

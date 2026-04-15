@@ -6,6 +6,9 @@ from .models.display import (
     get_model_expression,
     format_model_text,
     format_model_html,
+    format_fit_text,
+    format_fit_html,
+    show_model,
 )
 
 __all__ = [
@@ -14,6 +17,9 @@ __all__ = [
     'get_model_expression',
     'format_model_text',
     'format_model_html',
+    'format_fit_text',
+    'format_fit_html',
+    'show_model',
 ]
 
 enable_model_display()
