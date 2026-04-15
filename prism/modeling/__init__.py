@@ -21,3 +21,10 @@ io
 """
 from .operators.convolved import LinearOperator, MatrixLinearOperator, LinearOperatorCompoundModel
 from .operators.instrument import InstrumentResponse, SpectralResponse, ResponseOperator
+from .models.display import (
+    enable_model_display,
+    disable_model_display,
+    get_model_expression,
+    format_model_text,
+    format_model_html,
+)

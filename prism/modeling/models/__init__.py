@@ -54,3 +54,10 @@ from .components import get_components, ModelComponents
 
 from .agn import *
 from .empirical import *
+from .display import (
+    enable_model_display,
+    disable_model_display,
+    get_model_expression,
+    format_model_text,
+    format_model_html,
+)
