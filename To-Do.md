@@ -13,14 +13,13 @@ Instead it would be amazing is when importing prims we extend the astropy class 
 - (DONE !) Add something that instead of the covariance uses the .lolim and .uplim to compute the derived parameters uncertainties.
 
 - Add units handling in the line models and in the line analysis. This should be done in a way that is consistent with the rest of the package and with the astropy models. We should verify how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now. This will make things more consistent and easier to handle and astropy "standard".
+Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
 
-- EQUIVALENT WIDTH handling! Either at line level as .flux and at line_analysis level for the blended line.
+- (DONE !!) EQUIVALENT WIDTH handling! Either at line level as .flux and at line_analysis level for the blended line.
 
-- Add error to link when tied parameter is not in the model
+- (likely not needed) Add error to link when tied parameter is not in the model. Verify how feasible is to add the .link attribute to the Astropy model calss (as we are doing with .save) to easily apply the tie function
 
 - Add the minimal display module and verify how feasible is to add the html `__repr__` to the model object directly to keep things lightweight
-- Verify how feasible is to add the .link attribute to the Astropy model calss (as we are doing with .save) to easily apply the tie function
-- Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
 
 - Table models and Template models with and without velocity braodening
 - Penalized Pixel Fitting as fitter
