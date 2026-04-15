@@ -111,8 +111,9 @@ class Bootstrap:
 
     def __init__(self, model, fitter, x, y, yerr=None, weights=None,
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
-                 seed=None, verbose=True, nproc=1, batch=False,
-                 inplace=True, confidence=68, set_values=True):
+                 seed=None, confidence=68, noise_dist='uniform',
+                 verbose=True, nproc=1, batch=False,
+                 inplace=True,  set_values=True):
         self.model = model
         self.fitter = fitter
         self.x = np.asarray(x)
@@ -129,6 +130,7 @@ class Bootstrap:
         self.inplace = bool(inplace)
         self.confidence = confidence
         self.set_values = bool(set_values)
+        self.noise_dist = noise_dist.lower()
 
     @staticmethod
     def _fit_param_names(model):
@@ -159,6 +161,9 @@ class Bootstrap:
         if stat not in {'gauss', 'poisson'}:
             raise ResampleError(f"Unknown statistic '{self.statistic}'. Use 'gauss' or 'poisson'.")
 
+        if self.noise_dist not in {'gauss', 'uniform'}:
+            raise ResampleError(f"Unknown noise distribution '{self.noise_dist}'. Use 'gauss' or 'uniform'.")
+
         if self.n_samples < 1:
             raise ResampleError("n_samples must be >= 1.")
 
@@ -167,7 +172,12 @@ class Bootstrap:
 
         rng = np.random.default_rng(self.seed)
         if stat == 'gauss':
-            noise = rng.normal(0.0, yerr, size=(self.n_samples, y_model.size))
+            if self.noise_dist == 'uniform':
+                # Sample noise uniformly within [-yerr, yerr]
+                noise = rng.uniform(-yerr, yerr, size=(self.n_samples, y_model.size))
+            else:  # 'gauss'
+                # Sample noise from Gaussian with sigma=yerr
+                noise = rng.normal(0.0, yerr, size=(self.n_samples, y_model.size))
             y_synth = y_model[np.newaxis, :] + noise
             fit_stat = 'chi2'
         else:
@@ -327,7 +337,7 @@ class Bootstrap:
 def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
              statistic='gauss', fitter_kwargs=None, seed=None,
              verbose=False, nproc=1, batch=False,
-             inplace=True, confidence=68, set_values=True):
+             inplace=True, confidence=68, set_values=True, noise_dist='uniform'):
     """Run parametric bootstrap and optionally attach results to model.
 
     Parameters
@@ -339,6 +349,10 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
         Confidence interval percentage used when *inplace* is True.
     set_values : bool
         When *inplace* is True, update parameter values to bootstrap medians.
+    noise_dist : str
+        Distribution for noise sampling: 'uniform' (default) samples uniformly
+        within [value-err, value+err], 'gauss' samples from Gaussian with
+        sigma=err. Only used when statistic='gauss'.
     """
     return Bootstrap(
         model=model,
@@ -357,6 +371,7 @@ def bootstrap(model, fitter, x, y, yerr=None, weights=None, n_samples=1000,
         inplace=inplace,
         confidence=confidence,
         set_values=set_values,
+        noise_dist=noise_dist,
     ).run()
 
 

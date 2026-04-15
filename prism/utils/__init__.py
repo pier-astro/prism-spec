@@ -1,1 +1,5 @@
 """prism.utils — low-level utility functions used across the package."""
+
+from .sciformat import fmt, format_tex, format_value, round_sig, tex
+
+__all__ = ['round_sig', 'fmt', 'tex', 'format_value', 'format_tex']
