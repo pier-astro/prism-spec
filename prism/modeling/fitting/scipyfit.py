@@ -92,6 +92,17 @@ class ScipyFitter(Fitter):
                                for b in bounds_list])
         param_bounds = all_bounds[fit_indices]
 
+        # Reject parameters with equal bounds (lower == upper): scipy requires
+        # strict inequality.  Use param.fixed = True instead.
+        equal_mask = param_bounds[:, 0] == param_bounds[:, 1]
+        if np.any(equal_mask):
+            bad_names = [model.param_names[fi] for fi, m
+                         in zip(fit_indices, equal_mask) if m]
+            raise ValueError(
+                f"Parameters with equal lower and upper bounds: "
+                f"{', '.join(bad_names)}. Use `param.fixed = True` instead."
+            )
+
         tied_info = _get_tied_info(model)
         params_cache = model.parameters.copy()
         

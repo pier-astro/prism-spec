@@ -48,7 +48,6 @@ Utilities
     Count the number of free (unfixed, untied) parameters.
 """
 from .lines import *
-from .line_analysis import *
 from .continuum import *
 from .components import get_components, ModelComponents
 

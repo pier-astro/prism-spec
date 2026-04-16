@@ -11,8 +11,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from ..components import get_components
-from ..lines import (
+from ..models.components import get_components
+from ..models.lines import (
     GaussianLine, GaussianLines,
     LineGroupBase,
     LorentzianLine, LorentzianLines,
@@ -20,7 +20,7 @@ from ..lines import (
     VoigtLine, VoigtLines,
     sigma2fwhm,
 )
-from ..lines import profiles
+from ..models.lines import profiles
 
 try:
     _trapezoid = np.trapezoid
@@ -173,18 +173,34 @@ class _SelectionParameter:
 # ---------------------------------------------------------------------------
 
 class SelectedLineProfile:
-    """A selected emission-line profile from a compound model."""
+    """
+    A selected emission-line profile extracted from a composite model.
 
-    def __init__(self, source_model, selector, mode, entries, additive=True):
+    This object acts like a standalone 1D model and can be evaluated on a 
+    wavelength grid. It also provides methods to inspect its components separately,
+    measure its properties, or sample over uncertainties via Monte Carlo.
+
+    Parameters
+    ----------
+    source_model : astropy.modeling.Model
+        The original compound model. 
+    selector : str
+        The line tag or name of the component(s) corresponding to this profile.
+    entries : sequence of _SelectionEntry
+        Information linking the selected components from the source model to this profile.
+    additive : bool
+        Whether this line selection restricted its component search to the additive block.
+    """
+
+    def __init__(self, source_model, selector, entries, additive=True):
         self.source_model = source_model
         self.selector = str(selector)
-        self.mode = mode
         self.entries = tuple(entries)
         self.additive = bool(additive)
 
     def __repr__(self):
         return (
-            f"SelectedLineProfile(selector={self.selector!r}, mode={self.mode!r}, "
+            f"SelectedLineProfile(selector={self.selector!r}, "
             f"components={len(self.entries)})")
 
     @property
@@ -193,7 +209,7 @@ class SelectedLineProfile:
 
     def copy_for_model(self, model):
         return SelectedLineProfile(
-            source_model=model, selector=self.selector, mode=self.mode,
+            source_model=model, selector=self.selector,
             entries=self.entries, additive=self.additive)
 
     def _iter_evaluated_entries(self, x):
@@ -537,19 +553,23 @@ class _BoundsProxy:
 # ---------------------------------------------------------------------------
 
 class SelectedLineCollection:
-    """Batch selection over a MultiFitResult."""
+    """
+    A batch of selected emission-line profiles over a MultiFitResult.
+    
+    Provides spatial evaluations, mappings, and EW computations for multi-spaxel
+    datasets where the same line setup is tracked.
+    """
 
-    def __init__(self, result, selector, mode, components=None, additive=True):
+    def __init__(self, result, selector, components=None, additive=True):
         self.source_result = result
         self.selector = str(selector)
-        self.mode = str(mode)
         self.components = components
         self.additive = bool(additive)
 
     def __repr__(self):
         return (
             f"SelectedLineCollection(selector={self.selector!r}, "
-            f"mode={self.mode!r}, shape={self.source_result.shape})")
+            f"shape={self.source_result.shape})")
 
     @property
     def shape(self):
@@ -558,7 +578,7 @@ class SelectedLineCollection:
     def get_profile(self, index):
         model = self.source_result.get_model(index)
         return select_line(
-            model, selector=self.selector, mode=self.mode,
+            model, selector=self.selector,
             components=self.components, additive=self.additive)
 
     def __getitem__(self, index):
@@ -603,122 +623,112 @@ class SelectedLineCollection:
 # Selection resolution
 # ---------------------------------------------------------------------------
 
-def _normalize_explicit_components(model, selector, components, additive=True):
-    if not components:
-        raise ValueError(
-            "Explicit selection requires a non-empty components= sequence.")
-    available = get_components(model, additive=additive)
-    entries = []
-    seen = set()
+def select_line(model, selector, components=None, additive=True, index=None):
+    """
+    Select an emission or absorption line profile from a composite model.
 
-    for component in components:
-        if isinstance(component, (str, int)):
-            key = component
-        else:
-            name = getattr(component, 'name', None)
-            if not name:
-                raise ValueError(
-                    "Explicit component models must have a unique .name.")
-            key = name
-        resolved = available[key]
-        component_name = _component_name(resolved, key)
-        token = (str(key), component_name)
-        if token in seen:
-            continue
+    This function isolates the components of a model that represent a specific physical 
+    line (e.g., 'Hb4861'). It searches across the model's components and returns a 
+    ``SelectedLineProfile`` (or ``SelectedLineCollection`` for multi-fit models) that 
+    can be independently evaluated, measured, and sampled.
 
-        if isinstance(resolved, LineGroupBase):
-            try:
-                _, template_name = _linegroup_template_index(
-                    resolved, selector)
-            except KeyError as exc:
-                raise KeyError(
-                    f"Explicit component '{component_name}' is a line-group; "
-                    f"selector '{selector}' must match a template tag."
-                ) from exc
-            entries.append(_SelectionEntry(
-                component_key=key, component_name=component_name,
-                template_name=template_name))
-        else:
-            entries.append(_SelectionEntry(
-                component_key=key, component_name=component_name))
-        seen.add(token)
-    return entries
+    Parameters
+    ----------
+    model : astropy.modeling.Model or MultiFitResult
+        The composite model or multi-fit result containing the line components.
+    selector : str
+        The tag identifying the physics line to extract (e.g., 'OIII5007'). 
+        The search is case-insensitive.
+    components : sequence of str or astropy.modeling.Model, optional
+        If provided, the search is restricted to this explicit subset of components.
+        For `LineGroup` components in this subset, the function extracts the 
+        sub-profile matching `selector`. For single-line components in this subset, 
+        they are included unconditionally as part of the selected line.
+    additive : bool, default True
+        If True (the default), extract components from the additive block of the model,
+        ignoring multiplicative components like extinction. 
+        Ignored if `components` is explicitly passed.
+    index : tuple or int, optional
+        Used only if `model` is a `MultiFitResult`. If provided, it extracts the 
+        selected line from the specific 1D model at that spatial index. 
+        If None, a batch selection (`SelectedLineCollection`) is returned instead.
 
-
-def _resolve_physical_entries(model, selector, additive=True):
-    selector_token = _selector_token(selector)
-    components = get_components(model, additive=additive)
-    entries = []
-    for key, name in zip(components.indices, components.names):
-        component = components[key]
-        if not isinstance(component, LineGroupBase):
-            continue
-        for template_name in component._templates:
-            if _selector_token(template_name) == selector_token:
-                entries.append(_SelectionEntry(
-                    component_key=name, component_name=name,
-                    template_name=str(template_name)))
-                break
-    return entries
-
-
-def _resolve_component_entries(model, selector, additive=True):
-    selector_token = _selector_token(selector)
-    components = get_components(model, additive=additive)
-    entries = []
-    for key, name in zip(components.indices, components.names):
-        if _selector_token(name) != selector_token:
-            continue
-        entries.append(_SelectionEntry(
-            component_key=name, component_name=name))
-    return entries
-
-
-def select_line(model, selector, mode='auto', components=None,
-                additive=True, index=None):
-    """Select a line by tag or component name from a (compound) model."""
+    Returns
+    -------
+    SelectedLineProfile or SelectedLineCollection
+        An object representing the isolated line profile(s).
+    """
     if selector is None or str(selector).strip() == '':
-        raise ValueError("A line tag or name is required.")
+        raise ValueError("A line tag or name is required as 'selector'.")
 
     if _is_multifit_like(model):
         if index is not None:
             return select_line(
-                model.get_model(index), selector=selector, mode=mode,
+                model.get_model(index), selector=selector,
                 components=components, additive=additive)
         return SelectedLineCollection(
-            result=model, selector=selector, mode=mode,
+            result=model, selector=selector,
             components=components, additive=additive)
 
-    mode = str(mode).strip().lower()
-    if mode not in {'auto', 'physical', 'component', 'explicit'}:
-        raise ValueError(
-            "mode must be one of: 'auto', 'physical', 'component', 'explicit'.")
+    selector_token = _selector_token(selector)
+    entries = []
 
-    if mode == 'explicit':
-        entries = _normalize_explicit_components(
-            model, selector, components, additive=additive)
-    elif mode == 'physical':
-        entries = _resolve_physical_entries(
-            model, selector, additive=additive)
-    elif mode == 'component':
-        entries = _resolve_component_entries(
-            model, selector, additive=additive)
+    if components is not None:
+        if not components:
+            raise ValueError("Explicit selection requires a non-empty `components` sequence.")
+        # Only search within the specified subset
+        available = get_components(model, additive=False)  # Pull from all since they asked explicitly
+        seen = set()
+        
+        for comp_obj in components:
+            key = comp_obj if isinstance(comp_obj, (str, int)) else getattr(comp_obj, 'name', None)
+            if key is None:
+                raise ValueError("Explicit component models must have a unique '.name'.")
+            
+            resolved = available[key]
+            comp_name = _component_name(resolved, key)
+            if (str(key), comp_name) in seen:
+                continue
+                
+            if isinstance(resolved, LineGroupBase):
+                try:
+                    _, template_name = _linegroup_template_index(resolved, selector)
+                    entries.append(_SelectionEntry(
+                        component_key=key, component_name=comp_name,
+                        template_name=template_name))
+                except KeyError:
+                    # LineGroup does not have the selector; skip.
+                    pass
+            else:
+                # Single line: include unconditionally since they passed it in `components`
+                entries.append(_SelectionEntry(
+                    component_key=key, component_name=comp_name))
+            seen.add((str(key), comp_name))
+            
+        if not entries:
+            raise KeyError(f"No line selection found for '{selector}' in the specified components.")
+            
     else:
-        physical = _resolve_physical_entries(
-            model, selector, additive=additive)
-        component = _resolve_component_entries(
-            model, selector, additive=additive)
-        if physical and component:
-            raise ValueError(
-                f"Selector '{selector}' matches both a physical line tag "
-                f"and a component name; pass mode='physical' or "
-                f"mode='component'.")
-        entries = physical or component
+        # Default behavior: search natively across LineGroups (and matching component names as fallback)
+        available = get_components(model, additive=additive)
+        for key, name in zip(available.indices, available.names):
+            comp = available[key]
+            if isinstance(comp, LineGroupBase):
+                for tmpl_name in comp._templates:
+                    if _selector_token(tmpl_name) == selector_token:
+                        entries.append(_SelectionEntry(
+                            component_key=key, component_name=name,
+                            template_name=str(tmpl_name)))
+                        break
+            else:
+                # Fallback for single components purely matching the name
+                if _selector_token(name) == selector_token:
+                    entries.append(_SelectionEntry(
+                        component_key=key, component_name=name))
 
-    if not entries:
-        raise KeyError(
-            f"No line selection found for '{selector}' in mode '{mode}'.")
+        if not entries:
+            raise KeyError(f"No line selection found for '{selector}'.")
 
     return SelectedLineProfile(
-        source_model=model, selector=str(selector), mode=mode,
+        source_model=model, selector=str(selector),
         entries=entries, additive=additive)

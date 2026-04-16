@@ -1,24 +1,21 @@
 """
-prism.modeling — spectral models, operators, fitters, and I/O.
+prism.modeling — spectral models, model-aware analysis, fitters, and I/O.
 
 Submodules
 ----------
 models
-    Astropy-compliant spectral models: emission/absorption lines
-    (Gaussian, Lorentzian, Voigt), power-law and Balmer continua,
-    empirical templates (B-spline, fixed interpolation table), and
-    pre-built AGN component factories.
+    Astropy-compliant spectral models and component factories.
+line_analysis
+    Post-fit line selection, measurement, and uncertainty sampling.
 operators
-    Linear operators applied to source models: ``LinearOperatorCompoundModel``
-    for matrix transforms and ``InstrumentResponse`` / ``SpectralResponse``
-    for LSF-based instrumental broadening.
+    Linear operators applied to source models.
 fitting
-    Fitter hierarchy built on Astropy's ``Fitter`` base.  Single-spectrum
-    and batched multi-spectrum fitting, outlier removal, covariance and
-    bootstrap uncertainty estimation.
+    Single-spectrum and multi-spectrum fitting tools.
 io
-    FITS I/O for fitted models and ``MultiFitResult`` output.
+    FITS I/O for fitted models and multi-fit results.
 """
+from . import line_analysis
+from .line_analysis import *
 from .operators.convolved import LinearOperator, MatrixLinearOperator, LinearOperatorCompoundModel
 from .operators.instrument import InstrumentResponse, SpectralResponse, ResponseOperator
 from .models.display import (

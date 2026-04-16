@@ -32,6 +32,9 @@ from .outremoval import *
 from .extension import patch_astropy_fitters
 patch_astropy_fitters()
 
+from ..io import install_model_io_methods
+install_model_io_methods()
+
 __all__ = [
     'tie', 'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter'
 ]

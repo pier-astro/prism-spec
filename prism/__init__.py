@@ -9,9 +9,7 @@ Subpackages
 data
     Spectral data containers: ``Spectrum``, ``Cube``, ``Image``.
 modeling
-    Spectral models (emission/absorption lines, continua, empirical
-    templates), linear operators (instrumental convolution), fitters,
-    and model I/O.
+    Spectral models, line-analysis helpers, operators, fitters, and model I/O.
 utils
     Low-level wavelength tools, resampling helpers, and plotting utilities.
 """

@@ -272,6 +272,25 @@ class Bootstrap:
                     RuntimeWarning,
                 )
 
+        # Post-run diagnostic: warn if all samples are identical (degenerate)
+        if n_success > 1:
+            vals = np.column_stack(
+                [samples[name] for name in param_names])
+            valid_mask = np.all(np.isfinite(vals), axis=1)
+            valid_vals = vals[valid_mask]
+            if valid_vals.shape[0] > 1:
+                spread = np.ptp(valid_vals, axis=0)
+                if np.all(spread == 0.0):
+                    warnings.warn(
+                        "All bootstrap parameter samples are identical. "
+                        "The fitter converged to the same solution for every "
+                        "noise realization. Uncertainties are unreliable. "
+                        "Possible causes: the fitter is stuck at a hard "
+                        "minimum, tolerance is too loose, or parameter "
+                        "bounds are too tight.",
+                        RuntimeWarning,
+                    )
+
         success_rate = n_success / self.n_samples
         if success_rate < 0.9:
             warnings.warn(

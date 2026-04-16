@@ -167,6 +167,18 @@ def _wrap_fitter_call(original_call):
         if not accepts_inplace:
             call_kwargs.pop('inplace', None)
 
+        # Reject parameters with equal bounds (lower == upper).
+        # scipy.optimize.least_squares requires strict inequality.
+        # Use param.fixed = True instead of setting equal bounds.
+        for pname in eval_model.param_names:
+            p = getattr(eval_model, pname)
+            lo, hi = p.bounds
+            if lo is not None and hi is not None and lo == hi:
+                raise ValueError(
+                    f"Parameter '{pname}' has equal lower and upper bounds "
+                    f"({lo}). Use `param.fixed = True` instead."
+                )
+
         if z is not None:
             result = original_call(self, eval_model, x, y, z=z, **call_kwargs)
         else:
@@ -240,6 +252,9 @@ def _wrap_fitter_call(original_call):
                     if not hasattr(param, 'std') or param.std is None or np.isscalar(param.std):
                         param.std = np.full(param.size, np.nan)
                     param.std[offset] = sigma
+
+            # Attach covariance matrix to the model for downstream propagation
+            result._param_cov = np.asarray(cov)
 
         # 5. Ensure direct fitted_model.save()/to_fits() methods are installed
         from ..io import install_model_io_methods

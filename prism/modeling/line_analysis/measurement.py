@@ -1,9 +1,4 @@
-"""
-prism.modeling.models.line_analysis.measurement — line measurement and sampling.
-
-Provides ``LineResult``, ``MultiLineMeasurements``, ``measure_line``,
-``sample_line_measurements``.
-"""
+"""Line measurement and sampling helpers for prism.modeling.line_analysis."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,9 +8,9 @@ import numpy as np
 import pandas as pd
 from astropy.modeling.fitting import model_to_fit_params
 
-from ..components import get_components
-from ..lines import Metric
-from ...fitting.uncertainty.resample import extract_limits
+from ..models.components import get_components
+from ..models.lines import Metric
+from ..fitting.uncertainty.resample import extract_limits
 
 from .selection import (
     _SelectionEntry, _SelectionParameter,
@@ -228,23 +223,23 @@ def _compute_ew_numerical(x_arr, y_line, y_continuum) -> float:
 # Selection resolution (inline to avoid circular import)
 # ---------------------------------------------------------------------------
 
-def _resolve_selection(model_or_selection, selector=None, mode='auto',
+def _resolve_selection(model_or_selection, selector=None,
                        components=None, additive=True, index=None):
     if isinstance(model_or_selection, (SelectedLineProfile, SelectedLineCollection)):
         return model_or_selection
     return select_line(
-        model_or_selection, selector=selector, mode=mode,
+        model_or_selection, selector=selector,
         components=components, additive=additive, index=index)
 
 # ---------------------------------------------------------------------------
 # measure_line
 # ---------------------------------------------------------------------------
 
-def measure_line(model_or_selection, selector=None, mode='auto',
+def measure_line(model_or_selection, selector=None,
                  components=None, additive=True, x=None, window=None,
                  num=4096, index=None) -> LineResult:
     selection = _resolve_selection(
-        model_or_selection, selector=selector, mode=mode,
+        model_or_selection, selector=selector,
         components=components, additive=additive, index=index)
 
     if isinstance(selection, SelectedLineCollection):
@@ -262,7 +257,7 @@ def measure_line(model_or_selection, selector=None, mode='auto',
             wave_max[si] = m.wave_max
             n_grid[si] = m.n_grid
         return MultiLineMeasurements(
-            selector=selection.selector, mode=selection.mode,
+            selector=selection.selector, mode='auto',
             shape=selection.shape,
             wave_min=wave_min, wave_max=wave_max, n_grid=n_grid, **arrays)
 
@@ -280,7 +275,7 @@ def measure_line(model_or_selection, selector=None, mode='auto',
     y_arr = np.asarray(selection.evaluate(x_arr), dtype=float)
     metrics = _compute_profile_metrics(x_arr, y_arr)
     return LineResult(
-        selector=selection.selector, mode=selection.mode,
+        selector=selection.selector, mode='auto',
         wave_min=float(x_arr[0]), wave_max=float(x_arr[-1]),
         n_grid=int(x_arr.size), metrics=metrics)
 
@@ -403,15 +398,19 @@ def _leaf_component_suffix_map(model):
 def _selection_parent_name_map(selection, specs):
     model = selection.source_model
     free_names = set(_fit_param_names(model))
-    suffix_map = _leaf_component_suffix_map(model)
+    leaves = get_components(model, additive=False)
+    single = len(leaves.names) == 1
     resolved = {}
 
     for spec in specs:
-        suffix = suffix_map.get(spec.component_key)
-        candidates = []
-        if suffix is None:
-            candidates.append(spec.param_name)
-        candidates.append(f"{spec.param_name}_{suffix}")
+        # For a compound model, astropy names free parameters as
+        # "<param>_<submodel_index>". spec.component_key IS the integer
+        # submodel index.  For a single-model (no suffix), try bare name.
+        if single:
+            candidates = [spec.param_name]
+        else:
+            candidates = [f"{spec.param_name}_{spec.component_key}",
+                          spec.param_name]
 
         for candidate in candidates:
             if candidate in free_names:
@@ -445,8 +444,6 @@ def _draw_selection_samples(selection, n_samples, method='auto',
         raise ValueError("distribution must be: 'auto', 'uniform', 'gaussian'.")
     if method == 'limits' and distribution == 'gaussian':
         raise ValueError("method='limits' + distribution='gaussian' not supported.")
-    if method == 'std' and distribution == 'uniform':
-        raise ValueError("method='std' + distribution='uniform' not supported.")
 
     rng = np.random.default_rng(random_state)
     cov = getattr(selection.source_model, '_param_cov', None)
@@ -494,10 +491,18 @@ def _draw_selection_samples(selection, n_samples, method='auto',
         has_limits = np.isfinite(lo) and np.isfinite(up) and up > lo
         has_std = np.isfinite(spec.std) and spec.std > 0.0
 
+        _sqrt3 = np.sqrt(3.0)
         drawn = False
         if (method in ('auto', 'limits') and has_limits
                 and distribution in ('auto', 'uniform')):
             draws[:, j] = rng.uniform(lo, up, size=int(n_samples))
+            drawn = True
+        if (not drawn and method in ('auto', 'std') and has_std
+                and distribution in ('auto', 'uniform')):
+            # Uniform(value ± √3·σ) → Var = σ², matching Gaussian variance
+            half = _sqrt3 * spec.std
+            draws[:, j] = rng.uniform(
+                spec.value - half, spec.value + half, size=int(n_samples))
             drawn = True
         if (not drawn and method in ('auto', 'std') and has_std
                 and distribution in ('auto', 'gaussian')):
@@ -518,14 +523,14 @@ def _draw_selection_samples(selection, n_samples, method='auto',
 # sample_line_measurements
 # ---------------------------------------------------------------------------
 
-def sample_line_measurements(model_or_selection, selector=None, mode='auto',
+def sample_line_measurements(model_or_selection, selector=None,
                              components=None, additive=True, x=None,
                              window=None, num=4096, n_samples=256,
                              confidence=68, method='auto', distribution='auto',
                              random_state=None, return_samples=False,
                              index=None) -> LineResult:
     selection = _resolve_selection(
-        model_or_selection, selector=selector, mode=mode,
+        model_or_selection, selector=selector,
         components=components, additive=additive, index=index)
 
     if isinstance(selection, SelectedLineCollection):
@@ -593,7 +598,7 @@ def sample_line_measurements(model_or_selection, selector=None, mode='auto',
             RuntimeWarning)
 
     result = LineResult(
-        selector=selection.selector, mode=selection.mode,
+        selector=selection.selector, mode='auto',
         wave_min=float(x_arr[0]), wave_max=float(x_arr[-1]),
         n_grid=int(x_arr.size), metrics=sampled_metrics)
     if return_samples:

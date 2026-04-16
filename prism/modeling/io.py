@@ -41,6 +41,7 @@ import astropy.units as u
 EXT_PARS       = 'PARS'
 EXT_MODEL      = 'MODEL_DEF'
 EXT_ERR_SUFFIX = '_ERR'
+EXT_COV        = 'PARAM_COV'
 
 _PARNAME_MAXLEN = 18  # FITS extension-name maximum usable length
 
@@ -193,6 +194,12 @@ def model_to_fits(model, filename: str, overwrite: bool = False,
     for ext_name, data in custom_exts.items():
         hdus.append(_image_hdu(ext_name.upper(), np.atleast_1d(np.asarray(data, dtype=np.float32))))
 
+    # Save covariance matrix if available
+    cov = getattr(model, '_param_cov', None)
+    if cov is not None:
+        cov_arr = np.asarray(cov, dtype=np.float64)
+        hdus.append(fits.ImageHDU(data=cov_arr, name=EXT_COV))
+
     if model_def:
         yaml_str = _serialize_model(model)
         if yaml_str is not None:
@@ -222,6 +229,18 @@ def install_model_io_methods():
 
     AstropyModel.to_fits = _to_fits
     AstropyModel.save = _to_fits
+
+    def _model_covariance_getter(self):
+        return getattr(self, '_param_cov', None)
+
+    def _model_covariance_setter(self, value):
+        if value is None:
+            if hasattr(self, '_param_cov'):
+                del self._param_cov
+        else:
+            self._param_cov = np.asarray(value)
+
+    AstropyModel.covariance = property(_model_covariance_getter, _model_covariance_setter)
     AstropyModel._prism_io_installed = True
 
 
@@ -441,4 +460,32 @@ def load_model(filename: str):
                 "Was the file saved with model=True (default)?"
             )
         yaml_str = str(hdul[EXT_MODEL].data['YAML'][0])
-        return astropy_yaml.load(yaml_str)
+        model = astropy_yaml.load(yaml_str)
+
+        # Restore covariance matrix if saved
+        if EXT_COV in [h.name.upper() for h in hdul]:
+            model._param_cov = np.asarray(hdul[EXT_COV].data, dtype=np.float64)
+
+        # Restore .std from PARS table if available
+        if EXT_PARS in [h.name.upper() for h in hdul]:
+            data = hdul[EXT_PARS].data
+            if 'STD' in data.columns.names:
+                for row in data:
+                    pname = str(row['NAME']).strip()
+                    std_val = float(row['STD'])
+                    if np.isfinite(std_val) and hasattr(model, pname):
+                        getattr(model, pname).std = std_val
+            if 'LOLIM' in data.columns.names:
+                for row in data:
+                    pname = str(row['NAME']).strip()
+                    val = float(row['LOLIM'])
+                    if np.isfinite(val) and hasattr(model, pname):
+                        getattr(model, pname).lolim = val
+            if 'UPLIM' in data.columns.names:
+                for row in data:
+                    pname = str(row['NAME']).strip()
+                    val = float(row['UPLIM'])
+                    if np.isfinite(val) and hasattr(model, pname):
+                        getattr(model, pname).uplim = val
+
+        return model
