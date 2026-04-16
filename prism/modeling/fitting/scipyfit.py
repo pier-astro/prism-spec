@@ -200,12 +200,13 @@ class ScipyFitter(Fitter):
 
 class ScipyTRF(ScipyFitter):
     """SciPy trust-region reflective fitter."""
-    def __init__(self, **kwargs):
+    def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='2-point', **kwargs):
         super().__init__(method='trf',
-        ftol=1e-9,     # Force stricter gradient/cost progression
-        xtol=1e-9,
-        gtol=1e-9,
-        loss='linear',  # options: 'linear', 'huber', 'soft_l1', 'cauchy', 'arctan'
+        ftol=ftol,     # Force stricter gradient/cost progression
+        xtol=xtol,
+        gtol=gtol,
+        loss=loss,  # options: 'linear', 'huber', 'soft_l1', 'cauchy', 'arctan'
+        jac=jac,  # Use numeric Jacobian by default for robustness; overridden if model provides fit_deriv
         **kwargs)
 
 
