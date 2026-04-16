@@ -16,19 +16,15 @@ Instead it would be amazing is when importing prims we extend the astropy class 
 
 - (DONE !!) EQUIVALENT WIDTH handling! Either at line level as .flux and at line_analysis level for the blended line.
 
-- IMPROVE THE BOOTSTRAP. Too small errors.
-
-
+- Add units handling in the line models and in the line analysis. This should be done in a way that is consistent with the rest of the package and with the astropy models. We should verify how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now. This will make things more consistent and easier to handle and astropy "standard".
+Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
+ADD UNIT AS COLUMN TO DISPLAY in the display module. Remeber the display module is meant to work also with native astropy models and not only with enhanced astropy models as in prism.
 
 
 
 
 - (likely not needed) Add error to link when tied parameter is not in the model. Verify how feasible is to add the .link attribute to the Astropy model calss (as we are doing with .save) to easily apply the tie function
 
-
-- Add units handling in the line models and in the line analysis. This should be done in a way that is consistent with the rest of the package and with the astropy models. We should verify how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now. This will make things more consistent and easier to handle and astropy "standard".
-Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
-ADD UNIT AS COLUMN TO DISPLAY in the display module. Remeber the display module is meant to work also with native astropy models and not only with enhanced astropy models as in prism.
 
 
 
