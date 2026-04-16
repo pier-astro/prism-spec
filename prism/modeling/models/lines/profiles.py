@@ -34,10 +34,12 @@ def gaussian_deriv(x, amplitude, center, sigma):
     """
     if sigma == 0:
         val = np.where(x == center, amplitude, 0.0)
-        return val, val / amplitude, np.zeros_like(x), np.zeros_like(x)
+        d_amp = np.where(x == center, 1.0, 0.0)
+        return val, d_amp, np.zeros_like(x), np.zeros_like(x)
     z = (x - center) / sigma
-    val = amplitude * np.exp(-0.5 * z ** 2)
-    d_amp = val / amplitude
+    shape = np.exp(-0.5 * z ** 2)
+    val = amplitude * shape
+    d_amp = shape
     d_center = val * z / sigma
     d_sigma = val * (z ** 2) / sigma
     return val, d_amp, d_center, d_sigma
@@ -57,10 +59,12 @@ def lorentzian_deriv(x, amplitude, center, gamma):
     """
     if gamma == 0:
         val = np.where(x == center, amplitude, 0.0)
-        return val, val / amplitude, np.zeros_like(x), np.zeros_like(x)
+        d_amp = np.where(x == center, 1.0, 0.0)
+        return val, d_amp, np.zeros_like(x), np.zeros_like(x)
     denom = (x - center) ** 2 + gamma ** 2
-    val = amplitude * (gamma ** 2) / denom
-    d_amp = val / amplitude
+    shape = (gamma ** 2) / denom
+    val = amplitude * shape
+    d_amp = shape
     d_center = 2 * val * (x - center) / denom
     d_gamma = 2 * amplitude * gamma / denom - 2 * val * gamma / denom
     return val, d_amp, d_center, d_gamma

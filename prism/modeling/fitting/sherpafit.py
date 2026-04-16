@@ -20,13 +20,14 @@ __all__ = ['SherpaFitter', 'SherpaLM', 'SherpaSimplex', 'SherpaMonCar', 'HAS_SHE
 class SherpaFitter(Fitter):
     """Wrapper around Sherpa optimizers with Sherpa statistics."""
     
-    def __init__(self, method='levmar', calc_uncertainties=False, verbose=False):
+    def __init__(self, method='levmar', calc_uncertainties=False, verbose=False, **kwargs):
         if not HAS_SHERPA:
             raise ImportError("Sherpa is not installed. Install with: pip install sherpa")
         
         self.method = method.lower()
         self.calc_uncertainties = calc_uncertainties
         self.verbose = verbose
+        self.fit_kwargs = kwargs
         
         if self.method == 'levmar':
             self.opt = sherpa.optmethods.LevMar()
@@ -94,23 +95,45 @@ class SherpaFitter(Fitter):
             stat = np.sum(weighted_resid**2)
             return stat, weighted_resid
         
-        sherpa_kwargs = {k: v for k, v in kwargs.items() if k not in ['maxfev', 'max_nfev']}
+        # Merge call-time kwargs with init-time fit_kwargs
+        combined_kwargs = self.fit_kwargs.copy()
+        combined_kwargs.update(kwargs)
+        
+        sherpa_kwargs = {k: v for k, v in combined_kwargs.items() 
+                         if k not in ['maxfev', 'max_nfev', 'inplace']}
         sherpa_result = self.opt.fit(statfunc, np.array(init_values), min_vals, max_vals, **sherpa_kwargs)
         
         success = sherpa_result[0]
         fitted_params = sherpa_result[1]
+        stat_val = sherpa_result[2] if len(sherpa_result) > 2 else np.nan
         message = sherpa_result[3] if len(sherpa_result) > 3 else ''
         
         sherpa_info = sherpa_result[4] if len(sherpa_result) > 4 and isinstance(sherpa_result[4], dict) else {}
         nfev = sherpa_info.get('nfev', None)
         native_cov = sherpa_info.get('covar')
         
+        n_data = len(y)
+        n_free = len(init_values)
+        stat_name = 'chi2' if yerr is not None else 'leastsq'
+        
         self.fit_info = {
             'success': success,
             'nfev': nfev,
             'message': message,
-            'param_cov': native_cov
+            'param_cov': native_cov,
+            'stat': stat_val,
+            'cost': stat_val,
+            'statmethod': stat_name,
+            'nfree': n_free,
+            'ndata': n_data,
+            'dof': n_data - n_free,
         }
+        # Merge Sherpa optimizer info directly into fit_info
+        for k, v in sherpa_info.items():
+            if k in self.fit_info:
+                self.fit_info[k + '_sherpa'] = v
+            else:
+                self.fit_info[k] = v
         
         params_cache[fit_indices] = fitted_params
         model.parameters = params_cache

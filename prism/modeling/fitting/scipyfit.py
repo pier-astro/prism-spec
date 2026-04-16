@@ -24,10 +24,11 @@ class ScipyFitter(Fitter):
     when ``calc_uncertainties=True``.
     """
     
-    def __init__(self, method='trf', calc_uncertainties=False, verbose=False):
+    def __init__(self, method='trf', calc_uncertainties=False, verbose=False, **kwargs):
         self.method = method
         self.calc_uncertainties = calc_uncertainties
         self.verbose = verbose
+        self.fit_kwargs = kwargs
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
 
@@ -77,10 +78,12 @@ class ScipyFitter(Fitter):
                 print(f"Note: Using numeric Jacobian due to: {type(e).__name__}")
             return '2-point'
 
-    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, yerr=None, **kwargs):
         """
         Implement SciPy least_squares fitting.
         """
+        if yerr is not None and weights is None:
+            weights = 1.0 / np.asarray(yerr)
         model = model.copy()
         init_values, fit_indices, _ = model_to_fit_params(model)
         bounds_list = [getattr(model, n).bounds for n in model.param_names]
@@ -113,13 +116,21 @@ class ScipyFitter(Fitter):
         max_vals = param_bounds[:, 1]
         bounds = (min_vals, max_vals)
         
-        # Prepare kwargs
-        fit_kwargs = {
+        # Prepare final kwargs, merging init and call values
+        # Call kwargs take precedence over init kwargs
+        merged_kwargs = self.fit_kwargs.copy()
+        merged_kwargs.update(kwargs)
+        
+        # Filter out prism-specific or problematic kwargs that scipy shouldn't see
+        fit_kwargs = {k: v for k, v in merged_kwargs.items() 
+                      if k not in ['inplace', 'max_nfev', 'yerr']}
+        
+        fit_kwargs.update({
             'method': self.method,
             'bounds': bounds,
             'jac': jac,
-            **kwargs
-        }
+        })
+        
         if max_nfev is not None:
             fit_kwargs['max_nfev'] = max_nfev
         
@@ -164,12 +175,21 @@ class ScipyFitter(Fitter):
                 if self.verbose:
                     print(f"⚠ Failed to calculate covariance: {e}")
         
+        n_data = len(y) if z is None else int(np.prod(np.shape(y)))
         self.fit_info = {
             'success': result.success,
             'nfev': result.nfev,
             'message': getattr(result, 'message', ''),
             'native_result': result,
-            'param_cov': native_cov
+            'param_cov': native_cov,
+            'cost': result.cost,
+            'stat': 2.0 * result.cost,
+            'statmethod': 'chi2' if weights is not None else 'leastsq',  # overridden by extension if statistic is set
+            'nfree': len(init_values),
+            'ndata': n_data,
+            'dof': n_data - len(init_values),
+            'optimality': getattr(result, 'optimality', np.nan),
+            'status': result.status,
         }
         params_cache[fit_indices] = result.x
         model.parameters = params_cache
@@ -181,7 +201,12 @@ class ScipyFitter(Fitter):
 class ScipyTRF(ScipyFitter):
     """SciPy trust-region reflective fitter."""
     def __init__(self, **kwargs):
-        super().__init__(method='trf', **kwargs)
+        super().__init__(method='trf',
+        ftol=1e-9,     # Force stricter gradient/cost progression
+        xtol=1e-9,
+        gtol=1e-9,
+        loss='linear',  # options: 'linear', 'huber', 'soft_l1', 'cauchy', 'arctan'
+        **kwargs)
 
 
 class ScipyDogBox(ScipyFitter):

@@ -173,9 +173,42 @@ def _wrap_fitter_call(original_call):
             result = original_call(self, eval_model, x, y, **call_kwargs)
 
         if inplace and result is not model:
-            # Sync parameter values to original object if working in-place
             model.parameters = result.parameters
             result = model
+
+        # Enrich fit_info with standard diagnostic fields
+        if hasattr(self, 'fit_info'):
+            fi = self.fit_info
+            from astropy.modeling.fitting import model_to_fit_params
+            _, fit_indices_info, _ = model_to_fit_params(result)
+            n_free = len(fit_indices_info)
+            n_data = int(np.prod(np.shape(y))) if z is None else int(np.prod(np.shape(z)))
+
+            if isinstance(fi, dict):
+                fi.setdefault('nfree', n_free)
+                fi.setdefault('ndata', n_data)
+                fi.setdefault('dof', n_data - n_free)
+                fi.setdefault('statmethod', statistic if (weights is not None or yerr is not None) else 'leastsq')
+                # stat = full chi2 or sum(residuals^2). scipy cost = 0.5 * sum(r^2).
+                if 'stat' not in fi:
+                    scipy_cost = fi.get('cost', np.nan)
+                    if np.isfinite(scipy_cost) and 'native_result' not in fi:
+                        # Astropy OptimizeResult: cost = 0.5 * sum(r^2)
+                        fi['stat'] = 2.0 * scipy_cost
+                    elif np.isfinite(scipy_cost):
+                        fi['stat'] = fi.get('stat', scipy_cost)
+            else:
+                if not hasattr(fi, 'nfree'):
+                    fi['nfree'] = n_free
+                if not hasattr(fi, 'ndata'):
+                    fi['ndata'] = n_data
+                if not hasattr(fi, 'dof'):
+                    fi['dof'] = n_data - n_free
+                if not hasattr(fi, 'statmethod'):
+                    fi['statmethod'] = statistic if (weights is not None or yerr is not None) else 'leastsq'
+                if not hasattr(fi, 'stat'):
+                    cost_val = getattr(fi, 'cost', np.nan)
+                    fi['stat'] = 2.0 * cost_val if np.isfinite(cost_val) else np.nan
 
         if verbose:
             msg = getattr(self, 'fit_info', {}).get('message', '')

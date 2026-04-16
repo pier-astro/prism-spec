@@ -92,7 +92,9 @@ class LMFitter(Fitter):
                 jacobian[i, i] = -np.exp(internal_val)
         return jacobian @ cov_internal @ jacobian.T
 
-    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, yerr=None, **kwargs):
+        if yerr is not None and weights is None:
+            weights = 1.0 / np.asarray(yerr)
         if 'uncertainties' in kwargs:
             raise TypeError("The 'uncertainties' parameter is no longer supported.")
 
@@ -113,7 +115,12 @@ class LMFitter(Fitter):
         if n_free == 0:
             if self.verbose:
                 print("No free parameters to fit.")
-            self.fit_info = {'success': True, 'nfev': 0, 'message': 'No free parameters', 'param_cov': None}
+            self.fit_info = {
+                'success': True, 'nfev': 0, 'message': 'No free parameters',
+                'param_cov': None,
+                'stat': np.nan, 'cost': np.nan, 'statmethod': 'leastsq',
+                'nfree': 0, 'ndata': len(y), 'dof': len(y),
+            }
             return model
         
         def residuals(internal_params):
@@ -129,7 +136,12 @@ class LMFitter(Fitter):
         
         x0_internal = self._transform_params(init_values, param_bounds)
         
-        leastsq_kws = {**self.leastsq_kwargs, **kwargs}
+        # Merge call-time kwargs with init-time leastsq_kwargs
+        combined_kwargs = self.leastsq_kwargs.copy()
+        combined_kwargs.update(kwargs)
+        
+        leastsq_kws = {k: v for k, v in combined_kwargs.items() 
+                       if k not in ['inplace', 'max_nfev', 'yerr']}
         if max_nfev is not None:
             leastsq_kws['maxfev'] = max_nfev
         
@@ -162,11 +174,13 @@ class LMFitter(Fitter):
         success = ier in [1, 2, 3, 4]
         xopt_external = self._untransform_params(xopt_internal)
         
+        # Compute cost/chi2 for fit_info
+        resid_final = residuals(xopt_internal)
+        chi2 = np.sum(resid_final**2)
+        
         native_cov = None
         if cov_internal is not None and success:
             try:
-                resid_final = residuals(xopt_internal)
-                chi2 = np.sum(resid_final**2)
                 dof = max(1, len(resid_final) - n_free)
                 red_chi2 = chi2 / dof
                 cov_scaled = cov_internal * red_chi2
@@ -178,11 +192,20 @@ class LMFitter(Fitter):
             except Exception:
                 native_cov = None
         
+        n_data = len(y)
+        cost_val = chi2 / 2.0 if success else np.nan
+        
         self.fit_info = {
             'success': success,
             'nfev': infodict['nfev'],
             'message': mesg,
-            'param_cov': native_cov
+            'param_cov': native_cov,
+            'stat': chi2 if success else np.nan,
+            'cost': cost_val,
+            'statmethod': 'chi2' if weights is not None else 'leastsq',
+            'nfree': n_free,
+            'ndata': n_data,
+            'dof': n_data - n_free,
         }
         
         params_cache[fit_indices] = xopt_external
