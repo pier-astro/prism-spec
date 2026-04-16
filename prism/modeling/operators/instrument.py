@@ -1,52 +1,49 @@
 """
-Instrumental Response Module
+Instrumental response (line-spread-function) convolution.
 
-Provides classes for building, loading, and applying spectral instrumental response 
-matrices (Line Spread Functions) to Astropy models.
+Build, load, and apply spectral response matrices to Astropy models
+via ``SpectralResponse`` — a callable that wraps a source model in a
+``LinearOperatorCompoundModel``.
 
-Classes:
---------
-- InstrumentResponse: Build/load/save response matrices
-- SpectralResponse: Build linear-operator model nodes from response matrices
+The observed spectrum is modelled as ``h(x) = R @ f(x, θ)`` where *R*
+is the instrument response matrix and *f* is the intrinsic source.
+The ``LinearOperatorCompoundModel`` preserves analytic Jacobians via
+the chain rule ``J_h = R @ J_f``.
 
-The key concept is that instruments observe spectra convolved with their LSF. 
-This module allows proper modeling of observed spectra by applying the instrumental
-response to intrinsic source models.
+Classes
+-------
+InstrumentResponse
+    Build / load / save / crop response matrices.
+SpectralResponse
+    Callable wrapper: ``rsp(source_model)`` → ``LinearOperatorCompoundModel``.
+ResponseOperator
+    Thin ``Fittable1DModel`` adaptor for the Astropy ``|`` pipe operator
+    (used internally; does **not** propagate analytic derivatives).
 
-Astropy's pipe operator `|` does not propagate analytic derivatives (fit_deriv),
-forcing numeric jacobian estimation which is slow for many parameters.
-The linear-operator node solves this by applying the chain rule:
+Wavelength conventions
+~~~~~~~~~~~~~~~~~~~~~~
+When sources are redshifted, the data is typically z-corrected to rest
+frame.  The instrument LSF is defined in observer frame.
+``SpectralResponse`` handles the mapping via the *z* parameter:
+``λ_obs = λ_rest × (1 + z)``.
 
-    For h(x) = R @ f(x, θ), the Jacobian is: J_h = R @ J_f
+Instrument storage
+~~~~~~~~~~~~~~~~~~
+* Package defaults are in ``responses/`` (shipped with prism-spec).
+* Custom instruments go to ``~/.prism/instruments/``.
+* User instruments with the same name override package defaults.
 
-This preserves analytic derivatives since R is a fixed matrix.
+To register a new instrument for recipe-based serialization::
 
-When working with redshifted sources:
-- Data is typically z-corrected to rest frame for modeling convenience
-- The LSF matrix is defined in observer frame by the instrument
-- SpectralResponse handles the wavelength mapping via the `z` parameter:
-  it crops the instrument matrix at λ_obs = λ_rest * (1+z)
+    resp = InstrumentResponse.from_fixed_fwhm(wave_obs, fwhm=2.5)
+    resp.save('MY_INSTRUMENT')
 
-Instrument Storage:
-- Default instruments are stored in the package directory (responses/)
-- Custom instruments are stored in ~/.prism/instruments/
-- User instruments override package defaults with the same name
-
-Example:
---------
->>> from prism.modeling.operators.instrument import SpectralResponse, InstrumentResponse
->>> from astropy.modeling.models import Gaussian1D
->>> 
->>> # Build response from instrument archive
+Example
+-------
 >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
->>> convolved_model = rsp(my_model)
->>> 
->>> # Or pass an InstrumentResponse instance directly
->>> response = InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.5)
->>> rsp = SpectralResponse(instrument=response, wave=wave)
->>> 
->>> # Or build custom response with direct matrix
->>> rsp = SpectralResponse(response_matrix=response.response_matrix, wave=wave)
+>>> convolved = rsp(source_model)       # LinearOperatorCompoundModel
+>>> convolved.source_model              # unwrapped source
+>>> convolved(wave_rest)                # evaluates R @ f(wave_rest, θ)
 """
 import numpy as np
 import os
@@ -589,41 +586,44 @@ class ResponseOperator(Fittable1DModel):
 class SpectralResponse:
     """
     Callable wrapper for applying instrumental response to Astropy models.
-    
-    Construction modes:
-    1. From instrument name: SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
-    2. From InstrumentResponse: SpectralResponse(instrument=response_obj, wave=wave, z=0.1)
-    3. From direct matrix: SpectralResponse(response_matrix=matrix, wave=wave)
-    
+
+    Call an instance with a source model to produce a
+    ``LinearOperatorCompoundModel`` node that convolves the source with the
+    instrumental LSF while preserving analytic Jacobians.
+
     Parameters
     ----------
     instrument : str or InstrumentResponse, optional
-        Instrument name from the archive (e.g., 'MUSE-WFM') or an InstrumentResponse instance
+        Name of an archived instrument (e.g. ``'MUSE-WFM'``) **or** an
+        ``InstrumentResponse`` instance built manually.
     wave : array-like
-        Wavelength grid (rest frame if z>0, observer frame if z=0)
-    z : float, default=0
-        Redshift. When z>0, the instrument matrix is cropped at λ_obs = wave*(1+z)
+        Rest-frame wavelength grid.  If *z* > 0 the matrix is cropped at
+        λ_obs = wave * (1 + z).
+    z : float, default 0
+        Redshift used to map rest→observer wavelengths.
     response_matrix : sparse matrix, optional
-        Direct matrix input (bypasses instrument loading)
-    renormalize : bool, default=True
-        Renormalize rows after cropping
-    flexible : bool, default=True
-        Allow evaluation on arbitrary wavelength grids
-        
-    Usage
-    -----
-    >>> # From instrument name
-    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
-    >>> 
-    >>> # From InstrumentResponse instance
-    >>> response = InstrumentResponse.from_fixed_resolution(wave_obs, R=2000)
-    >>> rsp = SpectralResponse(instrument=response, wave=wave_rest, z=0.1)
-    >>> 
-    >>> # From direct matrix (no cropping, assumes matrix already matches wave)
-    >>> rsp = SpectralResponse(response_matrix=matrix, wave=wave)
-    >>> 
-    >>> convolved_model = rsp(source_model)
-    >>> flux = convolved_model(wave_rest)
+        Supply a pre-built matrix directly (no archive lookup, no cropping).
+    renormalize : bool, default True
+        Renormalize rows to unity after cropping.
+    name : str, default ``'rsp'``
+        Default name given to the ``LinearOperatorCompoundModel`` node
+        produced by ``__call__``.  Can be overridden per call.
+
+    Examples
+    --------
+    >>> # From archive (serializable — full round-trip supported)
+    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1)
+    >>> model = rsp(source)               # node named 'rsp'
+    >>> model = rsp(source, name='muse')  # override name per call
+
+    >>> # Custom name at construction
+    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1, name='muse')
+    >>> model = rsp(source)               # node named 'muse'
+
+    >>> # From InstrumentResponse instance (not serializable from recipe)
+    >>> ir = InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.5)
+    >>> rsp = SpectralResponse(instrument=ir, wave=wave)
+    >>> model = rsp(source)
     """
     
     def __init__(
@@ -633,8 +633,10 @@ class SpectralResponse:
         z: float = 0,
         response_matrix=None,
         renormalize: bool = True,
-        flexible: bool = True
+        flexible: bool = True,
+        name: str = 'rsp',
     ):
+        self.name = name
         self.z = z
         self.flexible = flexible
         self.interpolator = None
@@ -688,33 +690,45 @@ class SpectralResponse:
 
     def __call__(self, source_model, name=None):
         """
-        Wrap a source model with instrumental convolution.
-        
+        Wrap *source_model* with instrumental convolution.
+
         Parameters
         ----------
         source_model : Model
-            Any Astropy model (simple or compound)
+            Any Astropy 1-D model (simple or compound).
         name : str, optional
-            Name for the response model node (default: 'rsp')
-            
+            Name for the resulting node.  Defaults to ``self.name``
+            (set at construction, default ``'rsp'``).
+
         Returns
         -------
-        Model
-            The convolved model node.
-            
-        Notes
-        -----
-        The returned node preserves analytic derivatives via
-        J = M @ J_source.
+        LinearOperatorCompoundModel
         """
-        operator = MatrixLinearOperator(self.response_matrix, wave=self.wavelength_grid)
-        return LinearOperatorCompoundModel(source_model, operator, name=name or 'rsp')
+        recipe = self._build_recipe()
+        operator = MatrixLinearOperator(self.response_matrix, wave=self.wavelength_grid,
+                                       recipe=recipe)
+        return LinearOperatorCompoundModel(source_model, operator, name=name or self.name)
+
+    def _build_recipe(self):
+        """Build a reconstruction recipe for serialization.
+
+        The recipe stores enough metadata to reconstruct the operator
+        from the instrument archive without saving the full matrix.
+        """
+        if self._mode == 'instrument' and self._instrument_name:
+            return {
+                'type': 'instrument',
+                'instrument': self._instrument_name,
+                'z': float(self.z),
+            }
+        return {'type': 'direct'}
 
     def __repr__(self) -> str:
         shape = self.wavelength_grid.shape if self.wavelength_grid is not None else None
         z_str = f", z={self.z}" if self.z != 0 else ""
         inst_str = f", instrument='{self._instrument_name}'" if self._instrument_name else ""
-        return f"<SpectralResponse(wave={shape}{z_str}{inst_str})>"
+        name_str = f", name='{self.name}'" if self.name != 'rsp' else ""
+        return f"<SpectralResponse(wave={shape}{z_str}{inst_str}{name_str})>"
 
 
 # Public exports

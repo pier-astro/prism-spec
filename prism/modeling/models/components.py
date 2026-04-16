@@ -1,85 +1,51 @@
-"""Component decomposition utilities for Astropy compound models."""
+"""
+Component decomposition for compound models.
+
+Decomposes ``CompoundModel`` trees into named, indexable parts via
+``get_components``, returning a ``ModelComponents`` container.
+
+For ``LinearOperatorCompoundModel`` (convolved models, ``h = M @ f``):
+
+* ``additive=True, deconvolve=False`` — each additive term is wrapped
+  with the operator for direct observed-frame evaluation.
+* ``additive=True, deconvolve=True`` — additive terms are returned
+  *without* the operator, giving intrinsic (source-frame) components.
+* ``additive=False`` — all leaves of the source model plus an
+  ``Identity`` marker for the operator.
+"""
 
 import numpy as np
 from astropy.modeling import CompoundModel
-from astropy.modeling.models import Const1D
+from astropy.modeling.models import Const1D, Identity
 
 from ..operators.convolved import LinearOperatorCompoundModel
 
 
 def _get_source_model(model):
-    """
-    Unwrap LinearOperatorCompoundModel to get the source model.
-
-    If model is a linear-operator node, return its left/source model.
-    Otherwise return the model unchanged.
-    """
+    """Return the source model, unwrapping ``LinearOperatorCompoundModel``."""
     if isinstance(model, LinearOperatorCompoundModel):
         return model.left
     return model
 
 
 def _get_operator_info(model):
-    """
-    Extract linear operator info if model is a linear-operator node.
-    
-    Parameters
-    ----------
-    model : Model
-        Input model.
-        
-    Returns
-    -------
-    LinearOperatorCompoundModel or None
-    """
+    """Return the ``LinearOperatorCompoundModel`` node, or ``None``."""
     if isinstance(model, LinearOperatorCompoundModel):
         return model
     return None
 
 
 def _wrap_component(component, op_info):
-    """
-    Wrap a component with the same linear operator if original was convolved.
-    
-    Parameters
-    ----------
-    component : Model
-        Extracted component model
-    op_info : LinearOperatorCompoundModel or None
-        Operator node template or None.
-        
-    Returns
-    -------
-    Model
-        Component wrapped in LinearOperatorCompoundModel (if op_info),
-        else unchanged.
-    """
+    """Wrap *component* in the same linear operator if *op_info* is set."""
     if op_info is None:
         return component
-
     return op_info.with_left(component)
 
 
 def _make_unique_name(name, existing_names):
-    """
-    Generate unique name by appending suffix if needed.
-    
-    Parameters
-    ----------
-    name : str
-        Proposed name.
-    existing_names : set
-        Set of already used names.
-        
-    Returns
-    -------
-    str
-        Unique name (original or with _N suffix).
-    """
+    """Return *name* with a ``_N`` suffix appended when necessary."""
     if name not in existing_names:
         return name
-    
-    # Name collision: find unique suffix
     i = 0
     while f"{name}_{i}" in existing_names:
         i += 1
@@ -88,152 +54,164 @@ def _make_unique_name(name, existing_names):
 
 class ModelComponents(dict):
     """
-    Dictionary-like container for compound model components with dual-key access.
-    
-    Supports access by both integer index and component name:
-    - comps[0], comps[1], comps[2], ... (by index)
-    - comps['continuum'], comps['blr'], comps['nlr'], ... (by name)
-    
+    Dictionary-like container for compound model components.
+
+    Supports access by integer index and by component name::
+
+        comps[0]            # by index
+        comps['blr']        # by name
+        comps.names         # list of names
+        comps.response      # LinearOperatorCompoundModel or None
+
     Parameters
     ----------
     model : astropy.modeling.Model
         Single or compound model to decompose.
     additive : bool, optional
-        If True, only additive components are included (multiplicative terms expanded).
-        If False (default), all leaf components are included.
-        
-    Attributes
-    ----------
-    additive : bool
-        Whether only additive components are included.
-    indices : list of int
-        List of integer indices for all components.
-    names : list of str
-        List of component names (same order as indices).
-        
+        If ``True``, return additive components (multiplicative terms
+        are distributed).  If ``False`` (default), return all leaves.
+    deconvolve : bool, optional
+        Only meaningful when ``additive=True`` and the model is
+        convolved.  If ``True``, strip the operator and return
+        intrinsic source components.  Default ``False``.
+
     Notes
     -----
-    If the input model is a LinearOperatorCompoundModel (e.g., rsp(A + B*C)),
-    each extracted component is also wrapped with the same operator:
-    rsp(A), rsp(B*C).
-        
+    For ``LinearOperatorCompoundModel`` (e.g. ``rsp(A + B)``):
+
+    * ``additive=True, deconvolve=False`` →
+      ``rsp(A), rsp(B)``  (operator-wrapped, for observed evaluation).
+    * ``additive=True, deconvolve=True``  →
+      ``A, B``  (source-only, for intrinsic measurements).
+    * ``additive=False`` →
+      ``A, B, rsp``  (all leaves + Identity marker).
+
     Examples
     --------
-    >>> from astropy.modeling import models
-    >>> m1 = models.Gaussian1D(1, 5000, 10, name='line1')
-    >>> m2 = models.Gaussian1D(2, 5100, 15, name='line2')
-    >>> compound = m1 + m2
-    >>> 
-    >>> comps = ModelComponents(compound)
-    >>> comps[0]  # Access by index
-    >>> comps['line1']  # Access by name
-    >>> comps.names  # ['line1', 'line2']
+    >>> comps = ModelComponents(model, additive=True)
+    >>> for name in comps.names:
+    ...     plt.plot(wave, comps[name](wave), label=name)
+
+    >>> comps = ModelComponents(model, additive=True, deconvolve=True)
+    >>> comps['blr']   # intrinsic blr, no operator
     """
-    
-    def __init__(self, model, additive=False):
+
+    def __init__(self, model, additive=False, deconvolve=False):
         super().__init__()
-        # Store operator node before unwrapping
         self._op_info = _get_operator_info(model)
-        # Unwrap linear-operator node if present
         self._model = _get_source_model(model)
         self._additive_only = additive
+        self._deconvolve = bool(deconvolve)
         self._indices = []
         self._names = []
         self._components = []
-        
-        # Build the components
+
         if additive:
             self._build_additive()
         else:
             self._build_all()
-    
+
     @property
     def additive(self):
         """Whether only additive components are included."""
         return self._additive_only
-    
+
+    @property
+    def deconvolved(self):
+        """Whether additive components are returned without the operator."""
+        return self._deconvolve
+
+    @property
+    def response(self):
+        """The ``LinearOperatorCompoundModel`` wrapping the source, or ``None``."""
+        return self._op_info
+
     @property
     def indices(self):
         """List of integer indices."""
         return self._indices.copy()
-    
-    @property  
+
+    @property
     def names(self):
         """List of component names."""
         return self._names.copy()
-    
+
     def to_list(self):
-        """
-        Return components as a simple list.
-        
-        Returns
-        -------
-        list
-            List of model components in order.
-        """
+        """Return components as a plain list."""
         return self._components.copy()
-    
+
     def __repr__(self):
-        """String representation showing structure."""
         mode = "additive-only" if self._additive_only else "all"
-        n_comps = len(self._components)
-        names_str = ", ".join([f"'{name}'" for name in self._names[:3]])
-        if n_comps > 3:
-            names_str += f", ... ({n_comps-3} more)"
-        return f"ModelComponents({mode}, n={n_comps}, names=[{names_str}])"
-    
+        n = len(self._components)
+        names_str = ", ".join(f"'{n}'" for n in self._names[:3])
+        if n > 3:
+            names_str += f", ... ({n - 3} more)"
+        extra = ""
+        if self._op_info:
+            extra = ", deconvolved" if self._deconvolve else ", convolved"
+        return f"ModelComponents({mode}, n={n}, names=[{names_str}]{extra})"
+
+    # ---- builders --------------------------------------------------------
+
     def _build_all(self):
-        """Build list of all leaf components (depth-first traversal)."""
+        """Depth-first leaf extraction; operator appended as Identity marker."""
         idx = [0]
         used_names = set()
-        
-        def traverse(submodel, active_op):
+
+        def traverse(submodel):
             if isinstance(submodel, LinearOperatorCompoundModel):
-                traverse(submodel.left, submodel)
+                traverse(submodel.left)
                 return
             if isinstance(submodel, CompoundModel):
-                traverse(submodel.left, active_op)
-                traverse(submodel.right, active_op)
+                traverse(submodel.left)
+                traverse(submodel.right)
             else:
-                # Leaf node
                 name = self._get_component_name(submodel)
                 unique_name = _make_unique_name(name, used_names)
                 used_names.add(unique_name)
-                
-                # Wrap with the original operator node when present
-                wrapped = _wrap_component(submodel, active_op)
-                
-                # Store with dual keys
-                self[idx[0]] = wrapped
-                self[unique_name] = wrapped
-                
+
+                self[idx[0]] = submodel
+                self[unique_name] = submodel
                 self._indices.append(idx[0])
                 self._names.append(unique_name)
-                self._components.append(wrapped)
-                
+                self._components.append(submodel)
                 idx[0] += 1
-        
-        traverse(self._model, self._op_info)
-    
+
+        traverse(self._model)
+
+        if self._op_info is not None:
+            op_name = self._op_info.name or 'response'
+            op_name = _make_unique_name(op_name, used_names)
+            marker = Identity(1, name=op_name)
+
+            self[idx[0]] = marker
+            self[op_name] = marker
+            self._indices.append(idx[0])
+            self._names.append(op_name)
+            self._components.append(marker)
+
     def _build_additive(self):
-        """Build list of additive components (expand multiplicative terms)."""
+        """Additive decomposition with optional operator wrapping."""
         components = self._expand_additive(self._model)
-        
+
+        # Decide whether to wrap each component with the operator
+        wrap = (not self._deconvolve)
         used_names = set()
         for idx, comp in enumerate(components):
             name = self._get_component_name(comp)
             unique_name = _make_unique_name(name, used_names)
             used_names.add(unique_name)
-            
-            # Wrap with the original operator node when present
-            wrapped = _wrap_component(comp, self._op_info)
-            
-            self[idx] = wrapped
-            self[unique_name] = wrapped
-            
+
+            if wrap:
+                out = _wrap_component(comp, self._op_info)
+            else:
+                out = comp
+
+            self[idx] = out
+            self[unique_name] = out
             self._indices.append(idx)
             self._names.append(unique_name)
-            self._components.append(wrapped)
+            self._components.append(out)
     
     def _expand_additive(self, model):
         """
@@ -288,48 +266,15 @@ class ModelComponents(dict):
             return [model]
     
     def _get_component_name(self, model):
-        """
-        Extract or construct name from model.
-        
-        Priority:
-        1. model.name if set
-        2. Construct descriptive name for compound models (in additive mode)
-        3. Fallback to class name
-        
-        Parameters
-        ----------
-        model : Model
-            Model to extract name from.
-            
-        Returns
-        -------
-        str
-            Component name.
-        """
+        """Name from model: ``model.name``, compound expression, or class name."""
         if isinstance(model, CompoundModel):
-            # Compound model in additive mode - construct descriptive name
             return self._construct_compound_name(model)
-        
         if hasattr(model, 'name') and model.name:
             return model.name
-        
-        # Fallback to class name
         return type(model).__name__
-    
+
     def _construct_compound_name(self, model):
-        """
-        Construct descriptive name for compound model.
-        
-        Parameters
-        ----------
-        model : CompoundModel
-            Compound model.
-            
-        Returns
-        -------
-        str
-            Descriptive name like "A*B" or "-C".
-        """
+        """Build a descriptive name like ``A*B`` from a compound model."""
         left_name = self._get_component_name(model.left)
         right_name = self._get_component_name(model.right)
         
@@ -350,63 +295,46 @@ class ModelComponents(dict):
             return f"compound_{id(model)}"
 
 
-def get_components(model, additive=False):
+def get_components(model, additive=False, deconvolve=False):
     """
-    Extract components from a compound model.
-    
-    This function decomposes compound models into their constituent parts,
-    providing dual-key access (by index and by name) to each component.
-    
+    Decompose a model into named, indexable components.
+
+    For ``LinearOperatorCompoundModel`` (convolved models):
+
+    * ``additive=True, deconvolve=False`` — operator-wrapped additive
+      terms (for observed-frame evaluation / plotting).
+    * ``additive=True, deconvolve=True``  — intrinsic source additive
+      terms with the operator stripped (for line measurements).
+    * ``additive=False`` — all source leaves plus an ``Identity``
+      marker for the operator.
+
     Parameters
     ----------
     model : astropy.modeling.Model
-        Single or compound model to decompose.
+        Single or compound model.
     additive : bool, optional
-        If True, return only additive components (expand multiplicative terms).
-        If False (default), return all leaf components.
-        
+        If ``True``, return additive components (distribute
+        multiplicative terms).  Default ``False``.
+    deconvolve : bool, optional
+        If ``True`` and ``additive=True``, strip the operator and
+        return source-frame components.  Ignored when
+        ``additive=False``.  Default ``False``.
+
     Returns
     -------
     ModelComponents
-        Dictionary-like object with dual-key access to components.
-        Supports both integer indices (0, 1, 2, ...) and component names.
-        
+        Container with ``.names``, ``.indices``, ``.response``,
+        and integer / name-based lookups.
+
     Examples
     --------
-    Basic usage with simple compound model:
-    
-    >>> from astropy.modeling import models
-    >>> m1 = models.Gaussian1D(1, 5000, 10, name='line1')
-    >>> m2 = models.Gaussian1D(2, 5100, 15, name='line2')
-    >>> compound = m1 + m2
-    >>> 
-    >>> # Get all components
-    >>> comps = get_components(compound)
-    >>> comps.names  # ['line1', 'line2']
-    >>> comps[0]  # First component (by index)
-    >>> comps['line1']  # By name
-    
-    Additive-only extraction for plotting:
-    
-    >>> import matplotlib.pyplot as plt
-    >>> wave = np.linspace(4900, 5200, 1000)
-    >>> add_comps = get_components(compound, additive=True)
-    >>> for name in add_comps.names:
-    ...     plt.plot(wave, add_comps[name](wave), label=name)
-    >>> plt.plot(wave, compound(wave), 'k-', label='Total')
-    
-    Multiplicative expansion:
-    
-    >>> cont = models.Const1D(1.0, name='continuum')
-    >>> line = models.Gaussian1D(2, 5000, 10, name='line')
-    >>> compound = cont * (m1 + m2)
-    >>> 
-    >>> # All components: cont, m1, m2
-    >>> comps = get_components(compound)
-    >>> len(comps.indices)  # 3
-    >>> 
-    >>> # Additive components: cont*m1, cont*m2
-    >>> add_comps = get_components(compound, additive=True)
-    >>> add_comps.names  # ['continuum*line1', 'continuum*line2']
+    >>> comps = get_components(model, additive=True)
+    >>> comps['blr'](wave)          # convolved component
+
+    >>> comps = get_components(model, additive=True, deconvolve=True)
+    >>> comps['blr'](wave)          # intrinsic source component
+
+    >>> comps = get_components(model, additive=False)
+    >>> comps.response              # operator node or None
     """
-    return ModelComponents(model, additive=additive)
+    return ModelComponents(model, additive=additive, deconvolve=deconvolve)

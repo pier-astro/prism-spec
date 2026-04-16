@@ -53,6 +53,10 @@ from .components import get_components, ModelComponents
 
 from .agn import *
 from .empirical import *
+
+from ..operators import instrument                               # models.instrument.*
+from ..operators.instrument import InstrumentResponse, SpectralResponse
+
 from .display import (
     enable_model_display,
     disable_model_display,

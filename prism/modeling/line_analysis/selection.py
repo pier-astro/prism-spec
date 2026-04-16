@@ -21,6 +21,7 @@ from ..models.lines import (
     sigma2fwhm,
 )
 from ..models.lines import profiles
+from ..operators.convolved import LinearOperatorCompoundModel
 
 try:
     _trapezoid = np.trapezoid
@@ -44,6 +45,13 @@ def _approx_voigt_fwhm(fwhm_g, fwhm_l):
     return 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l ** 2 + fwhm_g ** 2)
 
 
+def _unwrap_locm(model):
+    """Return (source, True) if *model* is LOCM-wrapped, else (model, False)."""
+    if isinstance(model, LinearOperatorCompoundModel):
+        return model.source_model, True
+    return model, False
+
+
 def _profile_width_from_args(model, args):
     if isinstance(model, (GaussianLine, GaussianLines)):
         return float(args[2] * sigma2fwhm)
@@ -59,33 +67,42 @@ def _profile_width_from_args(model, args):
 
 
 def _linegroup_template_index(model, template_name):
+    source, _ = _unwrap_locm(model)
     selector = _selector_token(template_name)
-    for index, candidate in enumerate(model._templates):
+    for index, candidate in enumerate(source._templates):
         if _selector_token(candidate) == selector:
             return index, str(candidate)
     raise KeyError(
         f"Template '{template_name}' not found in component "
-        f"'{getattr(model, 'name', type(model).__name__)}'.")
+        f"'{getattr(source, 'name', type(source).__name__)}'.")
 
 
 def _evaluate_linegroup_template(model, template_name, x):
-    idx, resolved = _linegroup_template_index(model, template_name)
-    amplitude = getattr(model, model._param_names_list[idx]).value
-    shared_values = [getattr(model, pname).value
-                     for pname in model._shared_params.keys()]
+    """Evaluate a single template within a ``LineGroupBase`` component.
+
+    If *model* is wrapped in a ``LinearOperatorCompoundModel`` the
+    source model is used for attribute access (``_templates``,
+    ``_param_names_list``, etc.).  The returned flux is always the
+    *intrinsic* (source-frame) profile — the operator is not applied.
+    """
+    source, _ = _unwrap_locm(model)
+    idx, resolved = _linegroup_template_index(source, template_name)
+    amplitude = getattr(source, source._param_names_list[idx]).value
+    shared_values = [getattr(source, pname).value
+                     for pname in source._shared_params.keys()]
 
     x_arr = np.atleast_1d(np.asarray(x, dtype=float))
     total = np.zeros_like(x_arr, dtype=float)
     centers = []
     widths = []
 
-    positions = model._tmpl_positions[idx]
-    weights = model._tmpl_weights[idx]
+    positions = source._tmpl_positions[idx]
+    weights = source._tmpl_weights[idx]
     for pos, weight in zip(positions, weights):
-        args = model._single_profile_args(pos, amplitude, weight, *shared_values)
-        total += model._profile_func(x_arr, *args)
+        args = source._single_profile_args(pos, amplitude, weight, *shared_values)
+        total += source._profile_func(x_arr, *args)
         centers.append(float(args[1]))
-        widths.append(_profile_width_from_args(model, args))
+        widths.append(_profile_width_from_args(source, args))
 
     return (total, np.asarray(centers, dtype=float),
             np.asarray(widths, dtype=float), resolved)
@@ -110,27 +127,33 @@ def _evaluate_single_line(model, x):
 
 
 def _evaluate_component_profile(model, x):
+    """Evaluate a full component profile, returning values, centers, widths.
+
+    Automatically unwraps ``LinearOperatorCompoundModel`` so that
+    ``LineGroupBase`` attributes are accessible.
+    """
+    source, _ = _unwrap_locm(model)
     x_arr = np.atleast_1d(np.asarray(x, dtype=float))
 
-    if isinstance(model, LineGroupBase):
-        values = np.asarray(model(x_arr), dtype=float)
+    if isinstance(source, LineGroupBase):
+        values = np.asarray(source(x_arr), dtype=float)
         centers = []
         widths = []
-        shared_values = [getattr(model, pname).value
-                         for pname in model._shared_params.keys()]
-        for idx in range(model._n_templates):
-            amplitude = getattr(model, model._param_names_list[idx]).value
-            for pos, weight in zip(model._tmpl_positions[idx],
-                                   model._tmpl_weights[idx]):
-                args = model._single_profile_args(
+        shared_values = [getattr(source, pname).value
+                         for pname in source._shared_params.keys()]
+        for idx in range(source._n_templates):
+            amplitude = getattr(source, source._param_names_list[idx]).value
+            for pos, weight in zip(source._tmpl_positions[idx],
+                                   source._tmpl_weights[idx]):
+                args = source._single_profile_args(
                     pos, amplitude, weight, *shared_values)
                 centers.append(float(args[1]))
-                widths.append(_profile_width_from_args(model, args))
+                widths.append(_profile_width_from_args(source, args))
         return (values, np.asarray(centers, dtype=float),
                 np.asarray(widths, dtype=float))
 
-    if isinstance(model, _SINGLE_LINE_TYPES):
-        return _evaluate_single_line(model, x_arr)
+    if isinstance(source, _SINGLE_LINE_TYPES):
+        return _evaluate_single_line(source, x_arr)
 
     raise TypeError(
         f"Unsupported component type for line analysis: {type(model).__name__}")
@@ -690,9 +713,10 @@ def select_line(model, selector, components=None, additive=True, index=None):
             if (str(key), comp_name) in seen:
                 continue
                 
-            if isinstance(resolved, LineGroupBase):
+            resolved_source, _ = _unwrap_locm(resolved)
+            if isinstance(resolved_source, LineGroupBase):
                 try:
-                    _, template_name = _linegroup_template_index(resolved, selector)
+                    _, template_name = _linegroup_template_index(resolved_source, selector)
                     entries.append(_SelectionEntry(
                         component_key=key, component_name=comp_name,
                         template_name=template_name))
@@ -713,8 +737,9 @@ def select_line(model, selector, components=None, additive=True, index=None):
         available = get_components(model, additive=additive)
         for key, name in zip(available.indices, available.names):
             comp = available[key]
-            if isinstance(comp, LineGroupBase):
-                for tmpl_name in comp._templates:
+            comp_source, _ = _unwrap_locm(comp)
+            if isinstance(comp_source, LineGroupBase):
+                for tmpl_name in comp_source._templates:
                     if _selector_token(tmpl_name) == selector_token:
                         entries.append(_SelectionEntry(
                             component_key=key, component_name=name,

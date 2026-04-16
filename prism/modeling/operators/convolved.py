@@ -1,9 +1,45 @@
 """
-Linear-operator model nodes.
+Linear-operator model nodes for spectral convolution.
 
-This module provides a minimal protocol for linear operators and a
-CompoundModel-based node that applies a fixed linear transform to the output
-of another model while preserving analytic derivatives.
+Astropy's compound model pipe operator (``|``) does not propagate analytic
+derivatives (``fit_deriv``), forcing fitters to fall back on numeric Jacobian
+estimation — slow when the model has many parameters.
+
+This module provides ``LinearOperatorCompoundModel``, a ``CompoundModel``
+subclass implementing:
+
+    h(x, θ) = M @ f(x, θ)
+
+where *M* is a fixed matrix (e.g., an instrumental line-spread function) and
+*f* is the source model.  Analytic derivatives are preserved via the chain
+rule:
+
+    J_h = M @ J_f
+
+The matrix is stored as a ``LinearOperator`` (typically a sparse
+``MatrixLinearOperator``), keeping evaluation fast even for large grids.
+If the operator depends on model parameters, additional derivative terms
+are required; in such cases, falling back to a standard CompoundModel
+may be preferable.
+
+Classes
+-------
+LinearOperator
+    Protocol: any object with ``get_matrix(x) -> matrix``.
+MatrixLinearOperator
+    Concrete operator wrapping a fixed dense or sparse matrix.
+LinearOperatorCompoundModel
+    CompoundModel node that maps all parameters from the source model,
+    applies the matrix in ``evaluate``, and transforms the Jacobian in
+    ``fit_deriv``.
+
+Example
+-------
+>>> from prism.modeling.operators.instrument import SpectralResponse
+>>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
+>>> convolved = rsp(source_model)          # LinearOperatorCompoundModel
+>>> convolved.source_model                 # the unwrapped source
+>>> convolved(wave_rest)                   # evaluates M @ f(wave_rest, θ)
 """
 
 import numpy as np
@@ -14,19 +50,36 @@ from astropy.modeling.models import Identity
 
 
 class LinearOperator:
-    """Minimal protocol for linear operators used by LinearOperatorCompoundModel."""
+    """Protocol for linear operators used by ``LinearOperatorCompoundModel``.
+
+    Subclasses must implement ``get_matrix(x)`` returning a 2-D array or
+    sparse matrix of shape ``(len(x), n_source)`` (square for same-grid
+    operators).
+    """
 
     def get_matrix(self, x):
-        """Return the linear operator matrix for the input grid x."""
+        """Return the operator matrix for wavelength grid *x*."""
         raise NotImplementedError
 
 
 class MatrixLinearOperator(LinearOperator):
-    """Linear operator backed by a fixed dense or sparse matrix."""
+    """Linear operator backed by a fixed dense or sparse matrix.
 
-    def __init__(self, matrix, wave=None):
+    Parameters
+    ----------
+    matrix : array-like or sparse matrix
+        The operator matrix (n × n for same-grid convolution).
+    wave : array-like, optional
+        Wavelength grid the matrix was built for.
+    recipe : dict, optional
+        Reconstruction recipe for serialization.  Keys depend on
+        construction method — see ``SpectralResponse`` for details.
+    """
+
+    def __init__(self, matrix, wave=None, recipe=None):
         self._matrix = matrix
         self._wave = None if wave is None else np.asarray(wave)
+        self._recipe = recipe or {}
 
     @property
     def matrix(self):
@@ -35,6 +88,11 @@ class MatrixLinearOperator(LinearOperator):
     @property
     def wave(self):
         return self._wave
+
+    @property
+    def recipe(self):
+        """Reconstruction recipe dict (empty if unavailable)."""
+        return self._recipe
 
     def get_matrix(self, x):
         x = np.asarray(x)
@@ -48,21 +106,41 @@ class MatrixLinearOperator(LinearOperator):
 
     def copy(self):
         wave_copy = None if self._wave is None else self._wave.copy()
-        return MatrixLinearOperator(self._matrix, wave=wave_copy)
+        return MatrixLinearOperator(self._matrix, wave=wave_copy, recipe=self._recipe.copy())
 
 
 class LinearOperatorCompoundModel(CompoundModel):
     """
-    CompoundModel node for h(x, p) = M(x) @ f(x, p).
+    CompoundModel node implementing h(x, θ) = M(x) @ f(x, θ).
+
+    Wraps a source model *f* with a linear operator *M* (e.g., an
+    instrumental response matrix) while preserving analytic Jacobians
+    via J_h = M @ J_f.
 
     Parameters
     ----------
     left : Model
-        Source model.
+        Source model f(x, θ).
     right : LinearOperator
-        Linear operator object implementing get_matrix(x).
+        Operator providing ``get_matrix(x)``.
     name : str, optional
-        Model name.
+        Model name (default ``'rsp'``).
+
+    Attributes
+    ----------
+    source_model : Model
+        The unwrapped source model (alias for ``left``).
+    right_operator : LinearOperator
+        The linear operator object.
+    col_fit_deriv : bool
+        Always ``True`` — Jacobian columns correspond to parameters.
+
+    Example
+    -------
+    >>> op = MatrixLinearOperator(matrix, wave=wave)
+    >>> convolved = LinearOperatorCompoundModel(source, op, name='rsp')
+    >>> convolved.source_model is source
+    True
     """
 
     def __init__(self, left, right, name=None):

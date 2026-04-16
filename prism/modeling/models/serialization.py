@@ -1,24 +1,50 @@
 """
-PyYAML / Astropy-IO serialization hooks for prism-spec custom models.
+YAML serialization hooks for prism-spec models.
 
-Calling ``register()`` (done automatically on import) ensures that
-``astropy.io.misc.yaml.dump / load`` can round-trip every prism model,
-including dynamically-built ``LineGroupBase`` subclasses and compound models.
+Calling ``register()`` (done automatically on import) registers all
+prism model types with ``astropy.io.misc.yaml``, enabling round-trip
+``dump``/``load`` for fitted models saved to FITS via ``prism.modeling.io``.
 
-Strategy
---------
-* ``LineModelBase`` subclasses (``GaussianLine``, ``VoigtLine``, …) are
-  ordinary Astropy ``Fittable1DModel`` subclasses → representer encodes
-  class name + per-parameter state; constructor inverts this.
+Supported types
+---------------
+* ``LineModelBase`` (``GaussianLine``, ``VoigtLine``, ``LorentzianLine``) —
+  stored as class name + per-parameter state.
+* ``LineGroupBase`` (``GaussianLines``, …) — dynamically-created classes
+  rebuilt via ``from_templates`` from the embedded ``_df`` table.
+* ``CompoundModel`` — tree of sub-models with Astropy operators.
+* ``LinearOperatorCompoundModel`` — stores the source model plus a
+  reconstruction *recipe* (instrument name, redshift, wavelength grid).
+  The matrix is never serialized; it is rebuilt on load.
+* Generic ``Fittable1DModel`` — fallback for any Astropy model.
 
-* ``LineGroupBase`` subclasses (``GaussianLines``, …) are dynamically created
-  via ``type()`` inside ``from_templates``.  The representer stores:
-  - the *base* class name (e.g. ``GaussianLines``)
-  - the ``_df`` as a list of records
-  - ``instfwhm``
-  - current parameter values / bounds / fixed flags
-  The constructor calls ``cls.from_templates(df, ...)`` to reconstruct the
-  identical dynamic class, then restores the parameter state.
+Response serialization
+----------------------
+The ``LinearOperatorCompoundModel`` (LOCM) is saved with a *recipe*
+that records how the operator matrix was constructed:
+
+* **Instrument recipe** (``type='instrument'``): the instrument name,
+  redshift, and wavelength grid are stored.  On load, the matrix is
+  rebuilt from the archived instrument file.  This is fully
+  round-trippable as long as the instrument is registered::
+
+      from prism.modeling.operators.instrument import SpectralResponse
+      rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=z)
+      model = rsp(source)
+      model.save('fit.fits')               # recipe = {type: 'instrument', ...}
+      loaded = load_model('fit.fits')       # LOCM reconstructed
+
+* **Direct recipe** (``type='direct'``): the operator was built from an
+  ``InstrumentResponse`` object directly, without an instrument name.
+  The matrix cannot be reconstructed from the recipe alone.  On load
+  the source model is returned *without* convolution and a warning is
+  issued.  Re-apply the operator manually::
+
+      loaded = load_model('fit.fits')       # source model only (warning)
+      loaded = rsp(loaded)                  # re-apply manually
+
+If the ``serialization`` module is not imported before loading (e.g. in
+a fresh session), call ``prism.modeling.models.serialization.register()``
+or simply ``import prism.modeling.models`` to activate the hooks.
 """
 
 import warnings
@@ -159,6 +185,46 @@ def _continuum_constructor(loader, node, cls):
 
 
 # ---------------------------------------------------------------------------
+# Generic Astropy Fittable1DModel  (fallback for unregistered models)
+# ---------------------------------------------------------------------------
+
+def _astropy_model_representer(dumper, obj):
+    """Generic representer for any Astropy Fittable1DModel without a prism hook."""
+    cls = type(obj)
+    state = {
+        '_class': f'{cls.__module__}.{cls.__qualname__}',
+    }
+    if obj.name:
+        state['_name'] = obj.name
+    for pn in obj.param_names:
+        state[pn] = _param_state(getattr(obj, pn))
+    return dumper.represent_mapping('!prism.AstropyModel', state)
+
+
+def _astropy_model_constructor(loader, node):
+    """Reconstruct an Astropy model from its module path + parameter state."""
+    import importlib
+    mapping = loader.construct_mapping(node, deep=True)
+    class_path = mapping.pop('_class')
+    mdl_name = mapping.pop('_name', None)
+
+    if not class_path.startswith('astropy.modeling.'):
+        raise ValueError(
+            f"Cannot deserialize model class '{class_path}': "
+            "only astropy.modeling classes are supported."
+        )
+
+    module_path, class_name = class_path.rsplit('.', 1)
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+    obj = cls(name=mdl_name)
+    for pn, state in mapping.items():
+        if hasattr(obj, pn):
+            _restore_param(obj, pn, state)
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Compound models
 # ---------------------------------------------------------------------------
 
@@ -184,6 +250,87 @@ def _compound_constructor(loader, node):
     if mdl_name is not None:
         obj.name = mdl_name
     return obj
+
+
+# ---------------------------------------------------------------------------
+# LinearOperatorCompoundModel  (instrumental response wrapper)
+# ---------------------------------------------------------------------------
+
+def _locm_representer(dumper, obj):
+    """Serialize a LinearOperatorCompoundModel.
+
+    Stores the source model (serialized recursively) and a reconstruction
+    recipe for the operator.  The full matrix is *not* stored — it is
+    rebuilt from the recipe on load.
+    """
+    state = {
+        '_source': obj.left,  # serialized by its own representer
+    }
+    operator = obj.right_operator
+    recipe = getattr(operator, '_recipe', {})
+    if recipe:
+        state['_recipe'] = dict(recipe)
+
+    wave = getattr(operator, '_wave', None)
+    if wave is not None:
+        state['_wave'] = wave.tolist()
+
+    if obj.name:
+        state['_name'] = obj.name
+
+    if not recipe or recipe.get('type') == 'direct':
+        warnings.warn(
+            "LinearOperatorCompoundModel has no reconstruction recipe. "
+            "The model will be saved without the response operator. "
+            "Re-apply the response after loading.",
+            UserWarning, stacklevel=4,
+        )
+
+    return dumper.represent_mapping('!prism.ConvolvedModel', state)
+
+
+def _locm_constructor(loader, node):
+    """Reconstruct a LinearOperatorCompoundModel from its recipe."""
+    mapping = loader.construct_mapping(node, deep=True)
+    source = mapping['_source']
+    recipe = mapping.get('_recipe', {})
+    wave_list = mapping.get('_wave')
+    name = mapping.get('_name')
+
+    wave = np.asarray(wave_list) if wave_list else None
+    rtype = recipe.get('type', 'unknown')
+
+    if rtype == 'instrument' and wave is not None:
+        from ..operators.instrument import SpectralResponse
+        instrument_name = recipe['instrument']
+        z = recipe.get('z', 0)
+        try:
+            rsp = SpectralResponse(instrument=instrument_name, wave=wave, z=z)
+            return rsp(source, name=name)
+        except Exception as exc:
+            warnings.warn(
+                f"Could not reconstruct response from recipe "
+                f"(instrument='{instrument_name}', z={z}): {exc}. "
+                "Returning source model without convolution.",
+                UserWarning, stacklevel=2,
+            )
+            return source
+
+    if rtype == 'direct':
+        warnings.warn(
+            "Model was saved with a direct response matrix that cannot be "
+            "reconstructed from a recipe.  Re-apply the response manually.",
+            UserWarning, stacklevel=2,
+        )
+        return source
+
+    warnings.warn(
+        f"Unknown response recipe type '{rtype}'. "
+        "Returning source model without convolution.",
+        UserWarning, stacklevel=2,
+    )
+    return source
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -215,6 +362,12 @@ def register():
     AstropyDumper.add_representer(CompoundModel, _compound_representer)
     AstropyLoader.add_constructor('!prism.CompoundModel', _compound_constructor)
 
+    # LinearOperatorCompoundModel — must be registered BEFORE CompoundModel
+    # multi-representer, since LOCM is a subclass of CompoundModel.
+    from ..operators.convolved import LinearOperatorCompoundModel
+    AstropyDumper.add_representer(LinearOperatorCompoundModel, _locm_representer)
+    AstropyLoader.add_constructor('!prism.ConvolvedModel', _locm_constructor)
+
     # LineGroup - all dynamic subclasses share a single representer/constructor
     for cls in [GaussianLines, LorentzianLines, VoigtLines]:
         AstropyDumper.add_representer(cls, _linegroup_representer)
@@ -222,6 +375,13 @@ def register():
     # Dynamic subclasses created by LineGroupBase.from_templates inherit from LineGroupBase.
     AstropyDumper.add_multi_representer(LineGroupBase, _linegroup_representer)
     AstropyLoader.add_constructor('!prism.LineGroup', _linegroup_constructor)
+
+    # Generic fallback for vanilla Astropy Fittable1DModel subclasses that
+    # have no prism-specific representer.  Uses add_multi_representer so
+    # that exact-match representers (prism models) take priority.
+    from astropy.modeling import Fittable1DModel
+    AstropyDumper.add_multi_representer(Fittable1DModel, _astropy_model_representer)
+    AstropyLoader.add_constructor('!prism.AstropyModel', _astropy_model_constructor)
 
 
 register()
