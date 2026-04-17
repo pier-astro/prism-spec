@@ -638,8 +638,8 @@ def select_line(model, selector, components=None, additive=True, index=None):
     ----------
     model : astropy.modeling.Model or MultiFitResult
         The composite model or multi-fit result containing the line components.
-        Convolved ``LinearOperatorCompoundModel`` inputs are not supported;
-        pass ``model.source_model`` instead.
+        Linear-operator pipe inputs are not supported; pass ``model.left``
+        instead.
     selector : str
         The tag identifying the physics line to extract (e.g., 'OIII5007'). 
         The search is case-insensitive.
@@ -665,12 +665,12 @@ def select_line(model, selector, components=None, additive=True, index=None):
     if selector is None or str(selector).strip() == '':
         raise ValueError("A line tag or name is required as 'selector'.")
 
-    from ..operators.convolved import LinearOperatorCompoundModel
+    from ..operators.matop import is_linear_operator_pipe
 
-    if isinstance(model, LinearOperatorCompoundModel):
+    if is_linear_operator_pipe(model):
         raise ValueError(
-            "line_analysis does not accept convolved models. "
-            "Pass model.source_model, or intrinsic components from "
+            "line_analysis does not accept linear-operator pipe models. "
+            "Pass model.left, or intrinsic components from "
             "get_components(model, additive=True, deconvolve=True)."
         )
 

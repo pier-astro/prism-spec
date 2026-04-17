@@ -2,23 +2,21 @@
 Instrumental response (line-spread-function) convolution.
 
 Build, load, and apply spectral response matrices to Astropy models
-via ``SpectralResponse`` — a callable that wraps a source model in a
-``LinearOperatorCompoundModel``.
+via ``SpectralResponse`` — a Prism ``LinearOperatorModel`` used on the
+right-hand side of Astropy's native pipe operator.
 
 The observed spectrum is modelled as ``h(x) = R @ f(x, θ)`` where *R*
 is the instrument response matrix and *f* is the intrinsic source.
-The ``LinearOperatorCompoundModel`` preserves analytic Jacobians via
-the chain rule ``J_h = R @ J_f``.
+Prism patches Astropy's ``CompoundModel`` pipe evaluation only for
+opt-in right-hand operator models, preserving the chain rule
+``J_h = R @ J_f``.
 
 Classes
 -------
 InstrumentResponse
     Build / load / save / crop response matrices.
 SpectralResponse
-    Callable wrapper: ``rsp(source_model)`` → ``LinearOperatorCompoundModel``.
-ResponseOperator
-    Thin ``Fittable1DModel`` adaptor for the Astropy ``|`` pipe operator
-    (used internally; does **not** propagate analytic derivatives).
+    Linear operator model used as ``source_model | rsp``.
 
 Wavelength conventions
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -41,8 +39,8 @@ To register a new instrument for recipe-based serialization::
 Example
 -------
 >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
->>> convolved = rsp(source_model)       # LinearOperatorCompoundModel
->>> convolved.source_model              # unwrapped source
+>>> convolved = source_model | rsp      # CompoundModel pipe expression
+>>> convolved.left                      # unwrapped source
 >>> convolved(wave_rest)                # evaluates R @ f(wave_rest, θ)
 """
 import numpy as np
@@ -54,9 +52,7 @@ from scipy.interpolate import interp1d, RectBivariateSpline
 from scipy.sparse import csr_matrix, issparse
 from scipy.special import erf
 from astropy.io import fits
-from astropy.modeling import Fittable1DModel, Parameter
-
-from .convolved import LinearOperatorCompoundModel, MatrixLinearOperator
+from .matop import LinearOperatorModel, is_linear_operator_pipe
 
 
 # --- Path utilities ---
@@ -517,129 +513,15 @@ def _crop_response_matrix(
     return cropped if issparse(cropped) else csr_matrix(cropped)
 
 
-# --- ResponseOperator Model ---
-
-class ResponseOperator(Fittable1DModel):
-    """
-    Applies response matrix multiplication to input flux with grid flexibility.
-    
-    Used with the pipe operator: source_model | ResponseOperator(matrix, wave)
-    
-    The result is a proper CompoundModel that fitters handle correctly.
-    This model has NO fittable parameters - it only applies the matrix.
-    
-    Grid Handling
-    -------------
-    - If `wave` is provided, the operator supports evaluation on arbitrary grids
-      through interpolation of the convolved result.
-    - The interpolated matrix is cached for efficiency during fitting.
-    - Outside the wavelength bounds, the result is zero (instrument is blind).
-    - If `wave` is None, evaluation is only allowed on matching-length arrays.
-    
-    Derivative Handling
-    -------------------
-    The `fit_deriv` method returns an empty list since this operator has no
-    fittable parameters. For pipe compositions, derivatives from the source
-    model are transformed through the response matrix via chain rule.
-    
-    Parameters
-    ----------
-    response_matrix : sparse matrix or array
-        The response matrix (n_out × n_in).
-    wave : array-like, optional
-        Wavelength grid the matrix was built for. Required for grid interpolation.
-    name : str, optional
-        Model name for display.
-    
-    Example
-    -------
-    >>> wave = np.arange(4500, 5500, 1.0)
-    >>> matrix = InstrumentResponse.from_fixed_resolution(wave, R=2000).response_matrix
-    >>> rsp = ResponseOperator(matrix, wave=wave, name='response')
-    >>> convolved = (continuum + emission_line) | rsp
-    >>> 
-    >>> # Evaluate on original grid (fast, no interpolation)
-    >>> flux = convolved(wave)
-    >>> 
-    >>> # Evaluate on different grid (uses interpolation, cached)
-    >>> flux_subset = convolved(wave[100:200])
-    """
-    n_inputs = 1
-    n_outputs = 1
-    
-    # No fittable parameters
-    
-    def __init__(self, response_matrix, wave=None, name=None, **kwargs):
-        self._response_matrix = response_matrix
-        self._wave = np.asarray(wave) if wave is not None else None
-        self._n_wave = response_matrix.shape[0]
-        
-        # Cache for interpolated results
-        self._cache_key = None
-        self._cached_interpolator = None
-        
-        super().__init__(name=name, **kwargs)
-    
-    @property
-    def wave(self):
-        """Wavelength grid the matrix was built for."""
-        return self._wave
-    
-    @staticmethod  
-    def fit_deriv(flux):
-        """
-        Return derivatives with respect to parameters.
-        
-        Since ResponseOperator has no fittable parameters, this returns
-        an empty list. This is mathematically correct and allows proper
-        derivative chain rule handling in compound models.
-        """
-        return []
-    
-    def evaluate(self, flux):
-        """
-        Apply response matrix to input flux.
-        
-        If input length matches matrix dimensions, direct multiplication is used.
-        Otherwise, if wavelength grid is available, interpolation is performed.
-        """
-        flux = np.atleast_1d(flux)
-        
-        # Fast path: input matches matrix dimensions
-        if len(flux) == self._n_wave:
-            return np.asarray(self._response_matrix.dot(flux)).ravel()
-        
-        # Need interpolation - requires wavelength grid
-        if self._wave is None:
-            raise ValueError(
-                f"Dimension mismatch: input has {len(flux)} elements but matrix "
-                f"expects {self._n_wave}. Provide 'wave' parameter to ResponseOperator "
-                "to enable grid interpolation."
-            )
-        
-        # This shouldn't happen in pipe context since we receive flux, not wave
-        # But handle gracefully
-        raise ValueError(
-            f"Dimension mismatch: input flux has {len(flux)} elements but matrix "
-            f"expects {self._n_wave}. In pipe context, ensure the source model "
-            "returns the expected number of flux values."
-        )
-    
-    def __repr__(self):
-        shape = self._response_matrix.shape
-        grid_info = f", wave={len(self._wave)}" if self._wave is not None else ""
-        return f"<ResponseOperator({shape[0]}x{shape[1]}{grid_info})>"
-
-
 # --- SpectralResponse class ---
 
-class SpectralResponse:
+class SpectralResponse(LinearOperatorModel):
     """
-    Callable wrapper for applying instrumental response to Astropy models.
+    Instrument-response linear operator for Astropy pipe expressions.
 
-    Call an instance with a source model to produce a
-    ``LinearOperatorCompoundModel`` node that convolves the source with the
-    instrumental LSF while preserving analytic Jacobians.
+    Use an instance directly on the right-hand side of a native Astropy pipe
+    expression, as ``source | rsp``, to convolve a source model while
+    preserving analytic Jacobians.
 
     Parameters
     ----------
@@ -655,25 +537,26 @@ class SpectralResponse:
         Supply a pre-built matrix directly (no archive lookup, no cropping).
     renormalize : bool, default True
         Renormalize rows to unity after cropping.
+    flexible : bool, default True
+        Retained for API compatibility. The current linear-operator path uses
+        the cropped response matrix directly.
     name : str, default ``'rsp'``
-        Default name given to the ``LinearOperatorCompoundModel`` node
-        produced by ``__call__``.  Can be overridden per call.
+        Name of the response operator model.
 
     Examples
     --------
     >>> # From archive (serializable — full round-trip supported)
     >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1)
-    >>> model = rsp(source)               # node named 'rsp'
-    >>> model = rsp(source, name='muse')  # override name per call
+    >>> model = source | rsp
 
     >>> # Custom name at construction
     >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1, name='muse')
-    >>> model = rsp(source)               # node named 'muse'
+    >>> model = source | rsp
 
     >>> # From InstrumentResponse instance (not serializable from recipe)
     >>> ir = InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.5)
     >>> rsp = SpectralResponse(instrument=ir, wave=wave)
-    >>> model = rsp(source)
+    >>> model = source | rsp
     """
     
     def __init__(
@@ -686,7 +569,6 @@ class SpectralResponse:
         flexible: bool = True,
         name: str = 'rsp',
     ):
-        self.name = name
         self.z = z
         self.flexible = flexible
         self.interpolator = None
@@ -731,33 +613,19 @@ class SpectralResponse:
         if self.flexible and self.wavelength_grid is not None:
             self._build_interpolator()
 
+        super().__init__(
+            self.response_matrix,
+            x=self.wavelength_grid,
+            recipe=self._build_recipe(),
+            name=name,
+        )
+
     def _build_interpolator(self) -> None:
         """Build 2D interpolator for flexible grid evaluation."""
         dense = self.response_matrix.toarray() if issparse(self.response_matrix) else self.response_matrix
         self.interpolator = RectBivariateSpline(
             self.wavelength_grid, self.wavelength_grid, dense, kx=1, ky=1
         )
-
-    def __call__(self, source_model, name=None):
-        """
-        Wrap *source_model* with instrumental convolution.
-
-        Parameters
-        ----------
-        source_model : Model
-            Any Astropy 1-D model (simple or compound).
-        name : str, optional
-            Name for the resulting node.  Defaults to ``self.name``
-            (set at construction, default ``'rsp'``).
-
-        Returns
-        -------
-        LinearOperatorCompoundModel
-        """
-        recipe = self._build_recipe()
-        operator = MatrixLinearOperator(self.response_matrix, wave=self.wavelength_grid,
-                                       recipe=recipe)
-        return LinearOperatorCompoundModel(source_model, operator, name=name or self.name)
 
     def _build_recipe(self):
         """Build a reconstruction recipe for serialization.
@@ -785,9 +653,7 @@ class SpectralResponse:
 __all__ = [
     'InstrumentResponse',
     'SpectralResponse',
-    'ResponseOperator',
-    'LinearOperatorCompoundModel',
-    'MatrixLinearOperator',
+    'is_linear_operator_pipe',
     'load_responses_mapping',
     'add_response_to_archive',
     'list_instruments'

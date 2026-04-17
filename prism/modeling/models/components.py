@@ -4,7 +4,7 @@ Component decomposition for compound models.
 Decomposes ``CompoundModel`` trees into named, indexable parts via
 ``get_components``, returning a ``ModelComponents`` container.
 
-For ``LinearOperatorCompoundModel`` (convolved models, ``h = M @ f``):
+For linear-operator pipe models (convolved models, ``h = M @ f``):
 
 * ``additive=True, deconvolve=False`` — each additive term is wrapped
   with the operator for direct observed-frame evaluation.
@@ -18,19 +18,12 @@ import numpy as np
 from astropy.modeling import CompoundModel
 from astropy.modeling.models import Const1D, Identity
 
-from ..operators.convolved import LinearOperatorCompoundModel
-
-
-def _get_source_model(model):
-    """Return the source model, unwrapping ``LinearOperatorCompoundModel``."""
-    if isinstance(model, LinearOperatorCompoundModel):
-        return model.left
-    return model
+from ..operators.matop import is_linear_operator_pipe
 
 
 def _get_operator_info(model):
-    """Return the ``LinearOperatorCompoundModel`` node, or ``None``."""
-    if isinstance(model, LinearOperatorCompoundModel):
+    """Return the top-level linear-operator pipe node, or ``None``."""
+    if is_linear_operator_pipe(model):
         return model
     return None
 
@@ -39,7 +32,13 @@ def _wrap_component(component, op_info):
     """Wrap *component* in the same linear operator if *op_info* is set."""
     if op_info is None:
         return component
-    return op_info.with_left(component)
+    wrapped = component | op_info.right
+    return wrapped
+
+
+def _is_negative_const(model):
+    """Return True when *model* is the synthetic Const1D(-1) sign carrier."""
+    return isinstance(model, Const1D) and np.isclose(float(model.amplitude.value), -1.0)
 
 
 def _make_unique_name(name, existing_names):
@@ -61,7 +60,7 @@ class ModelComponents(dict):
         comps[0]            # by index
         comps['blr']        # by name
         comps.names         # list of names
-        comps.response      # LinearOperatorCompoundModel or None
+        comps.response      # linear-operator pipe or None
 
     Parameters
     ----------
@@ -71,20 +70,27 @@ class ModelComponents(dict):
         If ``True``, return additive components (multiplicative terms
         are distributed).  If ``False`` (default), return all leaves.
     deconvolve : bool, optional
-        Only meaningful when ``additive=True`` and the model is
-        convolved.  If ``True``, strip the operator and return
-        intrinsic source components.  Default ``False``.
+        Only meaningful when ``additive=True`` and the top-level model is
+        a linear-operator pipe. If ``True``, strip only that first operator
+        layer and return the additive decomposition of the left-hand source.
+        Nested pipe nodes are left untouched. Default ``False``.
 
     Notes
     -----
-    For ``LinearOperatorCompoundModel`` (e.g. ``rsp(A + B)``):
+        For linear-operator pipe models (e.g. ``(A + B) | rsp``):
 
     * ``additive=True, deconvolve=False`` →
-      ``rsp(A), rsp(B)``  (operator-wrapped, for observed evaluation).
+            ``A|rsp, B|rsp``  (operator-wrapped, for observed evaluation).
     * ``additive=True, deconvolve=True``  →
-      ``A, B``  (source-only, for intrinsic measurements).
+            ``A, B``  (first operator layer stripped for intrinsic measurements).
     * ``additive=False`` →
-      ``A, B, rsp``  (all leaves + Identity marker).
+            ``A, B, rsp``  (all leaves + operator markers).
+
+        The deconvolution logic is intentionally shallow: it removes only a
+        top-level linear operator. For ``(gauss | linop1) | linop2``,
+        ``deconvolve=True`` removes ``linop2`` only. For
+        ``(gauss | linop) + other``, ``deconvolve=True`` has no effect because
+        the top-level node is not itself a linear-operator pipe.
 
     Examples
     --------
@@ -98,8 +104,9 @@ class ModelComponents(dict):
 
     def __init__(self, model, additive=False, deconvolve=False):
         super().__init__()
+        self._original_model = model
         self._op_info = _get_operator_info(model)
-        self._model = _get_source_model(model)
+        self._model = model.left if self._op_info is not None else model
         self._additive_only = additive
         self._deconvolve = bool(deconvolve)
         self._indices = []
@@ -123,7 +130,7 @@ class ModelComponents(dict):
 
     @property
     def response(self):
-        """The ``LinearOperatorCompoundModel`` wrapping the source, or ``None``."""
+        """The linear-operator pipe wrapping the source, or ``None``."""
         return self._op_info
 
     @property
@@ -154,58 +161,53 @@ class ModelComponents(dict):
     # ---- builders --------------------------------------------------------
 
     def _build_all(self):
-        """Depth-first leaf extraction; operator appended as Identity marker."""
+        """Depth-first leaf extraction; pipe operators become Identity markers."""
         idx = [0]
         used_names = set()
 
+        def add_item(component, name):
+            unique_name = _make_unique_name(name, used_names)
+            used_names.add(unique_name)
+
+            self[idx[0]] = component
+            self[unique_name] = component
+            self._indices.append(idx[0])
+            self._names.append(unique_name)
+            self._components.append(component)
+            idx[0] += 1
+
+        def add_operator_marker(pipe_model):
+            op_name = getattr(pipe_model.right, 'name', None) or getattr(pipe_model, 'name', None) or 'linop'
+            add_item(Identity(1, name=op_name), op_name)
+
         def traverse(submodel):
-            if isinstance(submodel, LinearOperatorCompoundModel):
+            if is_linear_operator_pipe(submodel):
                 traverse(submodel.left)
+                add_operator_marker(submodel)
                 return
             if isinstance(submodel, CompoundModel):
                 traverse(submodel.left)
                 traverse(submodel.right)
             else:
-                name = self._get_component_name(submodel)
-                unique_name = _make_unique_name(name, used_names)
-                used_names.add(unique_name)
+                add_item(submodel, self._get_component_name(submodel))
 
-                self[idx[0]] = submodel
-                self[unique_name] = submodel
-                self._indices.append(idx[0])
-                self._names.append(unique_name)
-                self._components.append(submodel)
-                idx[0] += 1
-
-        traverse(self._model)
-
-        if self._op_info is not None:
-            op_name = self._op_info.name or 'response'
-            op_name = _make_unique_name(op_name, used_names)
-            marker = Identity(1, name=op_name)
-
-            self[idx[0]] = marker
-            self[op_name] = marker
-            self._indices.append(idx[0])
-            self._names.append(op_name)
-            self._components.append(marker)
+        traverse(self._original_model)
 
     def _build_additive(self):
         """Additive decomposition with optional operator wrapping."""
         components = self._expand_additive(self._model)
 
-        # Decide whether to wrap each component with the operator
-        wrap = (not self._deconvolve)
+        wrap = (self._op_info is not None and not self._deconvolve)
         used_names = set()
         for idx, comp in enumerate(components):
-            name = self._get_component_name(comp)
-            unique_name = _make_unique_name(name, used_names)
-            used_names.add(unique_name)
-
             if wrap:
                 out = _wrap_component(comp, self._op_info)
             else:
                 out = comp
+
+            name = self._get_component_name(out)
+            unique_name = _make_unique_name(name, used_names)
+            used_names.add(unique_name)
 
             self[idx] = out
             self[unique_name] = out
@@ -234,9 +236,8 @@ class ModelComponents(dict):
         if not isinstance(model, CompoundModel):
             return [model]
 
-        if isinstance(model, LinearOperatorCompoundModel):
-            left_expanded = self._expand_additive(model.left)
-            return [model.with_left(comp) for comp in left_expanded]
+        if is_linear_operator_pipe(model):
+            return [model]
         
         left = self._expand_additive(model.left)
         right = self._expand_additive(model.right)
@@ -273,13 +274,29 @@ class ModelComponents(dict):
             return model.name
         return type(model).__name__
 
+    def _flatten_product_names(self, model):
+        """Return multiplicative factor names, omitting synthetic -1 factors."""
+        if _is_negative_const(model):
+            return []
+        if isinstance(model, CompoundModel) and model.op == '*':
+            return self._flatten_product_names(model.left) + self._flatten_product_names(model.right)
+        return [self._get_component_name(model)]
+
     def _construct_compound_name(self, model):
         """Build a descriptive name like ``A*B`` from a compound model."""
+        if is_linear_operator_pipe(model):
+            left_name = self._get_component_name(model.left)
+            if isinstance(model.left, CompoundModel):
+                left_name = f"({left_name})"
+            right_name = getattr(model.right, 'name', None) or getattr(model, 'name', None) or 'linop'
+            return f"{left_name}|{right_name}"
+
         left_name = self._get_component_name(model.left)
         right_name = self._get_component_name(model.right)
         
         if model.op == '*':
-            return f"{left_name}*{right_name}"
+            factors = self._flatten_product_names(model)
+            return '*'.join(factors) if factors else 'Const1D'
         elif model.op == '/':
             return f"{left_name}/{right_name}"
         elif model.op == '**':
@@ -295,18 +312,18 @@ class ModelComponents(dict):
             return f"compound_{id(model)}"
 
 
-def get_components(model, additive=False, deconvolve=False):
+def get_components(model, additive=True, deconvolve=False):
     """
     Decompose a model into named, indexable components.
 
-    For ``LinearOperatorCompoundModel`` (convolved models):
+        For linear-operator pipe models (convolved models):
 
-    * ``additive=True, deconvolve=False`` — operator-wrapped additive
-      terms (for observed-frame evaluation / plotting).
-    * ``additive=True, deconvolve=True``  — intrinsic source additive
-      terms with the operator stripped (for line measurements).
-    * ``additive=False`` — all source leaves plus an ``Identity``
-      marker for the operator.
+        * ``additive=True, deconvolve=False`` — first-layer additive
+            terms, wrapped again by a top-level linear operator when present.
+        * ``additive=True, deconvolve=True``  — same first-layer additive
+            terms, but only the top-level operator is stripped.
+        * ``additive=False`` — all leaves in depth-first order, with an
+            ``Identity`` marker for each linear operator node.
 
     Parameters
     ----------
@@ -316,9 +333,9 @@ def get_components(model, additive=False, deconvolve=False):
         If ``True``, return additive components (distribute
         multiplicative terms).  Default ``False``.
     deconvolve : bool, optional
-        If ``True`` and ``additive=True``, strip the operator and
-        return source-frame components.  Ignored when
-        ``additive=False``.  Default ``False``.
+        If ``True`` and ``additive=True``, strip only a top-level linear
+        operator and return the additive decomposition of its left-hand
+        source. Ignored when ``additive=False``. Default ``False``.
 
     Returns
     -------

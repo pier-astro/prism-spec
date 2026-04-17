@@ -1,13 +1,12 @@
 """prism.modeling.operators — linear operators applied to spectral models."""
 
-from .convolved import LinearOperator, MatrixLinearOperator, LinearOperatorCompoundModel
-from .instrument import InstrumentResponse, SpectralResponse, ResponseOperator
+from .matop import LinearOperatorModel, install_pipe_patch, is_linear_operator_pipe
+from .instrument import InstrumentResponse, SpectralResponse
 
 __all__ = [
-    'LinearOperator',
-    'MatrixLinearOperator',
-    'LinearOperatorCompoundModel',
+    'LinearOperatorModel',
+    'install_pipe_patch',
+    'is_linear_operator_pipe',
     'InstrumentResponse',
     'SpectralResponse',
-    'ResponseOperator',
 ]

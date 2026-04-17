@@ -3,8 +3,6 @@ Human-readable display of Astropy compound models.
 
 Provides ``show_model`` / ``enable_model_display`` for pretty-printed
 model expressions and parameter tables in notebooks and terminals.
-Handles ``LinearOperatorCompoundModel`` by displaying the operator
-separately (e.g. ``rsp | (blr + nlr + continuum)``).
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ import numpy as np
 from astropy.modeling import CompoundModel
 
 from .components import ModelComponents
-from ..operators.convolved import LinearOperatorCompoundModel
+from ..operators.matop import is_linear_operator_pipe
 
 __all__ = [
     'enable_model_display',
@@ -57,14 +55,13 @@ def _model_expression(model, top=True):
     if not isinstance(model, CompoundModel):
         return _component_label(model)
 
-    # LinearOperatorCompoundModel: show as  name | (source_expression)
-    if isinstance(model, LinearOperatorCompoundModel):
-        op_name = model.name or 'rsp'
+    # Prism linear-operator pipe: show as source_expression | name
+    if is_linear_operator_pipe(model):
+        op_name = _component_label(model.right)
         source_expr = _model_expression(model.left, top=False)
-        # Always parenthesise compound sources for clarity
         if isinstance(model.left, CompoundModel):
             source_expr = f"({source_expr})"
-        return f"{op_name} | {source_expr}"
+        return f"{source_expr} | {op_name}"
 
     left = _format_child_expression(model.left, model.op)
     right = _format_child_expression(model.right, model.op)

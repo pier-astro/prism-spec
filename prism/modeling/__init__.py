@@ -16,8 +16,8 @@ io
 """
 from . import line_analysis
 from .line_analysis import *
-from .operators.convolved import LinearOperator, MatrixLinearOperator, LinearOperatorCompoundModel
-from .operators.instrument import InstrumentResponse, SpectralResponse, ResponseOperator
+from .operators.matop import LinearOperatorModel, install_pipe_patch, is_linear_operator_pipe
+from .operators.instrument import InstrumentResponse, SpectralResponse
 from .models.display import (
     enable_model_display,
     disable_model_display,

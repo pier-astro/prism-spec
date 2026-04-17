@@ -12,15 +12,15 @@ Supported types
 * ``LineGroupBase`` (``GaussianLines``, …) — dynamically-created classes
   rebuilt via ``from_templates`` from the embedded ``_df`` table.
 * ``CompoundModel`` — tree of sub-models with Astropy operators.
-* ``LinearOperatorCompoundModel`` — stores the source model plus a
-  reconstruction *recipe* (instrument name, redshift, wavelength grid).
-  The matrix is never serialized; it is rebuilt on load.
+* Prism linear-operator pipe models — store the source model plus a
+    reconstruction *recipe* (instrument name, redshift, wavelength grid).
+    The matrix is never serialized; it is rebuilt on load.
 * Generic ``Fittable1DModel`` — fallback for any Astropy model.
 
 Response serialization
 ----------------------
-The ``LinearOperatorCompoundModel`` (LOCM) is saved with a *recipe*
-that records how the operator matrix was constructed:
+Prism linear-operator pipe models are saved with a *recipe* that records
+how the operator matrix was constructed:
 
 * **Instrument recipe** (``type='instrument'``): the instrument name,
   redshift, and wavelength grid are stored.  On load, the matrix is
@@ -29,9 +29,9 @@ that records how the operator matrix was constructed:
 
       from prism.modeling.operators.instrument import SpectralResponse
       rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=z)
-      model = rsp(source)
-      model.save('fit.fits')               # recipe = {type: 'instrument', ...}
-      loaded = load_model('fit.fits')       # LOCM reconstructed
+    model = source | rsp
+    model.save('fit.fits')               # recipe = {type: 'instrument', ...}
+    loaded = load_model('fit.fits')      # linear-operator pipe reconstructed
 
 * **Direct recipe** (``type='direct'``): the operator was built from an
   ``InstrumentResponse`` object directly, without an instrument name.
@@ -55,6 +55,8 @@ import re
 from astropy.modeling.core import CompoundModel
 
 from astropy.io.misc.yaml import AstropyDumper, AstropyLoader
+
+from ..operators.matop import is_linear_operator_pipe
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -229,6 +231,9 @@ def _astropy_model_constructor(loader, node):
 # ---------------------------------------------------------------------------
 
 def _compound_representer(dumper, obj):
+    if is_linear_operator_pipe(obj):
+        return _linear_operator_pipe_representer(dumper, obj)
+
     state = {
         '_expr': obj._format_expression(),
         '_components': list(obj._leaflist),
@@ -253,11 +258,11 @@ def _compound_constructor(loader, node):
 
 
 # ---------------------------------------------------------------------------
-# LinearOperatorCompoundModel  (instrumental response wrapper)
+# Linear-operator pipe models
 # ---------------------------------------------------------------------------
 
-def _locm_representer(dumper, obj):
-    """Serialize a LinearOperatorCompoundModel.
+def _linear_operator_pipe_representer(dumper, obj):
+    """Serialize a Prism linear-operator pipe expression.
 
     Stores the source model (serialized recursively) and a reconstruction
     recipe for the operator.  The full matrix is *not* stored — it is
@@ -266,31 +271,32 @@ def _locm_representer(dumper, obj):
     state = {
         '_source': obj.left,  # serialized by its own representer
     }
-    operator = obj.right_operator
-    recipe = getattr(operator, '_recipe', {})
+    operator = obj.right
+    recipe = operator.recipe
     if recipe:
         state['_recipe'] = dict(recipe)
 
-    wave = getattr(operator, '_wave', None)
-    if wave is not None:
-        state['_wave'] = wave.tolist()
+    x = operator.x
+    if x is not None:
+        state['_wave'] = x.tolist()
 
-    if obj.name:
-        state['_name'] = obj.name
+    name = operator.name or obj.name
+    if name:
+        state['_name'] = name
 
     if not recipe or recipe.get('type') == 'direct':
         warnings.warn(
-            "LinearOperatorCompoundModel has no reconstruction recipe. "
+            "Linear-operator pipe model has no reconstruction recipe. "
             "The model will be saved without the response operator. "
             "Re-apply the response after loading.",
             UserWarning, stacklevel=4,
         )
 
-    return dumper.represent_mapping('!prism.ConvolvedModel', state)
+    return dumper.represent_mapping('!prism.LinearOperatorPipe', state)
 
 
-def _locm_constructor(loader, node):
-    """Reconstruct a LinearOperatorCompoundModel from its recipe."""
+def _linear_operator_pipe_constructor(loader, node):
+    """Reconstruct a linear-operator pipe model from its recipe."""
     mapping = loader.construct_mapping(node, deep=True)
     source = mapping['_source']
     recipe = mapping.get('_recipe', {})
@@ -305,8 +311,8 @@ def _locm_constructor(loader, node):
         instrument_name = recipe['instrument']
         z = recipe.get('z', 0)
         try:
-            rsp = SpectralResponse(instrument=instrument_name, wave=wave, z=z)
-            return rsp(source, name=name)
+            rsp = SpectralResponse(instrument=instrument_name, wave=wave, z=z, name=name or 'rsp')
+            return source | rsp
         except Exception as exc:
             warnings.warn(
                 f"Could not reconstruct response from recipe "
@@ -361,12 +367,8 @@ def register():
 
     AstropyDumper.add_representer(CompoundModel, _compound_representer)
     AstropyLoader.add_constructor('!prism.CompoundModel', _compound_constructor)
-
-    # LinearOperatorCompoundModel — must be registered BEFORE CompoundModel
-    # multi-representer, since LOCM is a subclass of CompoundModel.
-    from ..operators.convolved import LinearOperatorCompoundModel
-    AstropyDumper.add_representer(LinearOperatorCompoundModel, _locm_representer)
-    AstropyLoader.add_constructor('!prism.ConvolvedModel', _locm_constructor)
+    AstropyLoader.add_constructor('!prism.LinearOperatorPipe', _linear_operator_pipe_constructor)
+    AstropyLoader.add_constructor('!prism.ConvolvedModel', _linear_operator_pipe_constructor)
 
     # LineGroup - all dynamic subclasses share a single representer/constructor
     for cls in [GaussianLines, LorentzianLines, VoigtLines]:
