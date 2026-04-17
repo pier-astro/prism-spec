@@ -298,8 +298,6 @@ def _fit_param_names(model):
 
 
 def _selection_parameter_specs(selection):
-    from ..operators.convolved import LinearOperatorCompoundModel
-
     components = get_components(selection.source_model,
                                 additive=selection.additive)
     specs = []
@@ -307,16 +305,12 @@ def _selection_parameter_specs(selection):
 
     for entry in selection.entries:
         component = components[entry.component_key]
-        # Unwrap LOCM to access LineGroupBase internals
-        source = (component.source_model
-                  if isinstance(component, LinearOperatorCompoundModel)
-                  else component)
         if entry.template_name is None:
             relevant = list(component.param_names)
         else:
-            idx, _ = _linegroup_template_index(source, entry.template_name)
-            relevant = ([source._param_names_list[idx]]
-                        + list(source._shared_params.keys()))
+            idx, _ = _linegroup_template_index(component, entry.template_name)
+            relevant = ([component._param_names_list[idx]]
+                        + list(component._shared_params.keys()))
 
         for param_name in relevant:
             param = getattr(component, param_name)
