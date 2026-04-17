@@ -133,7 +133,7 @@ class LineGroupBase(LineModelBase):
                     derivs = self._single_profile_deriv(
                         x_arr, _tmpl_positions[i][j], amplitudes[i],
                         _tmpl_weights[i][j], *shared)
-                    grad[i] += derivs[1] * _tmpl_weights[i][j]
+                    grad[i] += derivs[1]
                     for k, d in enumerate(derivs[2:]):
                         d_shared[k] += d
             for j, d in enumerate(d_shared):

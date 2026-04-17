@@ -45,7 +45,7 @@ Example
 import numpy as np
 from collections import defaultdict
 
-from astropy.modeling.core import CompoundModel
+from astropy.modeling.core import CompoundModel, Model
 from astropy.modeling.models import Identity
 
 
@@ -200,6 +200,13 @@ class LinearOperatorCompoundModel(CompoundModel):
     @property
     def col_fit_deriv(self):
         return True
+
+    def _pre_evaluate(self, *args, **kwargs):
+        # CompoundModel.__call__ normally evaluates the internal operator tree
+        # via _evaluate(), which would apply the placeholder Identity node.
+        # This subclass defines its own evaluate() and must use the standard
+        # Model pre-evaluation path so model(x) matches fit-time evaluation.
+        return Model._pre_evaluate(self, *args, **kwargs)
 
     def evaluate(self, *args, **kwargs):
         args, kwargs = self._get_kwarg_model_parameters_as_positional(args, kwargs)

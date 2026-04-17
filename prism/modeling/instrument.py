@@ -11,6 +11,7 @@ from .operators.instrument import (          # explicit for IDE support
     ResponseOperator,
     load_responses_mapping,
     add_response_to_archive,
+    delete_instrument,
     list_instruments,
     _load_user_mapping,
     _save_user_mapping,

@@ -414,6 +414,56 @@ class InstrumentResponse:
         return f"<InstrumentResponse({shape}, λ=[{wmin}, {wmax}])>"
 
 
+def delete_instrument(instrument_name: str, user_only: bool = True) -> None:
+    """
+    Remove an instrument from the archive and delete its FITS file.
+    
+    Parameters
+    ----------
+    instrument_name : str
+        Name of the instrument to delete
+    user_only : bool
+        If True (default), only search/delete from user directory.
+        If False, also check package directory (requires write permissions).
+    """
+    mapping = _load_user_mapping()
+    
+    if instrument_name in mapping:
+        filename = mapping.pop(instrument_name)
+        _save_user_mapping(mapping)
+        
+        user_dir = _get_user_response_dir()
+        fits_path = os.path.join(user_dir, filename)
+        if os.path.exists(fits_path):
+            os.remove(fits_path)
+            print(f"Deleted instrument '{instrument_name}' and file {fits_path}")
+        else:
+            print(f"Removed instrument '{instrument_name}' from archive (file not found)")
+        return
+
+    if not user_only:
+        pkg_yaml = _get_package_yaml_path()
+        if os.path.exists(pkg_yaml):
+            with open(pkg_yaml, "r") as f:
+                pkg_mapping = yaml.safe_load(f) or {}
+            
+            if instrument_name in pkg_mapping:
+                filename = pkg_mapping.pop(instrument_name)
+                with open(pkg_yaml, "w") as f:
+                    yaml.safe_dump(pkg_mapping, f)
+                
+                pkg_dir = _get_package_response_dir()
+                fits_path = os.path.join(pkg_dir, filename)
+                if os.path.exists(fits_path):
+                    os.remove(fits_path)
+                    print(f"Deleted package instrument '{instrument_name}' and file {fits_path}")
+                else:
+                    print(f"Removed package instrument '{instrument_name}' from archive (file not found)")
+                return
+
+    raise ValueError(f"Instrument '{instrument_name}' not found in {'user' if user_only else 'any'} archive.")
+
+
 def _crop_response_matrix(
     matrix: np.ndarray,
     matrix_wave: np.ndarray,
