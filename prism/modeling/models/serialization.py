@@ -51,6 +51,9 @@ import warnings
 import numpy as np
 import pandas as pd
 import re
+import astropy.units as u
+
+from astropy.table import QTable
 
 from astropy.modeling.core import CompoundModel
 
@@ -105,6 +108,8 @@ def _linemodel_representer(dumper, obj):
     if isinstance(instfwhm_raw, np.ndarray):
         instfwhm_raw = instfwhm_raw.tolist()
     state['_instfwhm'] = instfwhm_raw
+    state['_domain'] = obj.domain
+    state['_medium'] = obj.medium
     if obj.name:
         state['_name'] = obj.name
     return dumper.represent_mapping(f'!prism.{obj.__class__.__name__}', state)
@@ -112,8 +117,10 @@ def _linemodel_representer(dumper, obj):
 def _linemodel_constructor(loader, node, cls):
     mapping = loader.construct_mapping(node, deep=True)
     instfwhm = mapping.pop('_instfwhm', 0.0)
+    domain = mapping.pop('_domain', 'wavelength')
+    medium = mapping.pop('_medium', 'air')
     mdl_name = mapping.pop('_name', None)
-    obj = cls(instfwhm=instfwhm, name=mdl_name)
+    obj = cls(instfwhm=instfwhm, domain=domain, medium=medium, name=mdl_name)
     for pn, state in mapping.items():
         if hasattr(obj, pn):
             _restore_param(obj, pn, state)
@@ -134,7 +141,16 @@ def _linegroup_representer(dumper, obj):
 
     state = {
         '_base': base_name,
-        '_df':   obj._df.to_dict(orient='records'),
+        '_linetable': [
+            {
+                'name': str(row['name']),
+                'position': float(row['position'].to_value(u.AA)),
+                'weight': float(row['weight']),
+            }
+            for row in obj._linetable
+        ],
+        '_medium': obj.lines.meta.get('medium', obj.medium),
+        '_domain': obj.domain,
     }
     instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
     if isinstance(instfwhm_raw, np.ndarray):
@@ -153,13 +169,20 @@ def _linegroup_constructor(loader, node):
     mapping = loader.construct_mapping(node, deep=True)
 
     base_name = mapping.pop('_base')
-    df_records = mapping.pop('_df')
+    records = mapping.pop('_linetable')
     instfwhm = mapping.pop('_instfwhm', 0.0)
+    domain = mapping.pop('_domain', 'wavelength')
+    medium = mapping.pop('_medium', 'air')
     mdl_name = mapping.pop('_name', None)
 
     base_cls = getattr(_lines_mod, base_name)
-    df = pd.DataFrame(df_records)
-    obj = base_cls.from_templates(df, instfwhm=instfwhm, name=mdl_name)
+    linetable = QTable()
+    linetable['name'] = [record['name'] for record in records]
+    linetable['position'] = [record['position'] for record in records] * u.AA
+    linetable['weight'] = [record['weight'] for record in records]
+    linetable.meta['medium'] = medium
+    obj = base_cls.from_templates(
+        linetable, instfwhm=instfwhm, name=mdl_name, domain=domain, medium=medium)
 
     for pn, state in mapping.items():
         if hasattr(obj, pn):

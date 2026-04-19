@@ -19,3 +19,7 @@ def __getattr__(name):
     if name in ('csv_lines_path', '_wmin', '_wmax', 'resource_path'):
         return getattr(_base, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# Activate YAML hooks even when users import line models directly.
+from .. import serialization as _serialization  # noqa: E402,F401

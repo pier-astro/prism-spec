@@ -17,6 +17,11 @@ import astropy.modeling.fitting as ast_fit
 import numpy as np
 
 from .multifit import MultiFitMixin
+from .utils import (
+    _free_parameter_indices,
+    _prime_tied_analytic_jacobian_warning,
+    _reduce_tied_analytic_jacobian,
+)
 
 
 def get_max_evaluations():
@@ -133,6 +138,8 @@ def _wrap_fitter_call(original_call):
             eval_model = model.copy()
         else:
             eval_model = model
+
+        _prime_tied_analytic_jacobian_warning(eval_model)
 
         # 3. Build call kwargs
         call_kwargs = kwargs.copy()
@@ -282,11 +289,58 @@ def _fitter_covariance(self):
     return None
 
 
+def _patch_astropy_tied_jacobian_wrapper():
+    """Patch Astropy's nonlinear fitter Jacobian wrapper once."""
+    fitter_cls = getattr(ast_fit, '_NonLinearLSQFitter', None)
+    if fitter_cls is None or getattr(fitter_cls, '_prism_tied_jacobian_patch', False):
+        return
+
+    original = fitter_cls.__dict__['_wrap_deriv']
+    original_func = original.__func__ if isinstance(original, staticmethod) else original
+
+    def _patched_wrap_deriv(params, model, weights, x, y, z=None, fit_param_indices=None):
+        if not model.has_tied:
+            return original_func(params, model, weights, x, y, z=z, fit_param_indices=fit_param_indices)
+
+        if weights is None:
+            weights = 1.0
+
+        ast_fit.fitter_to_model_params(model, params)
+        if z is None:
+            full = model.fit_deriv(x, *model.parameters)
+        else:
+            full = [np.ravel(item) for item in model.fit_deriv(x, y, *model.parameters)]
+
+        corrected = _reduce_tied_analytic_jacobian(
+            model,
+            full,
+            warn=True,
+            stacklevel=3,
+        )
+        weighted = np.ravel(weights) * corrected
+        fit_indices = fit_param_indices
+        if fit_indices is None:
+            fit_indices = _free_parameter_indices(model)
+        fit_indices = np.asarray(fit_indices, dtype=int)
+
+        if not model.col_fit_deriv:
+            residues = weighted[fit_indices].T
+        else:
+            residues = weighted[fit_indices]
+
+        return [np.ravel(item) for item in residues]
+
+    fitter_cls._wrap_deriv = staticmethod(_patched_wrap_deriv)
+    fitter_cls._prism_tied_jacobian_patch = True
+
+
 def patch_astropy_fitters():
     """
     Finds all astropy.modeling.fitting.Fitter subclasses and automatically
     adds prism's extensions (multifit, kwargs).
     """
+    _patch_astropy_tied_jacobian_wrapper()
+
     def get_all_subclasses(cls):
         all_subclasses = []
         for subclass in cls.__subclasses__():

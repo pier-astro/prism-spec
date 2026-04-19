@@ -13,6 +13,7 @@ import re
 import warnings
 
 import numpy as np
+import astropy.units as u
 from astropy.modeling import CompoundModel
 
 from .components import ModelComponents
@@ -98,6 +99,15 @@ def _format_value(value):
             return '-∞'
         return f"{val:.6g}"
     return str(val)
+
+
+def _format_unit(unit):
+    if unit in (None, ''):
+        return '—'
+    try:
+        return u.Unit(unit).to_string()
+    except Exception:
+        return str(unit)
 
 
 def _format_bounds(bounds):
@@ -281,6 +291,7 @@ def _iter_rows(model):
             'component': component,
             'parameter': param_name,
             'value': _format_value(getattr(param, 'value', param)),
+            'unit': _format_unit(getattr(param, 'unit', None)),
             'fixed': bool(getattr(param, 'fixed', False)),
             'tied': tied not in (False, None),
             'bounds': _format_bounds(getattr(param, 'bounds', None)),
@@ -288,7 +299,7 @@ def _iter_rows(model):
 
 
 def _column_names(model):
-    cols = ['Parameter', 'Value', 'Fixed', 'Tied', 'Bounds']
+    cols = ['Parameter', 'Value', 'Unit', 'Fixed', 'Tied', 'Bounds']
     if isinstance(model, CompoundModel):
         cols.insert(0, 'Component')
     return cols
@@ -417,6 +428,7 @@ def _iter_fit_rows(model):
             'component': row['component'],
             'parameter': row['parameter'],
             'value': row['value'],
+            'unit': row['unit'],
             'extra': extra,
             'limits': limits,
         }
@@ -433,7 +445,7 @@ def _has_fit_info(model):
 def format_model_text(model):
     rows = list(_iter_rows(model))
     headers = _column_names(model)
-    keys = ['parameter', 'value', 'fixed', 'tied', 'bounds']
+    keys = ['parameter', 'value', 'unit', 'fixed', 'tied', 'bounds']
     if isinstance(model, CompoundModel):
         keys.insert(0, 'component')
 
@@ -495,6 +507,7 @@ def format_model_html(model):
 
             html_lines.append(f'<td>{escape(str(row["parameter"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["value"]))}</td>')
+            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append(f'<td class="checkbox-cell">{_checkbox_html(row["fixed"])}</td>')
             html_lines.append(f'<td class="checkbox-cell">{_checkbox_html(row["tied"])}</td>')
             html_lines.append(f'<td>{escape(str(row["bounds"]))}</td>')
@@ -516,6 +529,8 @@ def format_fit_text(model):
 
     headers = ['Parameter', 'Value']
     keys = ['parameter', 'value_block']
+    headers.insert(2, 'Unit')
+    keys.insert(2, 'unit')
     if show_limits:
         headers.append('Limits')
         keys.append('limits')
@@ -554,10 +569,10 @@ def format_fit_html(model):
     if compound:
         html_lines.append('<th rowspan="2">Component</th>')
     html_lines.append('<th rowspan="2">Parameter</th>')
-    html_lines.append('<th colspan="2" style="text-align:center;">Value</th>')
+    html_lines.append('<th colspan="3" style="text-align:center;">Value</th>')
     if show_limits:
         html_lines.append('<th rowspan="2">Limits</th>')
-    html_lines.append('</tr><tr><th></th><th></th></tr></thead><tbody>')
+    html_lines.append('</tr><tr><th></th><th></th><th></th></tr></thead><tbody>')
 
     for group_index, (component, comp_rows) in enumerate(groups):
         for row_index, row in enumerate(comp_rows):
@@ -571,6 +586,7 @@ def format_fit_html(model):
 
             html_lines.append(f'<td>{escape(str(row["parameter"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["value"]))}</td>')
+            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["extra"]))}</td>')
             if show_limits:
                 html_lines.append(f'<td>{escape(str(row["limits"]))}</td>')
@@ -611,7 +627,12 @@ def _patched_repr(self):
     values = []
     for name in self.param_names[:4]:
         param = getattr(self, name)
-        values.append(f"{name}={_format_value(getattr(param, 'value', param))}")
+        value = _format_value(getattr(param, 'value', param))
+        unit = _format_unit(getattr(param, 'unit', None))
+        if unit != '—':
+            values.append(f"{name}={value} {unit}")
+        else:
+            values.append(f"{name}={value}")
 
     inner = ', '.join(values)
     if len(self.param_names) > 4:

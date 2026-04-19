@@ -16,6 +16,7 @@ while preserving analytic derivatives from the source model.
 from __future__ import annotations
 
 import numpy as np
+from astropy import units as u
 
 from astropy.modeling import CompoundModel, Fittable1DModel
 
@@ -72,6 +73,15 @@ class LinearOperatorModel(Fittable1DModel):
             )
         return self._matrix
 
+    def _parameter_units_for_data_units(self, inputs_unit, outputs_unit):
+        mapping = {}
+        for pname in self.param_names:
+            param = getattr(self, pname)
+            unit = getattr(param, 'unit', None)
+            if unit is not None:
+                mapping[pname] = unit
+        return mapping
+
     def evaluate(self, flux, *right_params):
         """Apply the operator directly to a flux array.
 
@@ -79,7 +89,9 @@ class LinearOperatorModel(Fittable1DModel):
         so this direct path is intended only for same-grid operators.
         Prism's patched pipe path calls ``_prism_pipe_evaluate`` instead.
         """
-        flux = np.asarray(flux).ravel()
+        flux_unit = flux.unit if isinstance(flux, u.Quantity) else None
+        flux_values = flux.to_value(flux_unit) if flux_unit is not None else flux
+        flux = np.asarray(flux_values).ravel()
         if self._x is not None:
             x = self._x
         else:
@@ -89,7 +101,8 @@ class LinearOperatorModel(Fittable1DModel):
             raise ValueError(
                 f"LinearOperatorModel expected {matrix.shape[1]} flux samples, got {flux.size}."
             )
-        return np.asarray(matrix.dot(flux)).ravel()
+        result = np.asarray(matrix.dot(flux)).ravel()
+        return result * flux_unit if flux_unit is not None else result
 
     @staticmethod
     def fit_deriv(flux, *right_params):
@@ -114,13 +127,16 @@ class LinearOperatorModel(Fittable1DModel):
             Current operator parameters extracted from the compound model.
         """
         x = np.asarray(left_inputs[0]).ravel()
-        flux = np.asarray(leftval).ravel()
+        flux_unit = leftval.unit if isinstance(leftval, u.Quantity) else None
+        flux_values = leftval.to_value(flux_unit) if flux_unit is not None else leftval
+        flux = np.asarray(flux_values).ravel()
         matrix = self.get_matrix(x, *right_params)
         if matrix.shape[1] != flux.size:
             raise ValueError(
                 f"LinearOperatorModel expected {matrix.shape[1]} flux samples, got {flux.size}."
             )
-        return np.asarray(matrix.dot(flux)).ravel()
+        result = np.asarray(matrix.dot(flux)).ravel()
+        return result * flux_unit if flux_unit is not None else result
 
     def _prism_pipe_fit_deriv(
         self,

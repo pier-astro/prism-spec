@@ -6,6 +6,7 @@ integrated-flux formulas, and velocity-parameterised wrappers used by the
 line model classes.
 """
 import numpy as np
+import astropy.units as u
 from scipy.special import wofz
 
 # ---------------------------------------------------------------------------
@@ -15,6 +16,57 @@ SIGMA2FWHM = 2 * np.sqrt(2 * np.log(2))
 SQRT_2PI = np.sqrt(2 * np.pi)
 SQRT_LN2 = np.sqrt(np.log(2))
 C_KMS = 299792.458  # speed of light in km/s (IAU)
+C_AA_S = 2.99792458e18  # speed of light in Angstrom / s
+HC_AA_EV = 12398.419843320027  # h * c in Angstrom * eV
+DOMAIN_UNITS = {
+    'wavelength': u.AA,
+    'frequency': u.Hz,
+    'energy': u.eV,
+}
+
+
+def domain_unit(domain):
+    try:
+        return DOMAIN_UNITS[domain]
+    except KeyError as exc:
+        raise ValueError(
+            "domain must be 'wavelength', 'frequency', or 'energy'.") from exc
+
+
+def to_wavelength_values(x, domain):
+    """Convert wavelength/frequency/energy samples to wavelength in Angstrom."""
+    arr = np.asanyarray(x, dtype=float)
+    if domain == 'wavelength':
+        return arr
+    if domain == 'frequency':
+        return C_AA_S / arr
+    if domain == 'energy':
+        return HC_AA_EV / arr
+    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
+
+
+def from_wavelength_values(wavelength, domain):
+    """Convert wavelength in Angstrom to the requested spectral domain."""
+    lam = np.asanyarray(wavelength, dtype=float)
+    if domain == 'wavelength':
+        return lam
+    if domain == 'frequency':
+        return C_AA_S / lam
+    if domain == 'energy':
+        return HC_AA_EV / lam
+    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
+
+
+def domain_jacobian(wavelength, domain):
+    """Return |d lambda / d domain| for spectral-density conversion."""
+    lam = np.asanyarray(wavelength, dtype=float)
+    if domain == 'wavelength':
+        return np.ones_like(lam, dtype=float)
+    if domain == 'frequency':
+        return lam ** 2 / C_AA_S
+    if domain == 'energy':
+        return lam ** 2 / HC_AA_EV
+    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
 
 # ---------------------------------------------------------------------------
 # Pure profile functions

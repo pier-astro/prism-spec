@@ -15,6 +15,7 @@ BSpline
     design matrix (efficient Jacobian for fitters).
 """
 import numpy as np
+from astropy import units as u
 from astropy.modeling import Fittable1DModel, Parameter
 from scipy.interpolate import interp1d, BSpline as _ScipyBSpline
 
@@ -45,18 +46,54 @@ class FixedTemplate(Fittable1DModel):
     n_outputs = 1
     
     def __init__(self, x, y, interp_kind='linear', fill_value=0.0, bounds_error=False, **kwargs):
-        self._x = np.asarray(x)
-        self._y = np.asarray(y)
+        self._x_unit = x.unit if isinstance(x, u.Quantity) else None
+        self._y_unit = y.unit if isinstance(y, u.Quantity) else None
+        self._x = np.asarray(x.to_value(self._x_unit), dtype=float) if self._x_unit is not None else np.asarray(x)
+        self._y = np.asarray(y.to_value(self._y_unit), dtype=float) if self._y_unit is not None else np.asarray(y)
+        self._interp_kind = interp_kind
+        self._fill_value = fill_value
+        self._bounds_error = bounds_error
+        self._build_interp()
+        super().__init__(**kwargs)
+
+    def _build_interp(self):
         self._interp = interp1d(
             self._x, self._y, 
-            kind=interp_kind, 
-            bounds_error=bounds_error, 
-            fill_value=fill_value
+            kind=self._interp_kind,
+            bounds_error=self._bounds_error,
+            fill_value=self._fill_value,
         )
-        super().__init__(**kwargs)
         
     def evaluate(self, x):
-        return self._interp(np.asarray(x))
+        if isinstance(x, u.Quantity):
+            x = x.to_value(self._x_unit) if self._x_unit is not None else x.value
+        result = self._interp(np.asarray(x))
+        return result * self._y_unit if self._y_unit is not None else result
+
+    def _parameter_units_for_data_units(self, inputs_unit, outputs_unit):
+        return {}
+
+    def without_units_for_data(self, **kwargs):
+        model = self.copy()
+        x_data = kwargs.get(self.inputs[0])
+        y_data = kwargs.get(self.outputs[0])
+        if model._x_unit is not None and isinstance(x_data, u.Quantity):
+            model._x = np.asarray((model._x * model._x_unit).to_value(x_data.unit), dtype=float)
+            model._x_unit = None
+        if model._y_unit is not None and isinstance(y_data, u.Quantity):
+            model._y = np.asarray((model._y * model._y_unit).to_value(y_data.unit), dtype=float)
+            model._y_unit = None
+        model._build_interp()
+        return model
+
+    def with_units_from_data(self, **kwargs):
+        model = self.copy()
+        x_data = kwargs.get(self.inputs[0])
+        y_data = kwargs.get(self.outputs[0])
+        model._x_unit = getattr(x_data, 'unit', None)
+        model._y_unit = getattr(y_data, 'unit', None)
+        model._build_interp()
+        return model
 
 class BSpline(Fittable1DModel):
     """
@@ -89,7 +126,8 @@ class BSpline(Fittable1DModel):
     n_outputs = 1
 
     def __new__(cls, knots, degree=3, name="BSpline", **kwargs):
-        knots = np.asarray(knots)
+        knot_unit = knots.unit if isinstance(knots, u.Quantity) else None
+        knots = np.asarray(knots.to_value(knot_unit), dtype=float) if knot_unit is not None else np.asarray(knots)
         ncoeffs = len(knots) - degree - 1
         if ncoeffs <= 0:
             raise ValueError("Invalid knot vector/degree: no spline coefficients available.")
@@ -97,23 +135,44 @@ class BSpline(Fittable1DModel):
         params = {f'c{i}': Parameter(default=1.0) for i in range(ncoeffs)}
 
         def evaluate(self, x, *coeffs):
-            spline = _ScipyBSpline(self._knots, coeffs, self._degree, extrapolate=True)
-            return spline(x)
+            output_unit = None
+            coeff_values = []
+            for coeff in coeffs:
+                if isinstance(coeff, u.Quantity):
+                    if output_unit is None:
+                        output_unit = coeff.unit
+                    coeff_values.append(coeff.to_value(output_unit))
+                else:
+                    coeff_values.append(coeff)
+            x_values = x.to_value(self._knot_unit) if isinstance(x, u.Quantity) and self._knot_unit is not None else np.asarray(x)
+            spline = _ScipyBSpline(self._knots, coeff_values, self._degree, extrapolate=True)
+            result = spline(x_values)
+            return result * output_unit if output_unit is not None else result
 
         def fit_deriv(self, x, *coeffs):
+            if isinstance(x, u.Quantity):
+                x = x.to_value(self._knot_unit) if self._knot_unit is not None else x.value
             design_matrix = _ScipyBSpline.design_matrix(
                 np.asarray(x), self._knots, self._degree, extrapolate=True
             )
             dense_matrix = design_matrix.toarray()
             return [dense_matrix[:, i] for i in range(self._ncoeffs)]
 
+        def _parameter_units_for_data_units(self, inputs_unit, outputs_unit):
+            return {
+                f'c{i}': outputs_unit[self.outputs[0]]
+                for i in range(self._ncoeffs)
+            }
+
         model_class = type(name, (Fittable1DModel,), {
             **params,
             'evaluate': evaluate,
             'fit_deriv': fit_deriv,
+            '_parameter_units_for_data_units': _parameter_units_for_data_units,
             'n_inputs': 1,
             'n_outputs': 1,
             '_knots': knots,
+            '_knot_unit': knot_unit,
             '_degree': degree,
             '_ncoeffs': ncoeffs,
         })

@@ -19,7 +19,7 @@ Instead it would be amazing is when importing prims we extend the astropy class 
 
 
 
-- Explore if, instead of saving the response models via a matrix in a file, we save it as a smart model with the recipe on how to build the matrix. Building it on the fly should not be a problem... However does it significantly simplify the code?
+- (DONE !!!!!!) Explore if, instead of saving the response models via a matrix in a file, we save it as a smart model with the recipe on how to build the matrix. Building it on the fly should not be a problem... However does it significantly simplify the code?
 Alternatively, explore if, if we give up about the analytic derivatives, we can simply use astropy CompoundModel to handle the convolution and the fit. If this is the case we can save a lot of code making maintainability much easier. Just evaluate the cases. Btw, to use the analytic via we always habe istfwhm in the models so we can use that... If yes, do not waste all this effor but let's save a well documented copy of the parts we plan to remove where we explain all the details and the rationale for the change. This will be useful for future reference and to avoid losing the work done.
 Use all the context you have in these deep dive in the code.
 
@@ -31,16 +31,19 @@ ADD UNIT AS COLUMN TO DISPLAY in the display module. Remeber the display module 
 
 - Make everyting less WAVELENGHT specific. Our routines are quite general! Just some aspects like the line models might strongly rely on the wavelength. In that case we might add a "domain" attribute to the line models to specify the domain of application (e.g. wavelength, frequency, energy) and then handle the specificities in the line models. Outise this domain simply raise a warning/error or NotImplementedError. This will make the package more general and potentially useful for other applications beyond spectroscopy.
 
+Do this transition to astropy poilicy on:
+- models. Both basic models and operator models
+- fitting. Both single fit and multifit
+- data
+- display
+- io and serialization
+
+
+
+
 - Test if saving, loading, display are working with native astropy models.
 
 
-
-
-
-
-
-
-- (likely not needed) Add error to link when tied parameter is not in the model. Verify how feasible is to add the .link attribute to the Astropy model calss (as we are doing with .save) to easily apply the tie function
 
 
 

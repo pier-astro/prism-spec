@@ -10,7 +10,13 @@ import numpy as np
 from scipy import optimize
 from numpy.linalg import LinAlgError
 from astropy.modeling.fitting import Fitter, model_to_fit_params
-from .utils import _get_tied_info, _apply_tied_fast
+from .utils import (
+    _analytic_jacobian_parameter_major,
+    _apply_tied_fast,
+    _get_tied_info,
+    _prime_tied_analytic_jacobian_warning,
+    _reduce_tied_analytic_jacobian,
+)
 
 __all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
 
@@ -32,16 +38,26 @@ class ScipyFitter(Fitter):
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
 
-    def _build_jacobian(self, model, x, fit_indices, tied_info, params_cache, weights):
+    @staticmethod
+    def _is_numeric_jacobian_request(jac):
+        return isinstance(jac, str) and jac in {'2-point', '3-point', 'cs'}
+
+    def _build_jacobian(self, model, x, fit_indices, tied_info, params_cache, weights, requested_jac):
         """Build Jacobian function with proper error handling."""
         use_analytic = True
+
+        if callable(requested_jac) or self._is_numeric_jacobian_request(requested_jac):
+            return requested_jac
         
         if not hasattr(model, 'fit_deriv'):
             return '2-point'
         
         try:
             # Test if fit_deriv works and check for NaNs/Infs
-            test_deriv = model.fit_deriv(x, *model.parameters)
+            test_deriv = _analytic_jacobian_parameter_major(
+                model,
+                model.fit_deriv(x, *model.parameters),
+            )
             
             if np.any(~np.isfinite(test_deriv)):
                 if self.verbose:
@@ -58,7 +74,12 @@ class ScipyFitter(Fitter):
                     _apply_tied_fast(model, tied_info, params_cache)
                 
                 # Get full jacobian
-                J_all = np.array(model.fit_deriv(x, *model.parameters))
+                J_all = _reduce_tied_analytic_jacobian(
+                    model,
+                    model.fit_deriv(x, *model.parameters),
+                    warn=bool(tied_info),
+                    stacklevel=3,
+                )
                 
                 # Check for NaNs/infs
                 if np.any(~np.isfinite(J_all)):
@@ -85,6 +106,7 @@ class ScipyFitter(Fitter):
         if yerr is not None and weights is None:
             weights = 1.0 / np.asarray(yerr)
         model = model.copy()
+        _prime_tied_analytic_jacobian_warning(model)
         init_values, fit_indices, _ = model_to_fit_params(model)
         bounds_list = [getattr(model, n).bounds for n in model.param_names]
         all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
@@ -119,18 +141,28 @@ class ScipyFitter(Fitter):
                 return diff * weights
             return diff
         
+        # Prepare final kwargs, merging init and call values
+        # Call kwargs take precedence over init kwargs
+        merged_kwargs = self.fit_kwargs.copy()
+        merged_kwargs.update(kwargs)
+
+        requested_jac = merged_kwargs.pop('jac', 'auto')
+
         # Build Jacobian
-        jac = self._build_jacobian(model, x, fit_indices, tied_info, params_cache, weights)
+        jac = self._build_jacobian(
+            model,
+            x,
+            fit_indices,
+            tied_info,
+            params_cache,
+            weights,
+            requested_jac,
+        )
         
         # Prepare bounds
         min_vals = param_bounds[:, 0]
         max_vals = param_bounds[:, 1]
         bounds = (min_vals, max_vals)
-        
-        # Prepare final kwargs, merging init and call values
-        # Call kwargs take precedence over init kwargs
-        merged_kwargs = self.fit_kwargs.copy()
-        merged_kwargs.update(kwargs)
         
         # Filter out prism-specific or problematic kwargs that scipy shouldn't see
         fit_kwargs = {k: v for k, v in merged_kwargs.items() 
@@ -211,13 +243,13 @@ class ScipyFitter(Fitter):
 
 class ScipyTRF(ScipyFitter):
     """SciPy trust-region reflective fitter."""
-    def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='2-point', **kwargs):
+    def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='auto', **kwargs):
         super().__init__(method='trf',
         ftol=ftol,     # Force stricter gradient/cost progression
         xtol=xtol,
         gtol=gtol,
         loss=loss,  # options: 'linear', 'huber', 'soft_l1', 'cauchy', 'arctan'
-        jac=jac,  # Use numeric Jacobian by default for robustness; overridden if model provides fit_deriv
+        jac=jac,  # 'auto' uses analytic derivatives when available; numeric strings force finite differences
         **kwargs)
 
 

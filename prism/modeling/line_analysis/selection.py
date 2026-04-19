@@ -10,6 +10,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import astropy.units as u
 
 from ..models.components import get_components
 from ..models.lines import (
@@ -71,30 +72,33 @@ def _linegroup_template_index(model, template_name):
 def _evaluate_linegroup_template(model, template_name, x):
     """Evaluate a single template within a ``LineGroupBase`` component."""
     idx, resolved = _linegroup_template_index(model, template_name)
-    amplitude = getattr(model, model._param_names_list[idx]).value
+    amplitude_param = getattr(model, model._param_names_list[idx])
+    amplitude = model._parameter_payload(amplitude_param)
+    amplitude_unit = getattr(amplitude_param, 'unit', None)
     shared_values = [getattr(model, pname).value
                      for pname in model._shared_params.keys()]
 
-    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-    total = np.zeros_like(x_arr, dtype=float)
+    x_native, jacobian, is_scalar = model._prepare_input_grid(x)
+    total = np.zeros_like(x_native, dtype=float)
     centers = []
     widths = []
 
     positions = model._tmpl_positions[idx]
     weights = model._tmpl_weights[idx]
     for pos, weight in zip(positions, weights):
-        args = model._single_profile_args(pos, amplitude, weight, *shared_values)
-        total += model._profile_func(x_arr, *args)
+        args = model._single_profile_args(
+            pos, amplitude, weight, *shared_values, output_unit=amplitude_unit)
+        total += model._profile_func(x_native, *args)
         centers.append(float(args[1]))
         widths.append(_profile_width_from_args(model, args))
 
-    return (total, np.asarray(centers, dtype=float),
+    values = model._finalize_output(total, jacobian, is_scalar, amplitude_unit)
+    return (values, np.asarray(centers, dtype=float),
             np.asarray(widths, dtype=float), resolved)
 
 
 def _evaluate_single_line(model, x):
-    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-    values = np.asarray(model(x_arr), dtype=float)
+    values = model(x)
     center = profiles.observed_center(
         model.position.value, model.offset.value, model.redshift.value)
 
@@ -112,27 +116,28 @@ def _evaluate_single_line(model, x):
 
 def _evaluate_component_profile(model, x):
     """Evaluate a full component profile, returning values, centers, widths."""
-    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-
     if isinstance(model, LineGroupBase):
-        values = np.asarray(model(x_arr), dtype=float)
+        values = model(x)
         centers = []
         widths = []
         shared_values = [getattr(model, pname).value
                          for pname in model._shared_params.keys()]
         for idx in range(model._n_templates):
-            amplitude = getattr(model, model._param_names_list[idx]).value
+            amplitude_param = getattr(model, model._param_names_list[idx])
+            amplitude = model._parameter_payload(amplitude_param)
+            amplitude_unit = getattr(amplitude_param, 'unit', None)
             for pos, weight in zip(model._tmpl_positions[idx],
                                    model._tmpl_weights[idx]):
                 args = model._single_profile_args(
-                    pos, amplitude, weight, *shared_values)
+                    pos, amplitude, weight, *shared_values,
+                    output_unit=amplitude_unit)
                 centers.append(float(args[1]))
                 widths.append(_profile_width_from_args(model, args))
         return (values, np.asarray(centers, dtype=float),
                 np.asarray(widths, dtype=float))
 
     if isinstance(model, _SINGLE_LINE_TYPES):
-        return _evaluate_single_line(model, x_arr)
+        return _evaluate_single_line(model, x)
 
     raise TypeError(
         f"Unsupported component type for line analysis: {type(model).__name__}")
@@ -147,6 +152,36 @@ def _is_multifit_like(obj) -> bool:
 def _component_name(component, fallback):
     name = getattr(component, 'name', None)
     return str(name) if name else str(fallback)
+
+
+def _normalize_unit(unit):
+    if unit in (None, ''):
+        return None
+    return u.Unit(unit)
+
+
+def _merge_output_units(units):
+    resolved = None
+    saw_unitless = False
+    saw_unitful = False
+    for unit in units:
+        unit = _normalize_unit(unit)
+        if unit is None:
+            saw_unitless = True
+            continue
+        saw_unitful = True
+        if resolved is None:
+            resolved = unit
+            continue
+        try:
+            (1.0 * unit).to(resolved)
+        except Exception as exc:
+            raise ValueError(
+                "Selected line combines components with incompatible output units.") from exc
+    if saw_unitless and saw_unitful:
+        raise ValueError(
+            "Selected line cannot mix unitless and quantity-valued components.")
+    return resolved
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -214,6 +249,79 @@ class SelectedLineProfile:
             source_model=model, selector=self.selector,
             entries=self.entries, additive=self.additive)
 
+    def _iter_components(self):
+        components = get_components(self.source_model, additive=self.additive)
+        for entry in self.entries:
+            yield components[entry.component_key]
+
+    @property
+    def domain(self):
+        domains = {getattr(component, 'domain', 'wavelength')
+                   for component in self._iter_components()}
+        if len(domains) != 1:
+            raise ValueError("Selected line combines components from different domains.")
+        return domains.pop()
+
+    @property
+    def axis_unit(self):
+        return profiles.domain_unit(self.domain)
+
+    @property
+    def output_unit(self):
+        return _merge_output_units(
+            getattr(component, '_model_output_unit', lambda: None)()
+            for component in self._iter_components())
+
+    @property
+    def flux_unit(self):
+        return None if self.output_unit is None else self.output_unit * self.axis_unit
+
+    @property
+    def eqw_unit(self):
+        return None if self.output_unit is None else self.axis_unit
+
+    def _coerce_domain_axis(self, x):
+        if isinstance(x, u.Quantity):
+            values = x.to_value(self.axis_unit, equivalencies=u.spectral())
+        else:
+            values = x
+        return np.atleast_1d(np.asarray(values, dtype=float))
+
+    def _coerce_output_array(self, values, name='value'):
+        output_unit = self.output_unit
+        if isinstance(values, u.Quantity):
+            if output_unit is None:
+                raise ValueError(
+                    f"{name} was provided as a Quantity, but this selection has no output unit.")
+            return np.asarray(values.to_value(output_unit), dtype=float)
+        return np.asarray(values, dtype=float)
+
+    def _coerce_output_scalar(self, value, name='value'):
+        output_unit = self.output_unit
+        if isinstance(value, u.Quantity):
+            if output_unit is None:
+                raise ValueError(
+                    f"{name} was provided as a Quantity, but this selection has no output unit.")
+            return float(np.asarray(value.to_value(output_unit), dtype=float).reshape(-1)[0])
+        return float(np.asarray(value, dtype=float).reshape(-1)[0])
+
+    def _restore_output(self, values, is_scalar=False):
+        out = np.asarray(values, dtype=float)
+        if self.output_unit is not None:
+            out = out * self.output_unit
+        return out[0] if is_scalar else out
+
+    def _probe_axis_value(self, component, entry):
+        if entry.template_name is None:
+            position = float(getattr(component.position, 'value', component.position))
+        else:
+            idx, _ = _linegroup_template_index(component, entry.template_name)
+            position = float(np.mean(component._tmpl_positions[idx]))
+        return np.asarray(
+            [float(profiles.from_wavelength_values(np.asarray([position], dtype=float), self.domain)[0])],
+            dtype=float,
+        )
+
     def _iter_evaluated_entries(self, x):
         components = get_components(self.source_model, additive=self.additive)
         for entry in self.entries:
@@ -230,12 +338,13 @@ class SelectedLineProfile:
         components = get_components(self.source_model, additive=self.additive)
         for entry in self.entries:
             component = components[entry.component_key]
+            probe_x = self._probe_axis_value(component, entry)
             if entry.template_name is None:
                 _, centers, widths = _evaluate_component_profile(
-                    component, np.asarray([0.0]))
+                    component, probe_x)
             else:
                 _, centers, widths, _ = _evaluate_linegroup_template(
-                    component, entry.template_name, np.asarray([0.0]))
+                    component, entry.template_name, probe_x)
             all_centers.extend(np.atleast_1d(centers).tolist())
             all_widths.extend(np.atleast_1d(widths).tolist())
 
@@ -246,17 +355,22 @@ class SelectedLineProfile:
         if centers.size == 0:
             raise ValueError(
                 "Cannot infer a wavelength window for an empty line selection.")
-        return (float(np.min(centers - padding * widths)),
-                float(np.max(centers + padding * widths)))
+        wave_window = np.array([
+            float(np.min(centers - padding * widths)),
+            float(np.max(centers + padding * widths)),
+        ], dtype=float)
+        if self.domain == 'wavelength':
+            return float(wave_window[0]), float(wave_window[1])
+        edges = profiles.from_wavelength_values(wave_window, self.domain)
+        return float(np.min(edges)), float(np.max(edges))
 
     def evaluate(self, x):
-        x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+        is_scalar = np.ndim(x) == 0
+        x_arr = self._coerce_domain_axis(x)
         total = np.zeros_like(x_arr, dtype=float)
         for values, _, _ in self._iter_evaluated_entries(x_arr):
-            total += values
-        if np.ndim(x) == 0:
-            return float(total[0])
-        return total
+            total += self._coerce_output_array(values, name='line profile')
+        return self._restore_output(total, is_scalar=is_scalar)
 
     def __call__(self, x):
         return self.evaluate(x)
@@ -308,7 +422,7 @@ class SelectedLineProfile:
             x_arr = np.linspace(
                 float(window[0]), float(window[1]), int(num), dtype=float)
         else:
-            x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+            x_arr = self._coerce_domain_axis(x)
 
         components = get_components(self.source_model, additive=self.additive)
         result = {}
@@ -323,7 +437,8 @@ class SelectedLineProfile:
                 key = entry.component_name
             if key in result:
                 key = f"{entry.component_name}/{entry.template_name or '*'}"
-            result[key] = values
+            result[key] = self._restore_output(
+                self._coerce_output_array(values, name='component profile'))
         return result
 
     def measure(self, x=None, window=None, num=4096):
@@ -360,34 +475,36 @@ class SelectedLineProfile:
             x_arr = np.linspace(
                 float(window[0]), float(window[1]), int(num), dtype=float)
         else:
-            x_arr = np.asarray(x, dtype=float)
+            x_arr = self._coerce_domain_axis(x)
 
-        y_line = np.asarray(self.evaluate(x_arr), dtype=float)
+        y_line = self._coerce_output_array(self.evaluate(x_arr), name='line profile')
         flux = float(_trapezoid(y_line, x_arr))
 
         if continuum is None:
             _wb = window if window is not None else self.infer_window()
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
-            x_cont = np.linspace(
-                centroid - sigma_est, centroid + sigma_est, 17, dtype=float)
-            cont_vals = (np.asarray(self.source_model(x_cont), dtype=float)
-                         - np.asarray(self.evaluate(x_cont), dtype=float))
+            wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
+            x_cont_edges = profiles.from_wavelength_values(wave_window, self.domain)
+            x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
+            cont_vals = (
+                self._coerce_output_array(self.source_model(x_cont), name='continuum model')
+                - self._coerce_output_array(self.evaluate(x_cont), name='line profile'))
             _fin = cont_vals[np.isfinite(cont_vals)]
             cont_c = float(np.median(_fin)) if _fin.size > 0 else float('nan')
             ew_val = (flux / cont_c) if (
                 np.isfinite(cont_c) and cont_c > 0.0) else float('nan')
-            result = Metric(value=ew_val)
+            result = Metric(value=ew_val, unit=self.eqw_unit)
         elif callable(continuum):
-            y_cont = np.asarray(continuum(x_arr), dtype=float)
+            y_cont = self._coerce_output_array(continuum(x_arr), name='continuum')
             safe = np.where(y_cont > 0.0, y_cont, np.nan)
             ew_val = float(_trapezoid(y_line / safe, x_arr))
-            result = Metric(value=ew_val)
+            result = Metric(value=ew_val, unit=self.eqw_unit)
         else:
-            cont_val = float(continuum)
+            cont_val = self._coerce_output_scalar(continuum, name='continuum')
             ew_val = (flux / cont_val) if (
                 np.isfinite(cont_val) and cont_val != 0.0) else float('nan')
-            result = Metric(value=ew_val)
+            result = Metric(value=ew_val, unit=self.eqw_unit)
 
         self.ew = result
         return result
@@ -409,31 +526,33 @@ class SelectedLineProfile:
             x_arr = np.linspace(
                 float(window[0]), float(window[1]), int(num), dtype=float)
         else:
-            x_arr = np.asarray(x, dtype=float)
+            x_arr = self._coerce_domain_axis(x)
 
         # Nominal EW
-        y_line_nom = np.asarray(self.evaluate(x_arr), dtype=float)
+        y_line_nom = self._coerce_output_array(self.evaluate(x_arr), name='line profile')
         flux_nom = float(_trapezoid(y_line_nom, x_arr))
         _wb = window if window is not None else self.infer_window()
 
         if continuum is None:
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
-            x_cont = np.linspace(
-                centroid - sigma_est, centroid + sigma_est, 17, dtype=float)
-            _cvals = (np.asarray(self.source_model(x_cont), dtype=float)
-                      - np.asarray(self.evaluate(x_cont), dtype=float))
+            wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
+            x_cont_edges = profiles.from_wavelength_values(wave_window, self.domain)
+            x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
+            _cvals = (
+                self._coerce_output_array(self.source_model(x_cont), name='continuum model')
+                - self._coerce_output_array(self.evaluate(x_cont), name='line profile'))
             _fin = _cvals[np.isfinite(_cvals)]
             _cc = float(np.median(_fin)) if _fin.size > 0 else float('nan')
             ew_nominal = (flux_nom / _cc) if (
                 np.isfinite(_cc) and _cc > 0.0) else float('nan')
             y_cont_nom = None
         elif callable(continuum):
-            y_cont_nom = np.asarray(continuum(x_arr), dtype=float)
+            y_cont_nom = self._coerce_output_array(continuum(x_arr), name='continuum')
             ew_nominal = _compute_ew_numerical(x_arr, y_line_nom, y_cont_nom)
             x_cont = None
         else:
-            _cv = float(continuum)
+            _cv = self._coerce_output_scalar(continuum, name='continuum')
             ew_nominal = (flux_nom / _cv) if (
                 np.isfinite(_cv) and _cv != 0.0) else float('nan')
             y_cont_nom = None
@@ -513,8 +632,8 @@ class SelectedLineProfile:
                     else:
                         vc, _, _, _ = _evaluate_linegroup_template(
                             comp, entry.template_name, x_cont)
-                    y_lxc += np.asarray(vc, dtype=float).ravel()[:len(x_cont)]
-                cvd = (np.asarray(working_model(x_cont), dtype=float) - y_lxc)
+                    y_lxc += self._coerce_output_array(vc, name='line profile').ravel()[:len(x_cont)]
+                cvd = self._coerce_output_array(working_model(x_cont), name='continuum model') - y_lxc
                 _fd = cvd[np.isfinite(cvd)]
                 cc = float(np.median(_fd)) if _fd.size > 0 else float('nan')
                 ew_samples[i] = (flux_draw / cc) if (
@@ -529,7 +648,7 @@ class SelectedLineProfile:
         # Aggregate
         finite = ew_samples[np.isfinite(ew_samples)]
         if finite.size == 0:
-            result = Metric(value=float(ew_nominal))
+            result = Metric(value=float(ew_nominal), unit=self.eqw_unit)
             self.ew = result
             return result
 
@@ -539,7 +658,8 @@ class SelectedLineProfile:
         result = Metric(
             value=float(ew_nominal),
             std=float(np.std(finite, ddof=1)) if finite.size > 1 else 0.0,
-            lolim=float(lo), uplim=float(up))
+            lolim=float(lo), uplim=float(up),
+            unit=self.eqw_unit)
         self.ew = result
         return result
 
@@ -577,6 +697,18 @@ class SelectedLineCollection:
     def shape(self):
         return self.source_result.shape
 
+    @property
+    def axis_unit(self):
+        return self.get_profile(0).axis_unit
+
+    @property
+    def output_unit(self):
+        return self.get_profile(0).output_unit
+
+    @property
+    def eqw_unit(self):
+        return self.get_profile(0).eqw_unit
+
     def get_profile(self, index):
         model = self.source_result.get_model(index)
         return select_line(
@@ -587,21 +719,25 @@ class SelectedLineCollection:
         return self.get_profile(index)
 
     def evaluate(self, x=None, spectral_axis=None):
-        eval_x = self.source_result._x if x is None else np.asarray(
-            x, dtype=float)
+        profile0 = self.get_profile(0)
+        eval_x = self.source_result._x if x is None else x
         if eval_x is None:
             raise ValueError(
                 "Provide x= or construct the MultiFitResult with x=.")
+        eval_x = profile0._coerce_domain_axis(eval_x)
         out = np.empty(self.shape + (eval_x.size,), dtype=float)
         for fi in range(self.source_result.n_spaxels):
             si = np.unravel_index(fi, self.shape)
-            out[si] = self.get_profile(fi)(eval_x)
+            profile = self.get_profile(fi)
+            out[si] = profile._coerce_output_array(profile(eval_x), name='line profile')
         target = (self.source_result.spectral_axis
                   if spectral_axis is None else spectral_axis)
         if target < 0:
             target += out.ndim
         if target != out.ndim - 1:
             out = np.moveaxis(out, -1, target)
+        if self.output_unit is not None:
+            return out * self.output_unit
         return out
 
     def __call__(self, x=None, spectral_axis=None):
@@ -619,6 +755,8 @@ class SelectedLineCollection:
             prof = self.get_profile(fi)
             m = prof.eqw(continuum=continuum, x=x, window=window, num=num)
             out[si] = m.value
+        if self.eqw_unit is not None:
+            return out * self.eqw_unit
         return out
 
 # ---------------------------------------------------------------------------

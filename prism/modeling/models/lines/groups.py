@@ -26,32 +26,28 @@ class LineGroupBase(LineModelBase):
 
     @classmethod
     def from_csv(cls, csv_files, name=None, dirpath=None, bounds=None,
-                 amplitude=None, instfwhm=0.0, **init_kwargs):
+                 amplitude=None, instfwhm=0.0, domain='wavelength',
+                 medium=None, position_unit=None, **init_kwargs):
         if not isinstance(csv_files, (list, tuple)):
             csv_files = [csv_files]
         if dirpath is None:
             dirpath = _base.csv_lines_path
 
-        dfs = []
+        tables = []
         for f in csv_files:
             path = f if os.path.isabs(f) else os.path.join(dirpath, f)
-            df_curr = pd.read_csv(path)
-            if not {'name', 'pos'}.issubset(df_curr.columns):
-                raise ValueError(
-                    f"CSV format not recognized in {path}. Required columns: name, pos.")
-            if 'weight' not in df_curr.columns:
-                df_curr['weight'] = 1.0
-                df_curr['name'] = _make_unique(df_curr['name'])
-            dfs.append(df_curr)
+            tables.append(_base.read_linetable(path, medium=medium, position_unit=position_unit))
 
-        df = pd.concat(dfs, ignore_index=True)
+        linetable = _base.stack_linetables(tables, medium=medium, position_unit=position_unit)
         return cls.from_templates(
-            df, name=name, bounds=bounds, amplitude=amplitude,
-            instfwhm=instfwhm, **init_kwargs)
+            linetable, name=name, bounds=bounds, amplitude=amplitude,
+            instfwhm=instfwhm, domain=domain, medium=medium,
+            position_unit=position_unit, **init_kwargs)
 
     @classmethod
     def from_arrays(cls, names, pos, weights=None, name=None, bounds=None,
-                    amplitude=None, instfwhm=0.0, **init_kwargs):
+                    amplitude=None, instfwhm=0.0, domain='wavelength',
+                    medium=None, position_unit=None, **init_kwargs):
         names = np.atleast_1d(names)
         pos = np.atleast_1d(pos)
         if weights is None:
@@ -59,20 +55,32 @@ class LineGroupBase(LineModelBase):
             names = _make_unique(names)
         else:
             weights = np.atleast_1d(weights)
-        df = pd.DataFrame({'name': names, 'pos': pos, 'weight': weights})
+        linetable = _base.normalize_linetable(
+            {'name': names, 'position': pos, 'weight': weights},
+            medium=medium,
+            position_unit=position_unit,
+        )
         return cls.from_templates(
-            df, name=name, bounds=bounds, amplitude=amplitude,
-            instfwhm=instfwhm, **init_kwargs)
+            linetable, name=name, bounds=bounds, amplitude=amplitude,
+            instfwhm=instfwhm, domain=domain, medium=medium,
+            position_unit=position_unit, **init_kwargs)
 
     @classmethod
-    def from_templates(cls, df, name=None, bounds=None, amplitude=None,
-                       instfwhm=0.0, **init_kwargs):
-        if 'pos' in df.columns:
-            df = df[(df.pos >= _base._wmin) & (df.pos <= _base._wmax)]
-        if df.empty:
+    def from_templates(cls, linetable, name=None, bounds=None, amplitude=None,
+                       instfwhm=0.0, domain='wavelength',
+                       medium=None, position_unit=None, **init_kwargs):
+        linetable = _base.normalize_linetable(
+            linetable,
+            medium=medium,
+            position_unit=position_unit,
+        )
+        position = linetable['position']
+        linetable = linetable[
+            (position >= _base._wmin * u.AA) & (position <= _base._wmax * u.AA)]
+        if len(linetable) == 0:
             raise ValueError(f"No lines found in the range [{_base._wmin}, {_base._wmax}]")
 
-        templates = pd.unique(df['name'])
+        templates = np.asarray(list(dict.fromkeys(np.asarray(linetable['name'], dtype=str))))
         _raw_param_names = [f"amp_{_clean_name(tmpl)}" for tmpl in templates]
         param_names = _make_unique(_raw_param_names)
         n_templates = len(templates)
@@ -80,9 +88,10 @@ class LineGroupBase(LineModelBase):
         _tmpl_positions = []
         _tmpl_weights = []
         for tmpl in templates:
-            df_tmpl = df[df['name'] == tmpl]
-            _tmpl_positions.append(df_tmpl['pos'].values)
-            _tmpl_weights.append(df_tmpl['weight'].values)
+            mask = np.asarray(linetable['name'], dtype=str) == tmpl
+            table_tmpl = linetable[mask]
+            _tmpl_positions.append(table_tmpl['position'].to_value(u.AA))
+            _tmpl_weights.append(np.asarray(table_tmpl['weight'], dtype=float))
 
         for pname in param_names:
             if amplitude is not None and pname not in init_kwargs:
@@ -103,42 +112,57 @@ class LineGroupBase(LineModelBase):
         params = {pname: Parameter(default=1.0) for pname in param_names}
         for pname, default in cls._shared_params.items():
             is_fixed = True if pname == 'redshift' else False
-            params[pname] = Parameter(default=default, fixed=is_fixed)
+            params[pname] = Parameter(
+                default=default, fixed=is_fixed, unit=cls._shared_units.get(pname))
 
         def evaluate(self, x, *args):
+            x_native, jacobian, is_scalar = self._prepare_input_grid(x)
             amplitudes = args[:n_templates]
+            amplitude_unit = self._common_output_unit(amplitudes)
             shared = args[n_templates:]
-            x_arr = np.atleast_1d(x)
-            total = np.zeros_like(x_arr, dtype=float)
+            shared_values = []
+            for idx, value in enumerate(shared):
+                pname = list(self._shared_params.keys())[idx]
+                punit = cls._shared_units.get(pname)
+                shared_values.append(self._as_value(value, punit))
+
+            total = np.zeros_like(x_native, dtype=float)
             for i in range(n_templates):
                 for j in range(len(_tmpl_positions[i])):
                     profile_args = self._single_profile_args(
                         _tmpl_positions[i][j], amplitudes[i],
-                        _tmpl_weights[i][j], *shared)
-                    total += cls._profile_func(x_arr, *profile_args)
-            if np.ndim(x) == 0:
-                return total[0]
-            return total
+                        _tmpl_weights[i][j], *shared_values, output_unit=amplitude_unit)
+                    total += cls._profile_func(x_native, *profile_args)
+            return self._finalize_output(total, jacobian, is_scalar, amplitude_unit)
 
         def fit_deriv(self, x, *args):
+            x_native, jacobian, _ = self._prepare_input_grid(x)
             amplitudes = args[:n_templates]
+            amplitude_unit = self._common_output_unit(amplitudes)
             shared = args[n_templates:]
-            x_arr = np.atleast_1d(x)
+            if amplitude_unit is not None and self.domain != 'wavelength':
+                raise NotImplementedError(
+                    "fit_deriv with quantity amplitudes is not supported for frequency or energy domains.")
+            shared_values = []
+            for idx, value in enumerate(shared):
+                pname = list(self._shared_params.keys())[idx]
+                punit = cls._shared_units.get(pname)
+                shared_values.append(self._as_value(value, punit))
             n_params = len(args)
-            n_x = len(x_arr)
+            n_x = len(x_native)
             grad = np.zeros((n_params, n_x))
-            d_shared = [np.zeros(n_x) for _ in shared]
+            d_shared = [np.zeros(n_x) for _ in shared_values]
             for i in range(n_templates):
                 for j in range(len(_tmpl_positions[i])):
                     derivs = self._single_profile_deriv(
-                        x_arr, _tmpl_positions[i][j], amplitudes[i],
-                        _tmpl_weights[i][j], *shared)
+                        x_native, _tmpl_positions[i][j], amplitudes[i],
+                        _tmpl_weights[i][j], *shared_values, output_unit=amplitude_unit)
                     grad[i] += derivs[1]
                     for k, d in enumerate(derivs[2:]):
                         d_shared[k] += d
             for j, d in enumerate(d_shared):
                 grad[n_templates + j] = d
-            return list(grad)
+            return [self._apply_domain_jacobian(d, jacobian) for d in grad]
 
         model_class = type(cls.__name__, (cls,), {
             **params,
@@ -146,7 +170,7 @@ class LineGroupBase(LineModelBase):
             'fit_deriv': fit_deriv,
             'n_inputs': 1,
             'n_outputs': 1,
-            '_df': df,
+            '_linetable': linetable,
             '_templates': templates,
             '_n_templates': n_templates,
             '_param_names_list': param_names,
@@ -155,7 +179,12 @@ class LineGroupBase(LineModelBase):
         })
         if name is not None:
             init_kwargs['name'] = name
-        return model_class(bounds=param_bounds, instfwhm=instfwhm, **init_kwargs)
+        return model_class(
+            bounds=param_bounds,
+            instfwhm=instfwhm,
+            domain=domain,
+            medium=linetable.meta.get('medium', medium),
+            **init_kwargs)
 
     # ------------------------------------------------------------------
     # Properties
@@ -163,8 +192,8 @@ class LineGroupBase(LineModelBase):
 
     @property
     def lines(self):
-        """DataFrame containing the physical lines in this model group."""
-        return self._df
+        """QTable containing the physical lines in this model group."""
+        return self._linetable
 
     @property
     def flux(self) -> pd.DataFrame:
@@ -177,9 +206,11 @@ class LineGroupBase(LineModelBase):
             idx = self._param_names_list.index(pname)
             positions = self._tmpl_positions[idx]
             weights = self._tmpl_weights[idx]
+            amp_payload = self._parameter_payload(amp)
+            flux_unit = self._flux_unit(getattr(amp, 'unit', None))
 
             total_flux = sum(
-                self._calc_flux(pos, amp.value * wt, *shared_values)
+                self._calc_flux(pos, amp_payload * wt, *shared_values)
                 for pos, wt in zip(positions, weights))
 
             flux_std = self._propagate_template_flux_std(
@@ -192,8 +223,9 @@ class LineGroupBase(LineModelBase):
                 'std': float(flux_std) if flux_std is not None else float('nan'),
                 'lolim': float(flux_lo) if flux_lo is not None else float('nan'),
                 'uplim': float(flux_hi) if flux_hi is not None else float('nan'),
+                'unit': flux_unit,
             })
-        return pd.DataFrame(rows, index=list(self._templates))
+        return self._metric_frame(rows, self._templates)
 
     # ------------------------------------------------------------------
     # Equivalent width
@@ -217,15 +249,16 @@ class LineGroupBase(LineModelBase):
                     zip(self._templates, self._param_names_list)):
                 positions = self._tmpl_positions[idx]
                 weights = self._tmpl_weights[idx]
-                amplitude = getattr(self, pname).value
+                amplitude_param = getattr(self, pname)
+                amplitude = self._parameter_payload(amplitude_param)
+                output_unit = getattr(amplitude_param, 'unit', None)
                 center_aa = float(np.mean(positions)) * (1.0 + redshift)
-                x_c = np.array([center_aa])
                 peak = 0.0
                 for pos, weight in zip(positions, weights):
                     args = self._single_profile_args(
-                        pos, amplitude, weight, *shared_values)
-                    peak += float(
-                        self._profile_func(x_c, *args).ravel()[0])
+                        pos, amplitude, weight, *shared_values, output_unit=output_unit)
+                    peak += float(self._profile_func(np.array([center_aa]), *args).ravel()[0])
+                peak *= self._center_jacobian(center_aa)
                 if np.isfinite(peak) and peak > 0.0:
                     f_row = flux_df.loc[tmpl]
                     rows.append({
@@ -236,24 +269,40 @@ class LineGroupBase(LineModelBase):
                                 if np.isfinite(f_row['lolim']) else float('nan'),
                         'uplim': float(f_row['uplim']) / peak
                                 if np.isfinite(f_row['uplim']) else float('nan'),
+                        'unit': self._eqw_unit(output_unit),
                     })
                 else:
                     rows.append({'value': float('nan'), 'std': float('nan'),
-                                 'lolim': float('nan'), 'uplim': float('nan')})
-            result = pd.DataFrame(rows, index=list(self._templates))
+                                 'lolim': float('nan'), 'uplim': float('nan'),
+                                 'unit': self._eqw_unit(output_unit)})
+            result = self._metric_frame(rows, self._templates)
             self.ew = result
             return result
 
         if method == 'constant-continuum':
-            continuum_val = float(continuum)
-            if not np.isfinite(continuum_val) or continuum_val == 0.0:
-                rows = [{'value': float('nan'), 'std': float('nan'),
-                         'lolim': float('nan'), 'uplim': float('nan')}
-                        for _ in self._templates]
-                result = pd.DataFrame(rows, index=list(self._templates))
-                self.ew = result
-                return result
-            result = self.flux / continuum_val
+            flux_df = self.flux
+            rows = []
+            for tmpl, pname in zip(self._templates, self._param_names_list):
+                amp = getattr(self, pname)
+                output_unit = getattr(amp, 'unit', None)
+                continuum_val = self._coerce_output_scalar(continuum, output_unit, name='continuum')
+                if not np.isfinite(continuum_val) or continuum_val == 0.0:
+                    rows.append({'value': float('nan'), 'std': float('nan'),
+                                 'lolim': float('nan'), 'uplim': float('nan'),
+                                 'unit': self._eqw_unit(output_unit)})
+                    continue
+                f_row = flux_df.loc[tmpl]
+                rows.append({
+                    'value': float(f_row['value']) / continuum_val,
+                    'std': float(f_row['std']) / abs(continuum_val)
+                           if np.isfinite(f_row['std']) else float('nan'),
+                    'lolim': float(f_row['lolim']) / continuum_val
+                             if np.isfinite(f_row['lolim']) else float('nan'),
+                    'uplim': float(f_row['uplim']) / continuum_val
+                             if np.isfinite(f_row['uplim']) else float('nan'),
+                    'unit': self._eqw_unit(output_unit),
+                })
+            result = self._metric_frame(rows, self._templates)
             self.ew = result
             return result
 
@@ -265,7 +314,9 @@ class LineGroupBase(LineModelBase):
                     zip(self._templates, self._param_names_list)):
                 positions = self._tmpl_positions[idx]
                 weights = self._tmpl_weights[idx]
-                amplitude = getattr(self, pname).value
+                amplitude_param = getattr(self, pname)
+                amplitude = self._parameter_payload(amplitude_param)
+                output_unit = getattr(amplitude_param, 'unit', None)
 
                 if x is None:
                     centers = [pos * (1.0 + shared_values[-1])
@@ -281,28 +332,30 @@ class LineGroupBase(LineModelBase):
                         _window = (mean_c - hw, mean_c + hw)
                     else:
                         _window = window
-                    x_arr = np.linspace(
-                        float(_window[0]), float(_window[1]),
-                        int(num), dtype=float)
+                    x_arr = self._default_domain_grid(mean_c, max(fwhm_aa, 0.1), window=_window, num=num)
                 else:
-                    x_arr = np.asarray(x, dtype=float)
+                    x_arr = self._coerce_domain_axis(x)
 
-                y_line = np.zeros_like(x_arr)
+                x_native = profiles.to_wavelength_values(x_arr, self.domain)
+                jacobian = profiles.domain_jacobian(x_native, self.domain)
+                y_line = np.zeros_like(x_arr, dtype=float)
                 for pos, weight in zip(positions, weights):
                     args = self._single_profile_args(
-                        pos, amplitude, weight, *shared_values)
-                    y_line += self._profile_func(x_arr, *args)
+                        pos, amplitude, weight, *shared_values, output_unit=output_unit)
+                    y_line += self._profile_func(x_native, *args) * jacobian
 
                 if callable(continuum):
-                    y_cont = np.asarray(continuum(x_arr), dtype=float)
+                    y_cont = self._coerce_output_array(continuum(x_arr), output_unit, name='continuum')
                 else:
-                    y_cont = np.full_like(x_arr, float(continuum))
+                    continuum_val = self._coerce_output_scalar(continuum, output_unit, name='continuum')
+                    y_cont = np.full_like(x_arr, continuum_val, dtype=float)
                 safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
                 ew_val = float(_trap(y_line / safe, x_arr))
                 rows.append({'value': ew_val, 'std': float('nan'),
-                             'lolim': float('nan'), 'uplim': float('nan')})
+                             'lolim': float('nan'), 'uplim': float('nan'),
+                             'unit': self._eqw_unit(output_unit)})
 
-            result = pd.DataFrame(rows, index=list(self._templates))
+            result = self._metric_frame(rows, self._templates)
             self.ew = result
             return result
 
@@ -316,7 +369,8 @@ class LineGroupBase(LineModelBase):
 
     def _template_flux(self, amp_pname, positions, weights):
         shared = [getattr(self, sp).value for sp in self._shared_params.keys()]
-        amp = getattr(self, amp_pname).value
+        param = getattr(self, amp_pname)
+        amp = self._parameter_payload(param)
         return sum(
             self._calc_flux(pos, amp * wt, *shared)
             for pos, wt in zip(positions, weights))
@@ -409,14 +463,16 @@ class GaussianLines(LineGroupBase):
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.gaussian)
 
-    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift):
+    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift, output_unit=None):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit)
         amp_eff, sigma_eff = profiles.gaussian_profile_params(
             center, amp, weight, fwhm, redshift, self.instfwhm_val(center))
         return (amp_eff, center, sigma_eff)
 
-    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift):
+    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift, output_unit=None):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit, for_deriv=True)
         val, d_amp, _, d_off, d_fwhm, d_z = profiles.gaussian_velocity_deriv(
             x, pos, amp, weight, offset, fwhm, redshift,
             self.instfwhm_val(center), self.instfwhm_deriv(center))
@@ -424,6 +480,7 @@ class GaussianLines(LineGroupBase):
 
     def _calc_flux(self, pos, amp, offset, fwhm, redshift):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center)
         amp_eff, sigma_eff = profiles.gaussian_profile_params(
             center, amp, 1.0, fwhm, redshift, self.instfwhm_val(center))
         return profiles.gaussian_flux(amp_eff, sigma_eff)
@@ -434,17 +491,20 @@ class LorentzianLines(LineGroupBase):
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
 
-    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift):
+    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift, output_unit=None):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit)
         amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
             center, amp, weight, fwhm, redshift, self.instfwhm_val(center))
         return (amp_eff, center, sigma_inst, gamma)
 
-    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift):
+    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift, output_unit=None):
         eps = 1e-6
+        center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit, for_deriv=True)
 
         def _eval(a, o, f, z):
-            args = self._single_profile_args(pos, a, weight, o, f, z)
+            args = self._single_profile_args(pos, a, weight, o, f, z, output_unit=output_unit)
             return self._profile_func(x, *args)
 
         val = _eval(amp, offset, fwhm, redshift)
@@ -467,6 +527,7 @@ class LorentzianLines(LineGroupBase):
 
     def _calc_flux(self, pos, amp, offset, fwhm, redshift):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center)
         amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
             center, amp, 1.0, fwhm, redshift, self.instfwhm_val(center))
         if sigma_inst == 0.0:
@@ -482,16 +543,18 @@ class VoigtLines(LineGroupBase):
     _profile_func = staticmethod(profiles.voigt)
 
     def _single_profile_args(self, pos, amp, weight, offset,
-                             fwhm_G, fwhm_L, redshift):
+                             fwhm_G, fwhm_L, redshift, output_unit=None):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit)
         amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
             center, amp, weight, fwhm_G, fwhm_L, redshift,
             self.instfwhm_val(center))
         return (amp_eff, center, sigma_eff, gamma)
 
     def _single_profile_deriv(self, x, pos, amp, weight, offset,
-                              fwhm_G, fwhm_L, redshift):
+                              fwhm_G, fwhm_L, redshift, output_unit=None):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center, output_unit=output_unit, for_deriv=True)
         val, d_amp, _, d_off, d_fG, d_fL, d_z = profiles.voigt_velocity_deriv(
             x, pos, amp, weight, offset, fwhm_G, fwhm_L, redshift,
             self.instfwhm_val(center), self.instfwhm_deriv(center))
@@ -499,6 +562,7 @@ class VoigtLines(LineGroupBase):
 
     def _calc_flux(self, pos, amp, offset, fwhm_G, fwhm_L, redshift):
         center = profiles.observed_center(pos, offset, redshift)
+        amp, _ = self._native_amplitude_value(amp, center)
         amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
             center, amp, 1.0, fwhm_G, fwhm_L, redshift,
             self.instfwhm_val(center))

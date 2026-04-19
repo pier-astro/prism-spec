@@ -6,6 +6,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import astropy.units as u
 from astropy.modeling.fitting import model_to_fit_params
 
 from ..models.components import get_components
@@ -54,10 +55,56 @@ _METRIC_BOUNDS = {
 }
 
 
-def _as_metric(value) -> Metric:
+def _normalize_unit(unit):
+    if unit in (None, ''):
+        return None
+    return u.Unit(unit)
+
+
+def _metric_units(axis_unit=None, output_unit=None):
+    axis_unit = _normalize_unit(axis_unit)
+    output_unit = _normalize_unit(output_unit)
+    flux_unit = None if output_unit is None or axis_unit is None else output_unit * axis_unit
+    return {
+        'flux': flux_unit,
+        'peak_value': output_unit,
+        'peak_position': axis_unit,
+        'fwhm': axis_unit,
+        'hw_blue': axis_unit,
+        'hw_red': axis_unit,
+        'asymmetry': None,
+        'moment1': axis_unit,
+        'moment2': None if axis_unit is None else axis_unit ** 2,
+        'sigma': axis_unit,
+        'skewness': None,
+        'kurtosis': None,
+        'fw10m': axis_unit,
+        'fw20m': axis_unit,
+        'fw80m': axis_unit,
+        'bisector_span': axis_unit,
+    }
+
+
+def _as_metric(value, unit=None) -> Metric:
+    unit = _normalize_unit(unit)
     if isinstance(value, Metric):
-        return value
-    return Metric(value=float(value) if value is not None else float('nan'))
+        if value.unit is None or unit is None or value.unit == unit:
+            return Metric(
+                value=float(value.value), std=float(value.std),
+                lolim=float(value.lolim), uplim=float(value.uplim),
+                unit=value.unit if unit is None else unit)
+        scale = (1.0 * value.unit).to_value(unit)
+        return Metric(
+            value=float(value.value) * scale,
+            std=float(value.std) * scale if np.isfinite(value.std) else float('nan'),
+            lolim=float(value.lolim) * scale if np.isfinite(value.lolim) else float('nan'),
+            uplim=float(value.uplim) * scale if np.isfinite(value.uplim) else float('nan'),
+            unit=unit,
+        )
+    if isinstance(value, u.Quantity):
+        target_unit = value.unit if unit is None else unit
+        return Metric(value=float(value.to_value(target_unit)), unit=target_unit)
+    return Metric(value=float(value) if value is not None else float('nan'), unit=unit)
 
 # ---------------------------------------------------------------------------
 # Result classes
@@ -66,14 +113,23 @@ def _as_metric(value) -> Metric:
 class LineResult:
     """Measurement results for a selected emission line."""
 
-    def __init__(self, selector, mode, wave_min, wave_max, n_grid, metrics):
+    def __init__(self, selector, mode, wave_min, wave_max, n_grid, metrics,
+                 metric_units=None, axis_unit=None):
         self.selector = str(selector)
         self.mode = str(mode)
         self.wave_min = float(wave_min)
         self.wave_max = float(wave_max)
         self.n_grid = int(n_grid)
+        self.axis_unit = _normalize_unit(axis_unit)
+        self.metric_units = {
+            name: _normalize_unit(unit)
+            for name, unit in (metric_units or {}).items()
+        }
         for name in _METRIC_NAMES:
-            setattr(self, name, _as_metric(metrics.get(name, float('nan'))))
+            setattr(
+                self, name,
+                _as_metric(metrics.get(name, float('nan')),
+                           unit=self.metric_units.get(name)))
 
     def to_frame(self, metrics=None) -> pd.DataFrame:
         names = list(metrics) if metrics is not None else _METRIC_NAMES
@@ -82,7 +138,8 @@ class LineResult:
             m = getattr(self, name, Metric(value=float('nan')))
             rows[name] = {
                 'value': m.value, 'std': m.std,
-                'lolim': m.lolim, 'uplim': m.uplim}
+                'lolim': m.lolim, 'uplim': m.uplim,
+                'unit': m.unit}
         return pd.DataFrame(rows).T
 
     def __repr__(self):
@@ -94,10 +151,16 @@ class LineResult:
 class MultiLineMeasurements:
     """Batch measurement results over a spatial grid."""
 
-    def __init__(self, selector, mode, shape, **metric_arrays):
+    def __init__(self, selector, mode, shape, metric_units=None, axis_unit=None,
+                 **metric_arrays):
         self.selector = str(selector)
         self.mode = str(mode)
         self.shape = tuple(shape)
+        self.axis_unit = _normalize_unit(axis_unit)
+        self.metric_units = {
+            name: _normalize_unit(unit)
+            for name, unit in (metric_units or {}).items()
+        }
         for name in _METRIC_NAMES:
             setattr(self, name, np.asarray(
                 metric_arrays.get(name, np.full(shape, np.nan)), dtype=float))
@@ -117,7 +180,8 @@ class MultiLineMeasurements:
             selector=self.selector, mode=self.mode,
             wave_min=float(self.wave_min[idx]),
             wave_max=float(self.wave_max[idx]),
-            n_grid=int(self.n_grid[idx]), metrics=metrics)
+            n_grid=int(self.n_grid[idx]), metrics=metrics,
+            metric_units=self.metric_units, axis_unit=self.axis_unit)
 
 # ---------------------------------------------------------------------------
 # Profile metrics
@@ -248,6 +312,8 @@ def measure_line(model_or_selection, selector=None,
         wave_min = np.full(selection.shape, np.nan, dtype=float)
         wave_max = np.full(selection.shape, np.nan, dtype=float)
         n_grid = np.zeros(selection.shape, dtype=int)
+        metric_units = None
+        axis_unit = None
         for fi in range(selection.source_result.n_spaxels):
             si = np.unravel_index(fi, selection.shape)
             m = selection.get_profile(fi).measure(x=x, window=window, num=num)
@@ -256,9 +322,13 @@ def measure_line(model_or_selection, selector=None,
             wave_min[si] = m.wave_min
             wave_max[si] = m.wave_max
             n_grid[si] = m.n_grid
+            if metric_units is None:
+                metric_units = m.metric_units
+                axis_unit = m.axis_unit
         return MultiLineMeasurements(
             selector=selection.selector, mode='auto',
             shape=selection.shape,
+            metric_units=metric_units, axis_unit=axis_unit,
             wave_min=wave_min, wave_max=wave_max, n_grid=n_grid, **arrays)
 
     if x is None:
@@ -267,17 +337,23 @@ def measure_line(model_or_selection, selector=None,
         x_arr = np.linspace(
             float(window[0]), float(window[1]), int(num), dtype=float)
     else:
-        x_arr = np.asarray(x, dtype=float)
+        x_arr = selection._coerce_domain_axis(x)
         if x_arr.ndim != 1 or x_arr.size < 3:
             raise ValueError(
-                "x must be a 1-D wavelength grid with at least three samples.")
+                "x must be a 1-D spectral grid with at least three samples.")
 
-    y_arr = np.asarray(selection.evaluate(x_arr), dtype=float)
-    metrics = _compute_profile_metrics(x_arr, y_arr)
+    y_arr = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
+    raw_metrics = _compute_profile_metrics(x_arr, y_arr)
+    units = _metric_units(selection.axis_unit, selection.output_unit)
+    metrics = {
+        name: Metric(value=float(value), unit=units.get(name))
+        for name, value in raw_metrics.items()
+    }
     return LineResult(
         selector=selection.selector, mode='auto',
         wave_min=float(x_arr[0]), wave_max=float(x_arr[-1]),
-        n_grid=int(x_arr.size), metrics=metrics)
+        n_grid=int(x_arr.size), metrics=metrics,
+        metric_units=units, axis_unit=selection.axis_unit)
 
 # ---------------------------------------------------------------------------
 # Parameter sampling utilities
@@ -544,15 +620,16 @@ def sample_line_measurements(model_or_selection, selector=None,
         x_arr = np.linspace(
             float(window[0]), float(window[1]), int(num), dtype=float)
     else:
-        x_arr = np.asarray(x, dtype=float)
+        x_arr = selection._coerce_domain_axis(x)
 
     model = selection.source_model
     specs, draws = _draw_selection_samples(
         selection, n_samples=n_samples, method=method,
         distribution=distribution, random_state=random_state)
 
-    y_nominal = np.asarray(selection.evaluate(x_arr), dtype=float)
+    y_nominal = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
     nominal_metrics = _compute_profile_metrics(x_arr, y_nominal)
+    metric_units = _metric_units(selection.axis_unit, selection.output_unit)
 
     working_model = model.copy()
     working_comps = get_components(working_model, additive=selection.additive)
@@ -571,7 +648,7 @@ def sample_line_measurements(model_or_selection, selector=None,
             else:
                 vals, _, _, _ = _evaluate_linegroup_template(
                     comp, entry.template_name, x_arr)
-            y_sampled += vals
+            y_sampled += selection._coerce_output_array(vals, name='line profile')
         sample_records.append(_compute_profile_metrics(x_arr, y_sampled))
 
     alpha = (100.0 - float(confidence)) / 2.0
@@ -582,14 +659,15 @@ def sample_line_measurements(model_or_selection, selector=None,
             [rec.get(name, float('nan')) for rec in sample_records], dtype=float)
         finite = values[np.isfinite(values)]
         if finite.size == 0:
-            sampled_metrics[name] = Metric(value=float(nom))
+            sampled_metrics[name] = Metric(value=float(nom), unit=metric_units.get(name))
         else:
             bp = _METRIC_BOUNDS.get(name, _NO_BOUNDS)
             lo, up = extract_limits(bp, values, alpha, 100.0 - alpha)
             sampled_metrics[name] = Metric(
                 value=float(nom),
                 std=float(np.std(finite, ddof=1)) if finite.size > 1 else 0.0,
-                lolim=float(lo), uplim=float(up))
+                lolim=float(lo), uplim=float(up),
+                unit=metric_units.get(name))
 
     if np.any(~np.isfinite(
             np.array([r.get('fwhm', float('nan')) for r in sample_records]))):
@@ -600,7 +678,8 @@ def sample_line_measurements(model_or_selection, selector=None,
     result = LineResult(
         selector=selection.selector, mode='auto',
         wave_min=float(x_arr[0]), wave_max=float(x_arr[-1]),
-        n_grid=int(x_arr.size), metrics=sampled_metrics)
+        n_grid=int(x_arr.size), metrics=sampled_metrics,
+        metric_units=metric_units, axis_unit=selection.axis_unit)
     if return_samples:
         return result, pd.DataFrame(sample_records)
     return result

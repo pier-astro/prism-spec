@@ -74,7 +74,7 @@ from prism.modeling.models import setup_local_lines, Powerlaw, nlr, blr
 # Optional: create local filtered CSV line lists
 setup_local_lines(wmin=4000, wmax=8000, dirpath="./lines", overwrite=False)
 
-continuum = Powerlaw(amplitude=1.0, x_ref=5500.0, index=-1.5)
+continuum = Powerlaw(amplitude=1.0, x0=5500.0, index=-1.5)
 narrow = nlr(name="nlr", instfwhm=120.0)
 broad = blr(name="blr", instfwhm=120.0)
 

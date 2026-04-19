@@ -19,7 +19,7 @@ Line-group models
 Continuum models
 ----------------
 ``Powerlaw``
-    Simple power law: ``amplitude * (x / x_ref) ** index``.
+    Simple power law: ``amplitude * (x / x0) ** index``.
 ``BrokenPowerlaw``
     Broken power law with different slopes below/above a break wavelength.
 ``BalmerContinuum``
