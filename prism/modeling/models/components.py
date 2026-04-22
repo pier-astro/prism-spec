@@ -147,6 +147,14 @@ class ModelComponents(dict):
         """Return components as a plain list."""
         return self._components.copy()
 
+    def __iter__(self):
+        """Iterate over logical components in index order."""
+        return iter(self._components)
+
+    def __len__(self):
+        """Return the number of logical components, not alias keys."""
+        return len(self._components)
+
     def __repr__(self):
         mode = "additive-only" if self._additive_only else "all"
         n = len(self._components)

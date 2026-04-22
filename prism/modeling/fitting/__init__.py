@@ -1,8 +1,9 @@
 """
-prism.modeling.fitting — fitter backends and batch fitting utilities.
+prism.modeling.fitting — fitter backends, Astropy-style wrappers, and batch fitting utilities.
 
-This package dynamically extends Astropy fitters to seamlessly support prism's
-features like weights from `yerr` and `.multifit()`.
+This package exposes Prism-native fitters together with Prism-owned wrappers
+around selected Astropy fitters. Native ``astropy.modeling.fitting`` classes
+are no longer patched broadly.
 
 Main classes
 ------------
@@ -21,7 +22,8 @@ MultiFitResult, SpectrumFitResult, MultiFitParameter
 	Structured outputs for batched fits across cubes/maps.
 """
 
-from . import utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty
+from . import astropyfitters, utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty
+from .astropyfitters import *
 from .utils import *
 from .scipyfit import *
 from .sherpafit import *
@@ -29,8 +31,8 @@ from .lmfit import *
 from .multifit import *
 from .outremoval import *
 
-from .extension import patch_astropy_fitters
-patch_astropy_fitters()
+from .extension import enable_astropy_fitting_compatibility_patch
+enable_astropy_fitting_compatibility_patch()
 
 from ..io import install_model_io_methods
 install_model_io_methods()
@@ -38,6 +40,7 @@ install_model_io_methods()
 __all__ = [
     'tie', 'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter'
 ]
+__all__.extend(astropyfitters.__all__)
 __all__.extend(scipyfit.__all__)
 __all__.extend(sherpafit.__all__)
 __all__.extend(lmfit.__all__)

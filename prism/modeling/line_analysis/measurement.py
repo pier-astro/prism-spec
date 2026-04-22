@@ -647,7 +647,8 @@ def sample_line_measurements(model_or_selection, selector=None,
                 vals, _, _ = _evaluate_component_profile(comp, x_arr)
             else:
                 vals, _, _, _ = _evaluate_linegroup_template(
-                    comp, entry.template_name, x_arr)
+                    comp, entry.template_name, x_arr,
+                    position=entry.template_position)
             y_sampled += selection._coerce_output_array(vals, name='line profile')
         sample_records.append(_compute_profile_metrics(x_arr, y_sampled))
 

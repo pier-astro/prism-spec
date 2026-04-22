@@ -10,6 +10,8 @@ import numpy as np
 from scipy import optimize
 from numpy.linalg import LinAlgError
 from astropy.modeling.fitting import Fitter, model_to_fit_params
+from .extension import _coerce_max_evaluations, _fitter_covariance, _fitter_stdevs, get_max_evaluations
+from .multifit import MultiFitMixin
 from .utils import (
     _analytic_jacobian_parameter_major,
     _apply_tied_fast,
@@ -21,7 +23,7 @@ from .utils import (
 __all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
 
 
-class ScipyFitter(Fitter):
+class ScipyFitter(MultiFitMixin, Fitter):
     """
     Wrapper around ``scipy.optimize.least_squares``.
 
@@ -29,6 +31,10 @@ class ScipyFitter(Fitter):
     Covariance is estimated from the Jacobian (``J.T @ J`` inverse/pinv)
     when ``calc_uncertainties=True``.
     """
+
+    covariance = property(_fitter_covariance)
+    stdevs = property(_fitter_stdevs)
+    std = property(_fitter_stdevs)
     
     def __init__(self, method='trf', calc_uncertainties=False, verbose=False, **kwargs):
         self.method = method
@@ -37,6 +43,21 @@ class ScipyFitter(Fitter):
         self.fit_kwargs = kwargs
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
+
+    @property
+    def max_evaluations(self):
+        value = self.fit_kwargs.get('max_nfev')
+        if value is not None:
+            return value
+        return get_max_evaluations()
+
+    @max_evaluations.setter
+    def max_evaluations(self, value):
+        coerced = _coerce_max_evaluations(value)
+        if coerced is None:
+            self.fit_kwargs.pop('max_nfev', None)
+        else:
+            self.fit_kwargs['max_nfev'] = coerced
 
     @staticmethod
     def _is_numeric_jacobian_request(jac):
@@ -99,7 +120,8 @@ class ScipyFitter(Fitter):
                 print(f"Note: Using numeric Jacobian due to: {type(e).__name__}")
             return '2-point'
 
-    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, yerr=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
+                 yerr=None, statistic='chi2', **kwargs):
         """
         Implement SciPy least_squares fitting.
         """
@@ -227,7 +249,7 @@ class ScipyFitter(Fitter):
             'param_cov': native_cov,
             'cost': result.cost,
             'stat': 2.0 * result.cost,
-            'statmethod': 'chi2' if weights is not None else 'leastsq',  # overridden by extension if statistic is set
+            'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
             'nfree': len(init_values),
             'ndata': n_data,
             'dof': n_data - len(init_values),

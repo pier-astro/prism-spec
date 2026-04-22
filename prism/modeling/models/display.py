@@ -299,7 +299,7 @@ def _iter_rows(model):
 
 
 def _column_names(model):
-    cols = ['Parameter', 'Value', 'Unit', 'Fixed', 'Tied', 'Bounds']
+    cols = ['Parameter', 'Value', 'Fixed', 'Tied', 'Bounds', 'Unit']
     if isinstance(model, CompoundModel):
         cols.insert(0, 'Component')
     return cols
@@ -445,7 +445,7 @@ def _has_fit_info(model):
 def format_model_text(model):
     rows = list(_iter_rows(model))
     headers = _column_names(model)
-    keys = ['parameter', 'value', 'unit', 'fixed', 'tied', 'bounds']
+    keys = ['parameter', 'value', 'fixed', 'tied', 'bounds', 'unit']
     if isinstance(model, CompoundModel):
         keys.insert(0, 'component')
 
@@ -507,10 +507,10 @@ def format_model_html(model):
 
             html_lines.append(f'<td>{escape(str(row["parameter"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["value"]))}</td>')
-            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append(f'<td class="checkbox-cell">{_checkbox_html(row["fixed"])}</td>')
             html_lines.append(f'<td class="checkbox-cell">{_checkbox_html(row["tied"])}</td>')
             html_lines.append(f'<td>{escape(str(row["bounds"]))}</td>')
+            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append('</tr>')
 
     html_lines.extend(['</tbody></table>', '</div>'])
@@ -529,11 +529,11 @@ def format_fit_text(model):
 
     headers = ['Parameter', 'Value']
     keys = ['parameter', 'value_block']
-    headers.insert(2, 'Unit')
-    keys.insert(2, 'unit')
     if show_limits:
         headers.append('Limits')
         keys.append('limits')
+    headers.append('Unit')
+    keys.append('unit')
     if isinstance(model, CompoundModel):
         headers.insert(0, 'Component')
         keys.insert(0, 'component')
@@ -569,10 +569,11 @@ def format_fit_html(model):
     if compound:
         html_lines.append('<th rowspan="2">Component</th>')
     html_lines.append('<th rowspan="2">Parameter</th>')
-    html_lines.append('<th colspan="3" style="text-align:center;">Value</th>')
+    html_lines.append('<th colspan="2" style="text-align:center;">Value</th>')
     if show_limits:
         html_lines.append('<th rowspan="2">Limits</th>')
-    html_lines.append('</tr><tr><th></th><th></th><th></th></tr></thead><tbody>')
+    html_lines.append('<th rowspan="2">Unit</th>')
+    html_lines.append('</tr><tr><th></th><th></th></tr></thead><tbody>')
 
     for group_index, (component, comp_rows) in enumerate(groups):
         for row_index, row in enumerate(comp_rows):
@@ -586,10 +587,10 @@ def format_fit_html(model):
 
             html_lines.append(f'<td>{escape(str(row["parameter"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["value"]))}</td>')
-            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append(f'<td>{escape(str(row["extra"]))}</td>')
             if show_limits:
                 html_lines.append(f'<td>{escape(str(row["limits"]))}</td>')
+            html_lines.append(f'<td>{escape(str(row["unit"]))}</td>')
             html_lines.append('</tr>')
 
     html_lines.extend(['</tbody></table>', '</div>'])

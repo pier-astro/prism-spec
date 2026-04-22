@@ -19,6 +19,22 @@ h(x, θ) = M(x, φ) @ f(x, θ)
 
 where `M` is a matrix operator and `φ` are optional operator parameters.
 
+## Why A Monkey-Patch Exists Here
+
+This module intentionally monkey-patches `astropy.modeling.CompoundModel` for a narrow, opt-in case.
+
+That patch is kept because removing it would break the cleanest workflow Prism users rely on:
+
+```python
+model = native_astropy_source | prism_operator
+```
+
+Without the patch, Astropy's native pipe machinery does not expose enough information to the right-hand Prism operator, especially the original input grid needed by wavelength-aware operators.
+
+Prism keeps this patch because it preserves Astropy transparency better than introducing a separate opaque compound-model system.
+
+The result remains an Astropy `CompoundModel`, not a hidden Prism-only replacement.
+
 ## How The Patch Works
 
 Astropy's native `|` operator only passes the left-hand output into the right-hand model. That is not enough for wavelength-aware operators such as instrumental responses, because they also need the original grid `x`.
@@ -35,6 +51,8 @@ When that is true, Prism intercepts:
 - `CompoundModel.fit_deriv` for analytic Jacobian propagation
 
 Everything else remains ordinary Astropy behavior.
+
+This is the main compatibility-critical monkey-patch Prism still intends to keep unless Astropy eventually provides a small public hook for this evaluation path.
 
 ## Core Type
 
@@ -153,3 +171,10 @@ That keeps the left-hand analytic derivatives and extends them with operator-par
 - `model.right` is the right-hand operator model.
 - `is_linear_operator_pipe(model)` detects Prism-enhanced `|` expressions.
 - `has_native_pipe(model)` detects a native `|` subtree that will force numeric Jacobians upstream.
+
+## Astropy Transparency Summary
+
+- expressions still use Astropy's native operator syntax
+- the resulting object is still an Astropy `CompoundModel`
+- native Astropy fitters can still operate on the resulting model
+- Prism only intercepts the specific evaluation and Jacobian path needed to keep wavelength-aware operators correct

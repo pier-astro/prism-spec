@@ -4,6 +4,8 @@ Sherpa-based fitters for prism.modeling.fitting
 
 import numpy as np
 from astropy.modeling.fitting import Fitter, model_to_fit_params
+from .extension import _coerce_max_evaluations, _fitter_covariance, _fitter_stdevs, get_max_evaluations
+from .multifit import MultiFitMixin
 from .utils import _get_tied_info, _apply_tied_fast
 
 # Try to import Sherpa
@@ -17,8 +19,12 @@ except ImportError:
 __all__ = ['SherpaFitter', 'SherpaLM', 'SherpaSimplex', 'SherpaMonCar', 'HAS_SHERPA']
 
 
-class SherpaFitter(Fitter):
+class SherpaFitter(MultiFitMixin, Fitter):
     """Wrapper around Sherpa optimizers with Sherpa statistics."""
+
+    covariance = property(_fitter_covariance)
+    stdevs = property(_fitter_stdevs)
+    std = property(_fitter_stdevs)
     
     def __init__(self, method='levmar', calc_uncertainties=False, verbose=False, **kwargs):
         if not HAS_SHERPA:
@@ -37,6 +43,22 @@ class SherpaFitter(Fitter):
             self.opt = sherpa.optmethods.MonCar()
         else:
             raise ValueError(f"Unknown method: {method}. Options: levmar, neldermead, moncar")
+
+    @property
+    def max_evaluations(self):
+        value = self.fit_kwargs.get('maxfev', self.fit_kwargs.get('max_nfev'))
+        if value is not None:
+            return value
+        return get_max_evaluations()
+
+    @max_evaluations.setter
+    def max_evaluations(self, value):
+        coerced = _coerce_max_evaluations(value)
+        if coerced is None:
+            self.fit_kwargs.pop('maxfev', None)
+            self.fit_kwargs.pop('max_nfev', None)
+        else:
+            self.fit_kwargs['maxfev'] = coerced
 
     def __call__(self, model, x, y, z=None, weights=None, statistic='chi2', yerr=None, **kwargs):
         if 'uncertainties' in kwargs:

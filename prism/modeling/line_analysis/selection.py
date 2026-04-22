@@ -39,6 +39,14 @@ def _selector_token(value) -> str:
     return str(value).strip().lower()
 
 
+def _selector_position_value(position) -> float | None:
+    if position is None:
+        return None
+    if isinstance(position, u.Quantity):
+        return float(position.to_value(u.AA, equivalencies=u.spectral()))
+    return float(position)
+
+
 def _approx_voigt_fwhm(fwhm_g, fwhm_l):
     fwhm_g = np.asarray(fwhm_g, dtype=float)
     fwhm_l = np.asarray(fwhm_l, dtype=float)
@@ -69,9 +77,58 @@ def _linegroup_template_index(model, template_name):
         f"'{getattr(model, 'name', type(model).__name__)}'.")
 
 
-def _evaluate_linegroup_template(model, template_name, x):
-    """Evaluate a single template within a ``LineGroupBase`` component."""
+def _resolve_linegroup_member(model, template_name, position=None):
     idx, resolved = _linegroup_template_index(model, template_name)
+    positions = np.asarray(model._tmpl_positions[idx], dtype=float)
+    weights = np.asarray(model._tmpl_weights[idx], dtype=float)
+
+    if positions.size == 0:
+        raise ValueError(
+            f"Template '{template_name}' in component "
+            f"'{getattr(model, 'name', type(model).__name__)}' has no lines.")
+
+    selector_position = _selector_position_value(position)
+    if selector_position is not None:
+        matches = np.flatnonzero(np.isclose(positions, selector_position, rtol=0.0, atol=1e-3))
+        if matches.size == 0:
+            available = ', '.join(f"{value:.4f}" for value in positions)
+            raise ValueError(
+                f"No line at {selector_position:.4f} Å found for template "
+                f"'{template_name}' in component '{getattr(model, 'name', type(model).__name__)}'. "
+                f"Available positions: {available} Å")
+        if matches.size > 1:
+            raise ValueError(
+                f"Template '{template_name}' in component "
+                f"'{getattr(model, 'name', type(model).__name__)}' has multiple "
+                f"lines matching {selector_position:.4f} Å.")
+        member_idx = int(matches[0])
+    else:
+        anchors = np.flatnonzero(np.isclose(weights, 1.0, rtol=0.0, atol=1e-12))
+        if anchors.size == 1:
+            member_idx = int(anchors[0])
+        elif anchors.size > 1:
+            available = ', '.join(f"{positions[i]:.4f}" for i in anchors)
+            raise ValueError(
+                f"Ambiguous selector '{template_name}' in component "
+                f"'{getattr(model, 'name', type(model).__name__)}': multiple lines "
+                f"have weight=1 ({available} Å). Pass position=... to disambiguate.")
+        elif positions.size == 1:
+            member_idx = 0
+        else:
+            available = ', '.join(
+                f"{pos:.4f} (w={weight:g})" for pos, weight in zip(positions, weights))
+            raise ValueError(
+                f"Ambiguous selector '{template_name}' in component "
+                f"'{getattr(model, 'name', type(model).__name__)}': no unique weight=1 line. "
+                f"Pass position=... to disambiguate. Candidates: {available} Å")
+
+    return idx, resolved, member_idx, float(positions[member_idx]), float(weights[member_idx])
+
+
+def _evaluate_linegroup_template(model, template_name, x, position=None):
+    """Evaluate one resolved line within a ``LineGroupBase`` component."""
+    idx, resolved, member_idx, member_pos, member_weight = _resolve_linegroup_member(
+        model, template_name, position=position)
     amplitude_param = getattr(model, model._param_names_list[idx])
     amplitude = model._parameter_payload(amplitude_param)
     amplitude_unit = getattr(amplitude_param, 'unit', None)
@@ -83,14 +140,12 @@ def _evaluate_linegroup_template(model, template_name, x):
     centers = []
     widths = []
 
-    positions = model._tmpl_positions[idx]
-    weights = model._tmpl_weights[idx]
-    for pos, weight in zip(positions, weights):
-        args = model._single_profile_args(
-            pos, amplitude, weight, *shared_values, output_unit=amplitude_unit)
-        total += model._profile_func(x_native, *args)
-        centers.append(float(args[1]))
-        widths.append(_profile_width_from_args(model, args))
+    args = model._single_profile_args(
+        member_pos, amplitude, member_weight, *shared_values,
+        output_unit=amplitude_unit)
+    total += model._profile_func(x_native, *args)
+    centers.append(float(args[1]))
+    widths.append(_profile_width_from_args(model, args))
 
     values = model._finalize_output(total, jacobian, is_scalar, amplitude_unit)
     return (values, np.asarray(centers, dtype=float),
@@ -192,6 +247,7 @@ class _SelectionEntry:
     component_key: str | int
     component_name: str
     template_name: str | None = None
+    template_position: float | None = None
 
 
 @dataclass(frozen=True)
@@ -315,8 +371,7 @@ class SelectedLineProfile:
         if entry.template_name is None:
             position = float(getattr(component.position, 'value', component.position))
         else:
-            idx, _ = _linegroup_template_index(component, entry.template_name)
-            position = float(np.mean(component._tmpl_positions[idx]))
+            position = float(entry.template_position)
         return np.asarray(
             [float(profiles.from_wavelength_values(np.asarray([position], dtype=float), self.domain)[0])],
             dtype=float,
@@ -330,7 +385,8 @@ class SelectedLineProfile:
                 yield _evaluate_component_profile(component, x)
             else:
                 values, centers, widths, _ = _evaluate_linegroup_template(
-                    component, entry.template_name, x)
+                    component, entry.template_name, x,
+                    position=entry.template_position)
                 yield values, centers, widths
 
     def infer_window(self, padding=6.0, min_width=2.0):
@@ -389,13 +445,11 @@ class SelectedLineProfile:
                     positions.append(p)
                     labels.append(f"{entry.component_name}: {p:.4f} Å")
             else:
-                idx, _ = _linegroup_template_index(
-                    component, entry.template_name)
-                for p in component._tmpl_positions[idx]:
-                    positions.append(float(p))
-                    labels.append(
-                        f"{entry.component_name}/{entry.template_name}: "
-                        f"{float(p):.4f} Å")
+                p = float(entry.template_position)
+                positions.append(p)
+                labels.append(
+                    f"{entry.component_name}/{entry.template_name}: "
+                    f"{p:.4f} Å")
 
         if not positions:
             raise ValueError(
@@ -433,7 +487,8 @@ class SelectedLineProfile:
                 key = entry.component_name
             else:
                 values, _, _, _ = _evaluate_linegroup_template(
-                    component, entry.template_name, x_arr)
+                    component, entry.template_name, x_arr,
+                    position=entry.template_position)
                 key = entry.component_name
             if key in result:
                 key = f"{entry.component_name}/{entry.template_name or '*'}"
@@ -682,11 +737,13 @@ class SelectedLineCollection:
     datasets where the same line setup is tracked.
     """
 
-    def __init__(self, result, selector, components=None, additive=True):
+    def __init__(self, result, selector, components=None, additive=True,
+                 position=None):
         self.source_result = result
         self.selector = str(selector)
         self.components = components
         self.additive = bool(additive)
+        self.position = position
 
     def __repr__(self):
         return (
@@ -713,7 +770,8 @@ class SelectedLineCollection:
         model = self.source_result.get_model(index)
         return select_line(
             model, selector=self.selector,
-            components=self.components, additive=self.additive)
+            components=self.components, additive=self.additive,
+            position=self.position)
 
     def __getitem__(self, index):
         return self.get_profile(index)
@@ -763,7 +821,8 @@ class SelectedLineCollection:
 # Selection resolution
 # ---------------------------------------------------------------------------
 
-def select_line(model, selector, components=None, additive=True, index=None):
+def select_line(model, selector, components=None, additive=True, index=None,
+                position=None):
     """
     Select an emission or absorption line profile from a composite model.
 
@@ -794,6 +853,10 @@ def select_line(model, selector, components=None, additive=True, index=None):
         Used only if `model` is a `MultiFitResult`. If provided, it extracts the 
         selected line from the specific 1D model at that spatial index. 
         If None, a batch selection (`SelectedLineCollection`) is returned instead.
+    position : float or Quantity, optional
+        Rest-frame wavelength in Å used to disambiguate template groups where
+        multiple physical lines share the same selector. When omitted, grouped
+        selectors default to the unique sub-line with weight=1.
 
     Returns
     -------
@@ -816,10 +879,12 @@ def select_line(model, selector, components=None, additive=True, index=None):
         if index is not None:
             return select_line(
                 model.get_model(index), selector=selector,
-                components=components, additive=additive)
+                components=components, additive=additive,
+                position=position)
         return SelectedLineCollection(
             result=model, selector=selector,
-            components=components, additive=additive)
+            components=components, additive=additive,
+            position=position)
 
     selector_token = _selector_token(selector)
     entries = []
@@ -843,10 +908,12 @@ def select_line(model, selector, components=None, additive=True, index=None):
 
             if isinstance(resolved, LineGroupBase):
                 try:
-                    _, template_name = _linegroup_template_index(resolved, selector)
+                    _, template_name, _, template_position, _ = _resolve_linegroup_member(
+                        resolved, selector, position=position)
                     entries.append(_SelectionEntry(
                         component_key=key, component_name=comp_name,
-                        template_name=template_name))
+                        template_name=template_name,
+                        template_position=template_position))
                 except KeyError:
                     # LineGroup does not have the selector; skip.
                     pass
@@ -867,9 +934,12 @@ def select_line(model, selector, components=None, additive=True, index=None):
             if isinstance(comp, LineGroupBase):
                 for tmpl_name in comp._templates:
                     if _selector_token(tmpl_name) == selector_token:
+                        _, _, _, template_position, _ = _resolve_linegroup_member(
+                            comp, tmpl_name, position=position)
                         entries.append(_SelectionEntry(
                             component_key=key, component_name=name,
-                            template_name=str(tmpl_name)))
+                            template_name=str(tmpl_name),
+                            template_position=template_position))
                         break
             else:
                 # Fallback for single components purely matching the name

@@ -6,20 +6,41 @@ import numpy as np
 from scipy.optimize import leastsq
 from numpy.linalg import LinAlgError
 from astropy.modeling.fitting import Fitter, model_to_fit_params
+from .extension import _coerce_max_evaluations, _fitter_covariance, _fitter_stdevs, get_max_evaluations
+from .multifit import MultiFitMixin
 from .utils import _get_tied_info, _apply_tied_fast
 
 __all__ = ['LMFitter']
 
 
-class LMFitter(Fitter):
+class LMFitter(MultiFitMixin, Fitter):
     """
     Levenberg-Marquardt fitter with internal bound transforms.
     """
+
+    covariance = property(_fitter_covariance)
+    stdevs = property(_fitter_stdevs)
+    std = property(_fitter_stdevs)
     
     def __init__(self, calc_uncertainties=False, verbose=False, **kwargs):
         self.calc_uncertainties = calc_uncertainties
         self.verbose = verbose
         self.leastsq_kwargs = kwargs
+
+    @property
+    def max_evaluations(self):
+        value = self.leastsq_kwargs.get('maxfev')
+        if value is not None:
+            return value
+        return get_max_evaluations()
+
+    @max_evaluations.setter
+    def max_evaluations(self, value):
+        coerced = _coerce_max_evaluations(value)
+        if coerced is None:
+            self.leastsq_kwargs.pop('maxfev', None)
+        else:
+            self.leastsq_kwargs['maxfev'] = coerced
 
     @staticmethod
     def _normalize_bound_pair(bounds):
@@ -92,7 +113,8 @@ class LMFitter(Fitter):
                 jacobian[i, i] = -np.exp(internal_val)
         return jacobian @ cov_internal @ jacobian.T
 
-    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None, yerr=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
+                 yerr=None, statistic='chi2', **kwargs):
         if yerr is not None and weights is None:
             weights = 1.0 / np.asarray(yerr)
         if 'uncertainties' in kwargs:
@@ -202,7 +224,7 @@ class LMFitter(Fitter):
             'param_cov': native_cov,
             'stat': chi2 if success else np.nan,
             'cost': cost_val,
-            'statmethod': 'chi2' if weights is not None else 'leastsq',
+            'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
             'nfree': n_free,
             'ndata': n_data,
             'dof': n_data - n_free,

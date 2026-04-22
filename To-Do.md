@@ -25,14 +25,13 @@ Use all the context you have in these deep dive in the code.
 
 
 
-- Add units handling in the line models and in the line analysis. This should be done in a way that is consistent with the rest of the package and with the astropy models. We should verify how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now. This will make things more consistent and easier to handle and astropy "standard".
+- (DONE!) Add units handling in the line models and in the line analysis. This should be done in a way that is consistent with the rest of the package and with the astropy models. We should verify how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now. This will make things more consistent and easier to handle and astropy "standard".
 Fix the unit handling in line models. See how feasible is to add the "unit" in the Parameter object and not add them via dictionaries as we are doing now
 ADD UNIT AS COLUMN TO DISPLAY in the display module. Remeber the display module is meant to work also with native astropy models and not only with enhanced astropy models as in prism.
 
 - Make everyting less WAVELENGHT specific. Our routines are quite general! Just some aspects like the line models might strongly rely on the wavelength. In that case we might add a "domain" attribute to the line models to specify the domain of application (e.g. wavelength, frequency, energy) and then handle the specificities in the line models. Outise this domain simply raise a warning/error or NotImplementedError. This will make the package more general and potentially useful for other applications beyond spectroscopy.
 
 Do this transition to astropy poilicy on:
-- models. Both basic models and operator models
 - fitting. Both single fit and multifit
 - data
 - display

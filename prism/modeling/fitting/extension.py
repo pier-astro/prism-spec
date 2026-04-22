@@ -1,14 +1,13 @@
 """
-Dynamic extension module for astropy fitters.
+Compatibility helpers for Prism fitter wrappers and narrow Astropy patches.
 
-This module patches astropy.modeling.fitting.Fitter and its subclasses
-to seamlessly support:
-- automatic weight calculation from 'yerr' and 'statistic'
-- explicit '.multifit()' method
-- dropping non-finite values if 'filter_non_finite'=True
-- unified control of maximum function evaluations via 'max_evaluations'
-- global default control via fitting.set_max_evaluations(...)
-- uniform attachment of '.stdevs' and '.covariance' from 'param_cov'
+This module no longer patches Astropy fitter classes broadly. It provides:
+
+- shared call-wrapping logic used by Prism-owned Astropy-style fitters
+- shared fit-info and covariance helpers for those wrappers
+- the narrow tied-analytic-Jacobian compatibility patch Prism still needs
+    for Astropy nonlinear fitters when operator-enhanced compound models are
+    fit with analytic derivatives
 """
 
 import inspect
@@ -16,7 +15,6 @@ import warnings
 import astropy.modeling.fitting as ast_fit
 import numpy as np
 
-from .multifit import MultiFitMixin
 from .utils import (
     _free_parameter_indices,
     _prime_tied_analytic_jacobian_warning,
@@ -24,14 +22,18 @@ from .utils import (
 )
 
 
+_DEFAULT_MAX_EVALUATIONS = None
+
+
 def get_max_evaluations():
-    """Return the global default max evaluations for patched fitters."""
-    return getattr(ast_fit.Fitter, '_prism_default_max_evaluations', None)
+    """Return the Prism global default max evaluations for wrapper fitters."""
+    return _DEFAULT_MAX_EVALUATIONS
 
 
 def set_max_evaluations(value):
-    """Set the global default max evaluations for patched fitters."""
-    ast_fit.Fitter._prism_default_max_evaluations = _coerce_max_evaluations(value)
+    """Set the Prism global default max evaluations for wrapper fitters."""
+    global _DEFAULT_MAX_EVALUATIONS
+    _DEFAULT_MAX_EVALUATIONS = _coerce_max_evaluations(value)
 
 
 def _coerce_max_evaluations(value):
@@ -305,6 +307,8 @@ def _patch_astropy_tied_jacobian_wrapper():
         if weights is None:
             weights = 1.0
 
+        if not hasattr(model, '_prism_warn_tied_analytic_jacobian'):
+            _prime_tied_analytic_jacobian_warning(model)
         ast_fit.fitter_to_model_params(model, params)
         if z is None:
             full = model.fit_deriv(x, *model.parameters)
@@ -334,90 +338,19 @@ def _patch_astropy_tied_jacobian_wrapper():
     fitter_cls._prism_tied_jacobian_patch = True
 
 
-def patch_astropy_fitters():
-    """
-    Finds all astropy.modeling.fitting.Fitter subclasses and automatically
-    adds prism's extensions (multifit, kwargs).
-    """
+def enable_astropy_fitting_compatibility_patch():
+    """Enable the narrow Astropy fitting compatibility patch Prism still needs."""
     _patch_astropy_tied_jacobian_wrapper()
 
-    def get_all_subclasses(cls):
-        all_subclasses = []
-        for subclass in cls.__subclasses__():
-            all_subclasses.append(subclass)
-            all_subclasses.extend(get_all_subclasses(subclass))
-        return all_subclasses
 
-    target_classes = [ast_fit.Fitter] + get_all_subclasses(ast_fit.Fitter)
-    patched_count = 0
-    for cls in target_classes:
-        if '__call__' in cls.__dict__:
-            original_call = cls.__dict__['__call__']
-            
-            # Simple check to avoid double-patching upon reloads
-            if getattr(original_call, '__name__', '') != 'wrapped_call':
-                setattr(cls, '__call__', _wrap_fitter_call(original_call))
-                patched_count += 1
-
-    # Attach all methods from MultiFitMixin to the root Fitter class
-    for attr_name in dir(MultiFitMixin):
-        if not attr_name.startswith('__'):
-            setattr(ast_fit.Fitter, attr_name, getattr(MultiFitMixin, attr_name))
-            
-    # Add properties explicitly
-    ast_fit.Fitter.covariance = property(_fitter_covariance)
-    ast_fit.Fitter.stdevs = property(_fitter_stdevs)
-    ast_fit.Fitter.std = property(_fitter_stdevs)
-    
-    def _get_calc_uncertainties(self):
-        return getattr(self, '_prism_calc_unc', getattr(self, '_calc_uncertainties', False))
-        
-    def _set_calc_uncertainties(self, value):
-        self._prism_calc_unc = value
-        
-    ast_fit.Fitter.calc_uncertainties = property(_get_calc_uncertainties, _set_calc_uncertainties)
-    
-    def _get_verbose(self):
-        return getattr(self, '_prism_verbose', False)
-        
-    def _set_verbose(self, value):
-        self._prism_verbose = value
-        
-    ast_fit.Fitter.verbose = property(_get_verbose, _set_verbose)
-
-    def _get_max_evaluations(self):
-        value = getattr(self, '_prism_max_evaluations', None)
-        if value is not None:
-            return value
-        return get_max_evaluations()
-
-    def _set_max_evaluations(self, value):
-        self._prism_max_evaluations = _coerce_max_evaluations(value)
-
-    ast_fit.Fitter.max_evaluations = property(_get_max_evaluations, _set_max_evaluations)
-    ast_fit.get_max_evaluations = get_max_evaluations
-    ast_fit.set_max_evaluations = set_max_evaluations
-    
-    def _multifit_entry_from_fit_info(self):
-        from .multifit import _MULTIFIT_STAT_KEYS
-        fit_info = getattr(self, 'fit_info', {})
-        entry = {
-            'success': fit_info.get('success', False),
-            'nfev':    fit_info.get('nfev', np.nan),
-            'message': fit_info.get('message', ''),
-        }
-        for name in _MULTIFIT_STAT_KEYS:
-            entry[name] = fit_info.get(name, np.nan)
-        return entry
-        
-    def _apply_scalar_multifit_overrides(self, model, initpars=None, bounds=None):
-        if initpars:
-            for name, value in initpars.items():
-                getattr(model, name).value = value
-        if bounds:
-            for name, pair in bounds.items():
-                getattr(model, name).bounds = pair
-        return model
-
-    ast_fit.Fitter._multifit_entry_from_fit_info = _multifit_entry_from_fit_info
-    ast_fit.Fitter._apply_scalar_multifit_overrides = _apply_scalar_multifit_overrides
+def patch_astropy_fitters():
+    """Deprecated compatibility shim for the old broad fitter patch API."""
+    warnings.warn(
+        "patch_astropy_fitters() no longer patches native Astropy fitter classes. "
+        "Use prism.modeling.fitting.TRFLSQFitter, DogBoxLSQFitter, "
+        "LevMarLSQFitter, and related Prism wrappers instead. "
+        "Only the narrow tied-analytic-Jacobian compatibility patch is retained.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    enable_astropy_fitting_compatibility_patch()

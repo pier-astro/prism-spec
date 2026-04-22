@@ -4,25 +4,52 @@ from astropy.stats import sigma_clip
 from astropy.utils.exceptions import AstropyUserWarning
 from astropy.modeling.fitting import Fitter, model_to_fit_params
 
+from .extension import _fitter_covariance, _fitter_stdevs
+from .multifit import MultiFitMixin
 from .utils import _apply_tied_fast, _get_tied_info
 import copy
 
 __all__ = ['FittingWithOutlierRemoval']
 
-class FittingWithOutlierRemoval(Fitter):
+class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
     """
     Iterative outlier-rejection wrapper around any prism correlation fitter.
     """
+
+    covariance = property(_fitter_covariance)
+    stdevs = property(_fitter_stdevs)
+    std = property(_fitter_stdevs)
+
     def __init__(self, fitter, outlier_func=sigma_clip, niter=3, **outlier_kwargs):
-        # We steal the base fitter's flags dynamically so the wrapper integrates seamlessly
-        self.calc_uncertainties = getattr(fitter, 'calc_uncertainties', False)
-        self.verbose = getattr(fitter, 'verbose', False)
-        
         self._fitter = fitter
         self.outlier_func = outlier_func
         self.niter = niter
         self.outlier_kwargs = outlier_kwargs
         self.outlier_mask = None
+
+    @property
+    def calc_uncertainties(self):
+        return getattr(self._fitter, 'calc_uncertainties', False)
+
+    @calc_uncertainties.setter
+    def calc_uncertainties(self, value):
+        self._fitter.calc_uncertainties = value
+
+    @property
+    def verbose(self):
+        return getattr(self._fitter, 'verbose', False)
+
+    @verbose.setter
+    def verbose(self, value):
+        self._fitter.verbose = value
+
+    @property
+    def max_evaluations(self):
+        return getattr(self._fitter, 'max_evaluations', None)
+
+    @max_evaluations.setter
+    def max_evaluations(self, value):
+        self._fitter.max_evaluations = value
 
     def _multifit_spawn_fitter(self):
         # Override to ensure the nested fitter is safely cloned for parallel workers

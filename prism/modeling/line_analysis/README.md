@@ -62,6 +62,11 @@ Equivalent width is computed relative to a supplied or inferred continuum in the
 
 Resolves a selector, such as `Hb4861` or `oiii`, into a line-analysis object.
 
+For grouped templates where multiple physical lines share the same selector,
+`select_line(..., position=...)` can be used to pick a specific rest wavelength.
+If `position` is omitted, grouped selectors default to the unique sub-line with
+`weight=1` and raise if the selector remains ambiguous.
+
 Returns:
 
 - `SelectedLineProfile` for a single model
