@@ -33,9 +33,26 @@ class ScipyFitter(MultiFitMixin, Fitter):
     """
     Wrapper around ``scipy.optimize.least_squares``.
 
-    Supports ``'trf'`` and ``'dogbox'`` methods with native bounds.
-    Covariance is estimated from the Jacobian (``J.T @ J`` inverse/pinv)
-    when ``calc_uncertainties=True``.
+    Parameters
+    ----------
+    method : {'trf', 'dogbox'}, optional
+        ``least_squares`` backend. Default is ``'trf'``.
+    calc_uncertainties : bool, optional
+        If ``True``, estimate a parameter covariance matrix from the final
+        Jacobian. Default is ``False``.
+    verbose : bool, optional
+        If ``True``, print fallback and diagnostic messages. Default is ``False``.
+    **kwargs
+        Additional keyword arguments forwarded to
+        ``scipy.optimize.least_squares``.
+
+    Notes
+    -----
+    Prism keeps the Astropy fitter calling convention while delegating the actual
+    optimisation to SciPy. If analytic derivatives are available they are used by
+    default; otherwise the fitter falls back to finite differences. Optional
+    covariance estimation is derived from the normal-equation approximation
+    ``(J^T J)^{-1}`` or its pseudo-inverse when the Jacobian is ill conditioned.
     """
 
     covariance = property(_fitter_covariance)
@@ -272,7 +289,21 @@ class ScipyFitter(MultiFitMixin, Fitter):
 
 
 class ScipyTRF(ScipyFitter):
-    """SciPy trust-region reflective fitter."""
+    """SciPy trust-region reflective fitter.
+
+    Parameters
+    ----------
+    ftol, xtol, gtol : float, optional
+        Convergence tolerances passed to ``least_squares``. Defaults are
+        ``1e-10``.
+    loss : str, optional
+        Robust loss function passed to SciPy. Default is ``'linear'``.
+    jac : {'auto', '2-point', '3-point', 'cs'} or callable, optional
+        Jacobian strategy. ``'auto'`` uses Prism analytic derivatives when
+        available. Default is ``'auto'``.
+    **kwargs
+        Additional ``least_squares`` keyword arguments.
+    """
     def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='auto', **kwargs):
         super().__init__(method='trf',
         ftol=ftol,     # Force stricter gradient/cost progression
@@ -284,6 +315,18 @@ class ScipyTRF(ScipyFitter):
 
 
 class ScipyDogBox(ScipyFitter):
-    """SciPy dogbox fitter with rectangular trust regions."""
+    """SciPy dogbox fitter with rectangular trust regions.
+
+    Parameters
+    ----------
+    **kwargs
+        Additional keyword arguments forwarded to ``least_squares``.
+
+    Notes
+    -----
+    ``dogbox`` can be effective for tightly box-constrained problems with a modest
+    number of free parameters. Prism keeps the same diagnostics and covariance
+    handling as :class:`ScipyTRF`.
+    """
     def __init__(self, **kwargs):
         super().__init__(method='dogbox', **kwargs)

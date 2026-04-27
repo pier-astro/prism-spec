@@ -78,7 +78,7 @@ def test_model_display_workflow():
             names=['OIII5007'], pos=[5006.803], name='hhe_nlr', amplitude=1.0, offset=0.0, fwhm=300.0,
         )
         tied_lines.offset_1.tied = tie('nlr', lambda m: m.offset)
-        assert '= offset_0' in tied_lines.show(mode='text')
+        assert '= offset_0' in format_fit_text(tied_lines)
 
         prism_model = PowerLaw1D(name='pl') + GaussianLines.from_arrays(
             names=['Hb4861'], pos=[4861.333], name='hb', amplitude=2.0, offset=0.0, fwhm=300.0,

@@ -28,7 +28,49 @@ dustpath = os.path.join(script_dir, '..', '..', 'resources', 'dust')
 
 
 class Spectrum(Data1D):
-    """Generic spectral container using coordinate/value naming."""
+    """One-dimensional spectral container with reversible masking and rebinning.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Spectral coordinate array and sampled values.
+    yerr : array-like, optional
+        Symmetric 1-D uncertainties on ``y``. Default is ``None``.
+    xerr : array-like, optional
+        Optional coordinate uncertainties. Default is ``None``.
+    ra, dec : float, str, or astropy.units.Quantity, optional
+        Sky coordinates associated with the spectrum. Default is ``None``.
+    redshift : float, optional
+        Source redshift stored with the spectrum. Default is ``None``.
+    xunit, yunit : str or astropy.units.Unit, optional
+        Units of the coordinate and value arrays. Default is ``None``.
+    xtype, ytype : str, optional
+        Explicit semantic labels for the axis and values. Default is inferred
+        from the units when possible.
+    name : str, optional
+        Spectrum label. Default is ``'spectrum'``.
+    meta : dict, optional
+        Arbitrary metadata copied with the object. Default is ``None``.
+
+    Notes
+    -----
+    ``Spectrum`` keeps both the original arrays and the currently active working
+    arrays. :meth:`crop` updates a boolean mask on the original grid, so
+    :meth:`reset` can restore the initial sampling. :meth:`rebin` instead builds a
+    new spectral grid and therefore invalidates ``reset`` because the original
+    sampling has been replaced. For wavelength-like logarithmic axes Prism also
+    derives the approximate velocity scale and per-pixel FWHM implied by the grid.
+
+    Examples
+    --------
+    >>> spec = Spectrum.from_txt(
+    ...     'examples/data/agnspec.txt',
+    ...     redshift=0.043,
+    ...     xunit='AA',
+    ... )
+    >>> spec.crop(bounds=(4300.0, 7000.0))
+    >>> spec.rebin(factor=2)
+    """
 
     def __init__(
         self,
@@ -160,6 +202,22 @@ class Spectrum(Data1D):
             raise ValueError(f"{operation} is only defined for wavelength-like axes.")
 
     def crop(self, bounds=None, mask=None):
+        """Restrict the active spectrum to a subset of the original grid.
+
+        Parameters
+        ----------
+        bounds : tuple of float, optional
+            Open interval ``(xmin, xmax)`` applied to the current working axis.
+            Default is ``None``.
+        mask : array-like of bool, optional
+            Boolean mask with the same shape as the current working axis. Default
+            is ``None``.
+
+        Returns
+        -------
+        None
+            The object is updated in place.
+        """
         if self._rebinned:
             raise RuntimeError('Cannot crop after rebinning.')
 
@@ -182,6 +240,32 @@ class Spectrum(Data1D):
         self._update_working_arrays()
 
     def rebin(self, factor=None, new_x=None, fill=np.nan, method='flux-conserving'):
+        """Resample the spectrum onto a coarser or explicit spectral grid.
+
+        Parameters
+        ----------
+        factor : int, optional
+            Integer downsampling factor applied to the current grid. Default is
+            ``None``.
+        new_x : array-like, optional
+            Explicit target spectral grid. Default is ``None``.
+        fill : float, optional
+            Fill value used outside the overlap region. Default is ``numpy.nan``.
+        method : str, optional
+            Resampling scheme forwarded to :func:`resample_spectrum`. Default is
+            ``'flux-conserving'``.
+
+        Returns
+        -------
+        None
+            The object is updated in place.
+
+        Notes
+        -----
+        Rebinning replaces the stored full-resolution arrays. Because the new grid
+        is no longer a masked view of the original sampling, :meth:`reset` cannot
+        recover the pre-rebinned state.
+        """
         if self.yerr is not None and self.yerr.ndim != 1:
             raise ValueError('Rebinning does not support asymmetric yerr.')
 
@@ -225,6 +309,26 @@ class Spectrum(Data1D):
 
     @classmethod
     def from_txt(cls, filename, ra=None, dec=None, redshift=None, xunit=None, yunit=None, name=None, xtype=None, ytype=None):
+        """Build a spectrum from a whitespace-delimited text file.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Text file containing either ``x y`` or ``x y yerr`` columns.
+        ra, dec, redshift : optional
+            Metadata stored on the created spectrum. Defaults are ``None``.
+        xunit, yunit : str or astropy.units.Unit, optional
+            Units attached to the coordinate and values. Default is ``None``.
+        name : str, optional
+            Spectrum name. Defaults to the filename stem.
+        xtype, ytype : str, optional
+            Explicit semantic labels for the axis and values. Default is ``None``.
+
+        Returns
+        -------
+        Spectrum
+            Loaded spectrum with provenance stored in ``meta['source']``.
+        """
         try:
             try:
                 x, y, yerr = np.genfromtxt(filename, unpack=True)
@@ -267,6 +371,31 @@ class Spectrum(Data1D):
         xtype=None,
         ytype=None,
     ):
+        """Build a spectrum from a binary-table FITS extension.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            FITS file containing spectral columns.
+        ext : int, optional
+            FITS extension index. Default is ``1``.
+        x_col, y_col, yerr_col : str, optional
+            Column names for the spectral axis, values, and optional
+            uncertainties. Defaults are ``'WAVELENGTH'``, ``'FLUX'``, and
+            ``'ERROR'``.
+        ra, dec, redshift : optional
+            Metadata stored on the created spectrum. Defaults fall back to the
+            FITS header when present.
+        name : str, optional
+            Spectrum name. Defaults to the filename stem.
+        xtype, ytype : str, optional
+            Explicit semantic labels for the axis and values. Default is ``None``.
+
+        Returns
+        -------
+        Spectrum
+            Loaded spectrum with provenance stored in ``meta['source']``.
+        """
         with fits.open(filename) as hdul:
             hdu = hdul[ext]
             data = hdu.data
@@ -301,18 +430,72 @@ class Spectrum(Data1D):
         )
 
     def wavelengths(self, unit=None):
+        """Return the spectral axis converted to wavelength values.
+
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            Output wavelength unit. Default uses the native unit.
+
+        Returns
+        -------
+        numpy.ndarray
+            Wavelength values on the current working grid.
+        """
         values, _ = convert_spectral_axis(self.x, self.xtype, self.xunit, 'wavelength', unit)
         return values
 
     def frequencies(self, unit=None):
+        """Return the spectral axis converted to frequency values.
+
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            Output frequency unit. Default uses the native unit.
+
+        Returns
+        -------
+        numpy.ndarray
+            Frequency values on the current working grid.
+        """
         values, _ = convert_spectral_axis(self.x, self.xtype, self.xunit, 'frequency', unit)
         return values
 
     def energies(self, unit=None):
+        """Return the spectral axis converted to energy values.
+
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            Output energy unit. Default uses the native unit.
+
+        Returns
+        -------
+        numpy.ndarray
+            Energy values on the current working grid.
+        """
         values, _ = convert_spectral_axis(self.x, self.xtype, self.xunit, 'energy', unit)
         return values
 
     def velocity(self, rest=None, unit=None, convention='doppler'):
+        """Return the spectral axis converted to velocity offsets.
+
+        Parameters
+        ----------
+        rest : float or astropy.units.Quantity, optional
+            Rest spectral coordinate used as the zero-velocity reference.
+            Default is ``None``.
+        unit : str or astropy.units.Unit, optional
+            Output velocity unit. Default uses the native conversion target.
+        convention : str, optional
+            Velocity convention forwarded to :func:`convert_spectral_axis`.
+            Default is ``'doppler'``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Velocity values on the current working grid.
+        """
         values, _ = convert_spectral_axis(
             self.x,
             self.xtype,

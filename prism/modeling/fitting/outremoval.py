@@ -13,7 +13,25 @@ __all__ = ['FittingWithOutlierRemoval']
 
 class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
     """
-    Iterative outlier-rejection wrapper around any prism correlation fitter.
+    Iterative outlier-rejection wrapper around any Prism fitter.
+
+    Parameters
+    ----------
+    fitter : astropy.modeling.fitting.Fitter
+        Wrapped fitter called at each iteration.
+    outlier_func : callable, optional
+        Function returning a mask or masked array from residuals. Default is
+        :func:`astropy.stats.sigma_clip`.
+    niter : int, optional
+        Number of rejection iterations after the initial fit. Default is ``3``.
+    **outlier_kwargs
+        Additional keyword arguments passed to ``outlier_func``.
+
+    Notes
+    -----
+    The wrapper alternates between fitting and residual clipping. Newly flagged
+    outliers are assigned zero weight in subsequent iterations, so the wrapped
+    fitter sees a standard weighted least-squares problem at every step.
     """
 
     covariance = property(_fitter_covariance)

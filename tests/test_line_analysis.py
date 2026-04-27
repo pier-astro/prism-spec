@@ -1,7 +1,9 @@
 import os
 import tempfile
+import inspect
 
 import numpy as np
+import astropy.units as u
 from astropy.modeling import models
 
 import prism
@@ -151,6 +153,24 @@ def test_selected_line_position_and_component_breakdown():
     component_fluxes = selected.evaluate_components(x=wave)
     assert {'hb_narrow', 'hb_broad'} <= set(component_fluxes)
     np.testing.assert_allclose(sum(component_fluxes.values()), selected.evaluate(wave), rtol=1e-10)
+
+
+def test_line_measurement_public_docs_and_quantity_axis():
+    model = _build_selection_model()
+    selected = select_line(model, 'Hb4861')
+    wave = np.linspace(4805.0, 4915.0, 2048) * u.AA
+
+    result = measure_line(selected, x=wave)
+
+    assert result.axis_unit == u.AA
+    assert result.peak_position.unit == u.AA
+    assert result.fwhm.unit == u.AA
+
+    for obj in (measure_line, sample_line_measurements, LineResult):
+        doc = inspect.getdoc(obj)
+        assert doc is not None
+        assert 'Parameters' in doc
+        assert 'Returns' in doc
 
 
 def test_line_sampling_methods_and_bounds():

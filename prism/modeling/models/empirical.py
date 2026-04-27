@@ -34,13 +34,31 @@ class FixedTemplate(Fittable1DModel):
     Parameters
     ----------
     x, y : array-like
-        Template wavelength and flux arrays.
-    interp_kind : str
-        Interpolation kind passed to ``interp1d`` (default ``'linear'``).
-    fill_value : float
-        Value assigned outside ``x`` range (default ``0.0``).
-    bounds_error : bool
-        Raise if evaluated outside ``x`` range (default ``False``).
+        Template coordinate and value arrays.
+    interp_kind : str, optional
+        Interpolation kind passed to ``interp1d``. Default is ``'linear'``.
+    fill_value : float, optional
+        Value assigned outside the sampled template range. Default is ``0.0``.
+    bounds_error : bool, optional
+        If ``True``, raise when evaluated outside the template range. Default is
+        ``False``.
+
+    Returns
+    -------
+    FixedTemplate
+        Unit-aware interpolation model with no free parameters.
+
+    Notes
+    -----
+    ``FixedTemplate`` is useful for empirical continua, iron templates, or any
+    externally tabulated component that should remain fixed while participating in
+    Astropy compound models. If the input arrays carry units, evaluation preserves
+    them and Prism cooperates with Astropy's unit-stripping hooks during fitting.
+
+    Examples
+    --------
+    >>> tmpl = FixedTemplate([5000.0, 5005.0, 5010.0], [0.0, 1.0, 0.0])
+    >>> tmpl(5005.0)
     """
     n_inputs = 1
     n_outputs = 1
@@ -65,6 +83,18 @@ class FixedTemplate(Fittable1DModel):
         )
         
     def evaluate(self, x):
+        """Evaluate the template on a new coordinate grid.
+
+        Parameters
+        ----------
+        x : array-like or astropy.units.Quantity
+            Sampling coordinates.
+
+        Returns
+        -------
+        numpy.ndarray or astropy.units.Quantity
+            Interpolated template values.
+        """
         if isinstance(x, u.Quantity):
             x = x.to_value(self._x_unit) if self._x_unit is not None else x.value
         result = self._interp(np.asarray(x))
@@ -74,6 +104,19 @@ class FixedTemplate(Fittable1DModel):
         return {}
 
     def without_units_for_data(self, **kwargs):
+        """Return a copy adapted to Astropy's unit-stripped fitting context.
+
+        Parameters
+        ----------
+        **kwargs
+            Mapping from model input/output names to the current fitting data.
+
+        Returns
+        -------
+        FixedTemplate
+            Copy of the template with units converted away when Astropy requests
+            a unitless model.
+        """
         model = self.copy()
         x_data = kwargs.get(self.inputs[0])
         y_data = kwargs.get(self.outputs[0])
@@ -87,6 +130,19 @@ class FixedTemplate(Fittable1DModel):
         return model
 
     def with_units_from_data(self, **kwargs):
+        """Return a copy re-attached to the units of the provided data.
+
+        Parameters
+        ----------
+        **kwargs
+            Mapping from model input/output names to the current fitting data.
+
+        Returns
+        -------
+        FixedTemplate
+            Copy of the template carrying the input and output units inferred from
+            the supplied data objects.
+        """
         model = self.copy()
         x_data = kwargs.get(self.inputs[0])
         y_data = kwargs.get(self.outputs[0])
@@ -108,12 +164,25 @@ class BSpline(Fittable1DModel):
     knots : array-like
         Knot vector (not including repeated boundary knots; must satisfy
         ``len(knots) > degree + 1``).
-    degree : int
-        Spline degree (default 3 = cubic).
-    name : str
-        Name of the generated model class.
+    degree : int, optional
+        Spline degree. Default is ``3`` for a cubic spline.
+    name : str, optional
+        Name of the generated model class. Default is ``'BSpline'``.
     **kwargs
         Initial coefficient values passed as ``c0=..., c1=..., ...``.
+
+    Returns
+    -------
+    BSpline
+        Dynamically generated Astropy model whose free parameters are the spline
+        coefficients.
+
+    Notes
+    -----
+    Prism exposes the B-spline coefficients directly as model parameters, which is
+    convenient for flexible continua and empirical backgrounds. The analytic
+    derivative is computed from SciPy's spline design matrix, so least-squares
+    fitters can use an efficient exact Jacobian instead of finite differences.
 
     Examples
     --------
@@ -121,6 +190,7 @@ class BSpline(Fittable1DModel):
     >>> from prism.modeling.models import BSpline
     >>> knots = np.linspace(4500, 7000, 10)
     >>> bsp = BSpline(knots, degree=3, name='cont')
+    >>> y = bsp(np.linspace(4500, 7000, 50))
     """
     n_inputs = 1
     n_outputs = 1

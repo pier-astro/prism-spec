@@ -111,7 +111,47 @@ def _as_metric(value, unit=None) -> Metric:
 # ---------------------------------------------------------------------------
 
 class LineResult:
-    """Measurement results for a selected emission line."""
+    """Scalar measurements for a selected line profile.
+
+    Parameters
+    ----------
+    selector : str
+        User-facing line selector used to build the measurement.
+    mode : str
+        Measurement mode label stored for provenance.
+    wave_min : float
+        Lower bound of the sampled spectral window.
+    wave_max : float
+        Upper bound of the sampled spectral window.
+    n_grid : int
+        Number of grid samples used to evaluate the profile.
+    metrics : dict
+        Mapping from metric name to scalar or ``Metric`` value.
+    metric_units : dict, optional
+        Explicit units for each metric. Default is ``None``.
+    axis_unit : str or astropy.units.Unit, optional
+        Unit of the spectral axis. Default is ``None``.
+
+    Returns
+    -------
+    LineResult
+        Container whose public attributes expose scalar ``Metric`` objects for
+        flux, widths, centroid, and higher-order line-shape summaries.
+
+    Notes
+    -----
+    Prism evaluates the selected line on a 1-D grid, then derives geometric and
+    moment-based summaries from the sampled profile. Flux is integrated with the
+    trapezoidal rule, width metrics are measured from fractional-height crossing
+    points, and central moments are computed directly from the sampled line shape.
+
+    Examples
+    --------
+    >>> selected = select_line(model, 'Hb4861')
+    >>> result = measure_line(selected, x=wave)
+    >>> result.flux.value
+    >>> result.fwhm.value
+    """
 
     def __init__(self, selector, mode, wave_min, wave_max, n_grid, metrics,
                  metric_units=None, axis_unit=None):
@@ -132,6 +172,20 @@ class LineResult:
                            unit=self.metric_units.get(name)))
 
     def to_frame(self, metrics=None) -> pd.DataFrame:
+        """Return the stored metrics as a tidy dataframe.
+
+        Parameters
+        ----------
+        metrics : sequence of str, optional
+            Subset of metric names to include. Default is all available public
+            metrics.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Table indexed by metric name with ``value``, ``std``, ``lolim``,
+            ``uplim``, and ``unit`` columns.
+        """
         names = list(metrics) if metrics is not None else _METRIC_NAMES
         rows = {}
         for name in names:
@@ -149,7 +203,29 @@ class LineResult:
 
 
 class MultiLineMeasurements:
-    """Batch measurement results over a spatial grid."""
+    """Array-valued line measurements over a spatial grid.
+
+    Parameters
+    ----------
+    selector : str
+        User-facing line selector used for the measurement.
+    mode : str
+        Measurement mode label stored for provenance.
+    shape : tuple of int
+        Spatial shape of the batched result.
+    metric_units : dict, optional
+        Explicit units for each metric. Default is ``None``.
+    axis_unit : str or astropy.units.Unit, optional
+        Unit of the spectral axis. Default is ``None``.
+    **metric_arrays
+        Metric maps keyed by public metric name.
+
+    Notes
+    -----
+    Each metric is stored as an ``ndarray`` with the same spatial shape as the
+    parent ``MultiFitResult``. Use :meth:`get_measurement` to recover the scalar
+    ``LineResult`` view for one spaxel.
+    """
 
     def __init__(self, selector, mode, shape, metric_units=None, axis_unit=None,
                  **metric_arrays):
@@ -172,6 +248,18 @@ class MultiLineMeasurements:
             metric_arrays.get('n_grid', np.zeros(shape)), dtype=int)
 
     def get_measurement(self, index) -> LineResult:
+        """Return the scalar measurement for one spatial element.
+
+        Parameters
+        ----------
+        index : int or tuple of int
+            Flat or multi-index selecting one spaxel.
+
+        Returns
+        -------
+        LineResult
+            Scalar view into the batched measurement maps.
+        """
         idx = (tuple(index) if isinstance(index, tuple)
                else np.unravel_index(int(index), self.shape))
         metrics = {name: float(getattr(self, name)[idx])
@@ -302,6 +390,55 @@ def _resolve_selection(model_or_selection, selector=None,
 def measure_line(model_or_selection, selector=None,
                  components=None, additive=True, x=None, window=None,
                  num=4096, index=None) -> LineResult:
+    """Measure geometric and moment-based properties of a selected line.
+
+    Parameters
+    ----------
+    model_or_selection : astropy.modeling.Model or SelectedLineProfile or SelectedLineCollection
+        Source model or precomputed line selection.
+    selector : str, optional
+        Line tag resolved by :func:`select_line`. Default is ``None`` when a
+        ``SelectedLineProfile`` is passed directly.
+    components : sequence of str, optional
+        Optional component-name filter applied during selection. Default is
+        ``None``.
+    additive : bool, optional
+        If ``True`` (default), select within the additive decomposition of the
+        model.
+    x : array-like or astropy.units.Quantity, optional
+        Explicit spectral grid used for the measurement. Default is ``None``.
+    window : tuple of float, optional
+        Spectral interval used to build an internal grid when ``x`` is omitted.
+        Default is ``None``, in which case Prism infers a window from the line
+        centers and widths.
+    num : int, optional
+        Number of samples for the internally generated grid. Default is ``4096``.
+    index : int or tuple of int, optional
+        Spatial index used when ``model_or_selection`` is a ``MultiFitResult``.
+        Default is ``None``.
+
+    Returns
+    -------
+    LineResult or MultiLineMeasurements
+        Scalar measurement for a single profile, or spatial maps for a selected
+        line collection.
+
+    Notes
+    -----
+    The selected profile is evaluated on a 1-D grid and summarized numerically.
+    Flux is integrated with the trapezoidal rule. Widths such as FWHM and FW10M
+    come from linear interpolation at fixed fractions of the peak height. The
+    first four central moments are then used to derive centroid, variance,
+    skewness, and kurtosis in a way that remains agnostic to the analytic model
+    family once the profile has been selected.
+
+    Examples
+    --------
+    >>> selected = select_line(model, 'Hb4861')
+    >>> result = measure_line(selected, x=wave)
+    >>> result.peak_position.value
+    >>> result.fwhm.value
+    """
     selection = _resolve_selection(
         model_or_selection, selector=selector,
         components=components, additive=additive, index=index)
@@ -605,6 +742,69 @@ def sample_line_measurements(model_or_selection, selector=None,
                              confidence=68, method='auto', distribution='auto',
                              random_state=None, return_samples=False,
                              index=None) -> LineResult:
+    """Propagate parameter uncertainties into sampled line measurements.
+
+    Parameters
+    ----------
+    model_or_selection : astropy.modeling.Model or SelectedLineProfile
+        Source model or precomputed line selection.
+    selector : str, optional
+        Line tag resolved by :func:`select_line`. Default is ``None`` when a
+        ``SelectedLineProfile`` is passed directly.
+    components : sequence of str, optional
+        Optional component-name filter applied during selection. Default is
+        ``None``.
+    additive : bool, optional
+        If ``True`` (default), select within the additive decomposition of the
+        model.
+    x : array-like or astropy.units.Quantity, optional
+        Explicit spectral grid used for the measurement. Default is ``None``.
+    window : tuple of float, optional
+        Spectral interval used to build an internal grid when ``x`` is omitted.
+        Default is ``None``.
+    num : int, optional
+        Number of samples for the internally generated grid. Default is ``4096``.
+    n_samples : int, optional
+        Number of Monte Carlo draws. Default is ``256``.
+    confidence : float, optional
+        Central confidence interval reported through ``lolim`` and ``uplim``.
+        Default is ``68``.
+    method : {'auto', 'covariance', 'limits', 'std'}, optional
+        Sampling source. ``'covariance'`` uses the fitted covariance matrix,
+        ``'limits'`` uses attached lower/upper limits, and ``'std'`` uses stored
+        standard deviations. Default is ``'auto'``.
+    distribution : {'auto', 'uniform', 'gaussian'}, optional
+        Distribution used for per-parameter draws. Default is ``'auto'``.
+    random_state : int or numpy.random.Generator, optional
+        Seed or generator used for reproducible draws. Default is ``None``.
+    return_samples : bool, optional
+        If ``True``, also return the raw sampled metric table. Default is
+        ``False``.
+    index : int or tuple of int, optional
+        Spatial index used when ``model_or_selection`` is a ``MultiFitResult``.
+        Default is ``None``.
+
+    Returns
+    -------
+    LineResult or tuple
+        Sampled summary metrics. When ``return_samples=True``, returns
+        ``(LineResult, pandas.DataFrame)``.
+
+    Notes
+    -----
+    This routine resamples model parameters, re-evaluates the selected line for
+    each draw, and measures every sampled profile with the same numerical logic
+    used by :func:`measure_line`. If a covariance matrix is attached, Prism draws
+    a multivariate normal sample so parameter correlations are preserved. When no
+    covariance matrix is available, independent draws fall back to attached
+    symmetric ``std`` values or asymmetric ``lolim``/``uplim`` intervals.
+
+    Examples
+    --------
+    >>> selected = select_line(fitted_model, 'Hb4861')
+    >>> summary = sample_line_measurements(selected, x=wave, n_samples=128)
+    >>> summary.flux.std
+    """
     selection = _resolve_selection(
         model_or_selection, selector=selector,
         components=components, additive=additive, index=index)

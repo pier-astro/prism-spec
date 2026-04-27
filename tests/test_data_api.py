@@ -30,8 +30,8 @@ def test_spectrum_generic_axis_workflow():
         yunit='Jy',
     )
     assert spec.xtype == 'wavelength'
-    assert spec.ytype == 'flux-density'
-    assert spec.medium is None
+    assert spec.ytype == 'flux-density-nu'
+    assert not hasattr(spec, 'medium')
 
     freq = spec.frequencies(unit=u.THz)
     assert freq.shape == x.shape
@@ -52,8 +52,9 @@ def test_spectrum_generic_axis_workflow():
 
     freq_spec = Spectrum(x=np.linspace(1.0, 2.0, 5), y=np.ones(5), xunit='THz')
     assert freq_spec.xtype == 'frequency'
-    with pytest.raises(ValueError, match='wavelength-like'):
-        freq_spec.air_to_vac()
+    wavelengths = freq_spec.wavelengths(unit=u.AA)
+    assert wavelengths.shape == freq_spec.x.shape
+    assert np.all(np.isfinite(wavelengths))
 
 
 def test_single_spectrum_fit_workflow():
@@ -85,7 +86,7 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
 
     cube = Cube(values=values, z=z, err=err, zunit='nm', unit='Jy')
     assert cube.ztype == 'wavelength'
-    assert cube.medium is None
+    assert not hasattr(cube, 'medium')
     image = cube.to_image(method='sum')
 
     assert isinstance(image, Image)
@@ -153,20 +154,19 @@ def test_cube_wavelength_domain_processing():
         zunit='AA',
     )
     assert cube.ztype == 'wavelength'
-    assert cube.medium is None
+    assert not hasattr(cube, 'medium')
 
-    vac_cube = cube.air_to_vac(inplace=False)
-    assert vac_cube.medium == 'vacuum'
-    assert not np.allclose(vac_cube.z, cube.z)
-    assert cube.medium is None
+    np.testing.assert_allclose(cube.wavelengths(unit=u.nm), z / 10.0)
+    assert np.all(np.isfinite(cube.frequencies(unit=u.Hz)))
+    assert np.all(np.isfinite(cube.energies(unit=u.eV)))
 
-    air_cube = vac_cube.vac_to_air(inplace=False)
-    np.testing.assert_allclose(air_cube.z, cube.z, rtol=0, atol=5e-4)
+    velocity = cube.velocity(rest=5005.0 * u.AA, unit=u.km / u.s)
+    assert velocity.shape == z.shape
+    assert np.any(np.abs(velocity) > 0.0)
 
-    red_cube = cube.deredden(ebv=np.array([[0.02, 0.03], [0.04, 0.05]]), inplace=False)
-    assert not hasattr(red_cube, 'ebv')
-    assert np.any(np.abs(red_cube.values - cube.values) > 0.0)
-    assert np.any(np.abs(red_cube.err - cube.err) > 0.0)
+    cropped = cube.crop_spectral(slice(1, 4), inplace=False)
+    np.testing.assert_allclose(cropped.z, z[1:4])
+    np.testing.assert_allclose(cube.z, z)
 
 
 def test_cube_and_image_crop_propagate_wcs_and_warn_on_direct_shape_change():

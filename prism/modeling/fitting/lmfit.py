@@ -22,6 +22,23 @@ __all__ = ['LMFitter']
 class LMFitter(MultiFitMixin, Fitter):
     """
     Levenberg-Marquardt fitter with internal bound transforms.
+
+    Parameters
+    ----------
+    calc_uncertainties : bool, optional
+        If ``True``, estimate parameter covariance after convergence. Default is
+        ``False``.
+    verbose : bool, optional
+        If ``True``, print basic progress diagnostics. Default is ``False``.
+    **kwargs
+        Additional keyword arguments forwarded to ``scipy.optimize.leastsq``.
+
+    Notes
+    -----
+    Classical Levenberg-Marquardt does not natively support bounds. Prism maps the
+    external bounded parameter space to an unconstrained internal space before each
+    optimisation step, then transforms both best-fit values and covariance back to
+    the user-facing parameterisation.
     """
 
     covariance = property(_fitter_covariance)

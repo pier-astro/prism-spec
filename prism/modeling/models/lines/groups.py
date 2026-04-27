@@ -22,7 +22,27 @@ from .base import (
 
 
 class LineGroupBase(LineModelBase):
-    """Base class for models defined from line-table files."""
+    """Base class for template-driven multi-line models.
+
+    Notes
+    -----
+    Concrete subclasses are built from line tables whose rows define the physical
+    transitions belonging to each template. Lines sharing the same template name
+    are tied through one amplitude parameter, while kinematic parameters such as
+    ``offset`` and width are shared across the whole group. This is the natural
+    parameterisation for narrow-line regions, doublets, and multiplets where
+    relative positions are fixed by atomic physics and relative weights are either
+    tabulated or user supplied.
+
+    Main constructors
+    -----------------
+    ``from_csv``
+        Read one or more line tables from disk.
+    ``from_arrays``
+        Build a group directly from arrays of names, positions, and weights.
+    ``from_templates``
+        Build from an already normalized Astropy table.
+    """
 
     @classmethod
     def from_csv(cls, csv_files, name=None, dirpath=None, bounds=None,
@@ -459,6 +479,29 @@ class LineGroupBase(LineModelBase):
 # ======================================================================
 
 class GaussianLines(LineGroupBase):
+    """Gaussian template group with shared velocity offset and FWHM.
+
+    Parameters
+    ----------
+    amplitude : float or astropy.units.Quantity, optional
+        Default amplitude assigned to every template when building the model.
+    offset : float or astropy.units.Quantity, optional
+        Shared velocity offset for all lines. Default is ``0 km / s``.
+    fwhm : float or astropy.units.Quantity, optional
+        Shared intrinsic Gaussian width in velocity units. Default is
+        ``1000 km / s``.
+    redshift : float, optional
+        Shared redshift. Default is ``0``.
+
+    Examples
+    --------
+    >>> group = GaussianLines.from_arrays(
+    ...     names=['Hb4861', '[OIII]5007'],
+    ...     pos=[4861.333, 5006.803],
+    ...     amplitude=1.0,
+    ...     fwhm=300.0,
+    ... )
+    """
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.gaussian)
@@ -487,6 +530,15 @@ class GaussianLines(LineGroupBase):
 
 
 class LorentzianLines(LineGroupBase):
+    """Lorentzian template group with shared velocity offset and FWHM.
+
+    Notes
+    -----
+    The intrinsic line core is Lorentzian for every member of the group. If an
+    instrumental Gaussian broadening term is present, each member is evaluated as
+    a Voigt profile after combining the intrinsic Lorentzian with the line-spread
+    function.
+    """
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
@@ -536,6 +588,15 @@ class LorentzianLines(LineGroupBase):
 
 
 class VoigtLines(LineGroupBase):
+    """Voigt template group with shared Gaussian and Lorentzian widths.
+
+    Notes
+    -----
+    This class keeps separate Gaussian and Lorentzian width parameters while still
+    tying amplitudes within each named template. It is useful when a line complex
+    requires explicit wing control without giving up the compact multi-line Prism
+    parameterisation.
+    """
     _shared_params = {'offset': 0.0, 'fwhm_G': 1000.0,
                       'fwhm_L': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm_G': u.km / u.s,

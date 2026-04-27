@@ -12,7 +12,38 @@ from .base import LineModelBase
 
 
 class GaussianLine(LineModelBase):
-    """Gaussian line model parameterised by rest position, velocity offset, and FWHM."""
+    """Single Gaussian emission or absorption line.
+
+    Parameters
+    ----------
+    amplitude : float or astropy.units.Quantity, optional
+        Peak amplitude in the chosen output domain. Default is ``1.0``.
+    position : float or astropy.units.Quantity, optional
+        Rest wavelength of the transition. Default is ``5000 AA`` and is fixed by
+        default.
+    offset : float or astropy.units.Quantity, optional
+        Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
+    fwhm : float or astropy.units.Quantity, optional
+        Intrinsic Gaussian full width at half maximum in velocity units. Default
+        is ``1000 km / s``.
+    redshift : float, optional
+        Source redshift applied on top of ``position``. Default is ``0`` and is
+        fixed by default.
+
+    Notes
+    -----
+    Prism parameterises line centroids and widths in velocity space while keeping
+    the physical transition anchored at a rest wavelength. Instrumental Gaussian
+    broadening is folded into the intrinsic profile before evaluation, so the
+    analytic flux and Jacobian remain available for fitting and uncertainty
+    propagation.
+
+    Examples
+    --------
+    >>> line = GaussianLine(amplitude=5.0, position=5007.0, fwhm=400.0)
+    >>> y = line(x)
+    >>> line.flux.value
+    """
     amplitude = Parameter(default=1.0)
     position = Parameter(default=5000.0, fixed=True, unit=u.AA)
     offset = Parameter(default=0.0, unit=u.km / u.s)
@@ -58,7 +89,28 @@ class GaussianLine(LineModelBase):
 
 
 class LorentzianLine(LineModelBase):
-    """Lorentzian line model (Voigt profile when instrument broadening is present)."""
+    """Single Lorentzian line with optional instrumental Gaussian broadening.
+
+    Parameters
+    ----------
+    amplitude : float or astropy.units.Quantity, optional
+        Peak amplitude in the chosen output domain. Default is ``1.0``.
+    position : float or astropy.units.Quantity, optional
+        Rest wavelength of the transition. Default is ``5000 AA``.
+    offset : float or astropy.units.Quantity, optional
+        Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
+    fwhm : float or astropy.units.Quantity, optional
+        Intrinsic Lorentzian full width at half maximum in velocity units.
+        Default is ``1000 km / s``.
+    redshift : float, optional
+        Source redshift. Default is ``0``.
+
+    Notes
+    -----
+    With zero instrumental broadening this class evaluates a pure Lorentzian.
+    When ``instfwhm`` is non-zero the observed profile becomes Voigt-like because
+    the intrinsic Lorentzian is convolved with a Gaussian line-spread function.
+    """
     amplitude = Parameter(default=1.0)
     position = Parameter(default=5000.0, fixed=True, unit=u.AA)
     offset = Parameter(default=0.0, unit=u.km / u.s)
@@ -114,7 +166,32 @@ class LorentzianLine(LineModelBase):
 
 
 class VoigtLine(LineModelBase):
-    """Voigt line model with independent Gaussian and Lorentzian widths."""
+    """Single Voigt line with independent Gaussian and Lorentzian widths.
+
+    Parameters
+    ----------
+    amplitude : float or astropy.units.Quantity, optional
+        Peak amplitude in the chosen output domain. Default is ``1.0``.
+    position : float or astropy.units.Quantity, optional
+        Rest wavelength of the transition. Default is ``5000 AA``.
+    offset : float or astropy.units.Quantity, optional
+        Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
+    fwhm_G : float or astropy.units.Quantity, optional
+        Gaussian contribution to the intrinsic width in velocity units. Default is
+        ``1000 km / s``.
+    fwhm_L : float or astropy.units.Quantity, optional
+        Lorentzian contribution to the intrinsic width in velocity units. Default
+        is ``1000 km / s``.
+    redshift : float, optional
+        Source redshift. Default is ``0``.
+
+    Notes
+    -----
+    ``VoigtLine`` is the most flexible analytic single-line profile in Prism. It
+    is useful when the astrophysical broadening cannot be approximated by a purely
+    Gaussian or purely Lorentzian kernel and when the separate core and wing widths
+    need to remain explicit fit parameters.
+    """
     amplitude = Parameter(default=1.0)
     position = Parameter(default=5000.0, fixed=True, unit=u.AA)
     offset = Parameter(default=0.0, unit=u.km / u.s)

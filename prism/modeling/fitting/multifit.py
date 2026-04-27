@@ -991,15 +991,15 @@ class MultiFitMixin(abc.ABC):
     Example
     -------
     >>> from prism.modeling import models
-    >>> from prism.modeling.fitting import AstroTRF
+    >>> from prism.modeling.fitting import TRFLSQFitter
     >>> import numpy as np
     >>>
-    >>> model    = models.GaussianLine(amplitude=10, mean=5000, fwhm=10)
+    >>> model    = models.GaussianLine(amplitude=10, position=5000, offset=0, fwhm=600)
     >>> cube     = ...  # ndarray shape (n_y, n_x, n_wave)
     >>> wave     = ...  # 1-D array, length n_wave
     >>> amp_init = np.random.uniform(5, 15, size=(n_y, n_x))
     >>>
-    >>> fitter  = AstroTRF(calc_uncertainties=True)
+    >>> fitter  = TRFLSQFitter(calc_uncertainties=True)
     >>> results = fitter.multifit(
     ...     model, wave, cube,
     ...     yerr=cube_err,

@@ -55,6 +55,25 @@ def _trim_axis_values(axis, new_size):
 
 @dataclass
 class RegionMeasurement:
+    """Summary of a region extracted from an :class:`Image`.
+
+    Attributes
+    ----------
+    value : float
+        Aggregated value over the selected region.
+    err : float
+        Propagated uncertainty associated with ``value``.
+    mask : object or None
+        Boolean mask used for the extraction, if retained.
+    ra, dec : float or None
+        Sky coordinates of the region barycenter in degrees when available.
+    area : float or None
+        Region area in pixel units or a derived physical unit.
+    n_pixels : int
+        Number of contributing pixels.
+    method : str
+        Reduction method used to collapse the region.
+    """
     value: float
     err: float
     mask: object | None
@@ -66,7 +85,43 @@ class RegionMeasurement:
 
 
 class Image:
-    """Container for 2-D values with optional uncertainties, mask, and WCS."""
+    """Two-dimensional image container with units, masks, and optional WCS.
+
+    Parameters
+    ----------
+    values : array-like
+        Image values with shape ``(y, x)`` or a 1-D map.
+    err, var : array-like, optional
+        Standard-deviation or variance arrays matching ``values``. Only one may
+        be provided. Default is ``None``.
+    x, y : array-like, optional
+        Coordinate arrays. Defaults are pixel indices.
+    mask : array-like of bool, optional
+        Valid-data mask with the same shape as ``values``. Default is all ``True``.
+    wcs : astropy.wcs.WCS, optional
+        Celestial WCS attached to the image. Default is ``None``.
+    header : mapping, optional
+        FITS-style metadata. Default is an empty dict.
+    unit, xunit, yunit : str or astropy.units.Unit, optional
+        Units for the image values and coordinate axes. Defaults are ``None``.
+    binmap : array-like, optional
+        Integer spatial bin map for 2-D images. Default is ``None``.
+    xtype, ytype, valuetype : str, optional
+        Explicit semantic labels. Defaults are inferred from the units.
+    is_var : bool, optional
+        Whether the stored uncertainty should be interpreted as variance when
+        round-tripping through ``NDData``. Default is inferred from ``var``.
+    ra_ref, dec_ref : float, str, or astropy.units.Quantity, optional
+        Reference sky position used for relative plotting offsets. Default is
+        ``None``.
+
+    Notes
+    -----
+    ``Image`` is the 2-D companion to :class:`prism.data.Cube`. It keeps the data
+    model lightweight while supporting WCS-aware cropping, spatial-scale
+    conversions, region extraction, and clean round-tripping through Astropy's
+    ``NDData`` containers.
+    """
 
     __array_priority__ = 1000
 

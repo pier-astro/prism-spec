@@ -78,7 +78,47 @@ def _trim_axis_values(axis, new_size):
 
 
 class Cube:
-    """Container for spectral cubes using coordinate/value naming."""
+    """Spectral cube container for 3-D IFU data or flattened spectral stacks.
+
+    Parameters
+    ----------
+    values : array-like
+        Data array with shape ``(z, y, x)`` or ``(z, spaxel)``.
+    z : array-like, optional
+        Spectral coordinate grid. Default is ``arange(values.shape[0])``.
+    err, var : array-like, optional
+        Standard-deviation or variance arrays matching ``values``. Only one may
+        be provided. Default is ``None``.
+    x, y : array-like, optional
+        Spatial coordinate grids. Defaults are pixel indices.
+    mask : array-like of bool, optional
+        Valid-data mask with the same shape as ``values``. Default is all ``True``.
+    wcs : astropy.wcs.WCS, optional
+        Celestial or spectral WCS attached to the cube. Default is ``None``.
+    header : mapping, optional
+        FITS-style metadata. Default is an empty dict.
+    unit, xunit, yunit, zunit : str or astropy.units.Unit, optional
+        Units for the cube values and coordinate axes. Defaults are ``None``.
+    binmap : array-like, optional
+        Integer spatial bin map for 3-D cubes. Default is ``None``.
+    xtype, ytype, ztype, valuetype : str, optional
+        Explicit semantic labels. Defaults are inferred from the units.
+    ra, dec : float, str, or astropy.units.Quantity, optional
+        Sky coordinates associated with the cube. Default is ``None``.
+    redshift : float, optional
+        Source redshift stored with the cube. Default is ``None``.
+    is_var : bool, optional
+        Whether the stored uncertainty should be interpreted as variance when
+        round-tripping through ``NDData``. Default is inferred from ``var``.
+
+    Notes
+    -----
+    ``Cube`` is designed to stay close to Astropy containers while exposing the
+    workflow conveniences needed for IFU fitting: spectral-axis conversion,
+    WCS-aware cropping, FITS import/export, map extraction, and bin-map support.
+    The first axis is always spectral, so methods such as ``multifit`` and line
+    measurements can work on native cube outputs without extra reshaping.
+    """
 
     __array_priority__ = 1000
 
