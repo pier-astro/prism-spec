@@ -3,6 +3,7 @@ import tempfile
 import warnings
 
 import numpy as np
+import pytest
 from astropy.modeling import fitting as ast_fitting, models
 
 import prism.modeling.fitting as prism_fitting
@@ -133,3 +134,51 @@ def test_prism_astropy_wrapper_attaches_covariance_without_native_patch():
     assert fitter.fit_info['param_cov'] is not None
     assert hasattr(fitted, '_param_cov')
     assert np.isfinite(fitted.flux.std) and fitted.flux.std > 0
+
+
+@pytest.mark.skipif(not prism_fitting.HAS_SHERPA, reason='Sherpa is not installed')
+def test_sherpa_wrapper_honors_inplace_and_replaces_stale_out_of_bounds_state():
+    x = np.linspace(-5.0, 5.0, 400)
+    truth = models.Gaussian1D(amplitude=3.0, mean=0.4, stddev=0.7)
+    y = truth(x)
+    yerr = np.full_like(x, 0.1)
+
+    model = models.Gaussian1D(
+        amplitude=1.0,
+        mean=0.0,
+        stddev=1.2,
+        bounds={
+            'amplitude': (0.0, 10.0),
+            'mean': (-1.0, 1.0),
+            'stddev': (0.1, 3.0),
+        },
+    )
+
+    # Simulate notebook state after loading persisted parameters that predate current bounds.
+    model.parameters = np.array([2.5, 2.5, 0.8])
+    assert model.mean.value == 2.5
+    assert model.mean.bounds == (-1.0, 1.0)
+
+    fitter = prism_fitting.SherpaLM()
+    fitted = fitter(model, x, y, yerr=yerr)
+
+    assert fitted is model
+    assert model.mean.bounds[0] <= model.mean.value <= model.mean.bounds[1]
+    assert np.isclose(model.mean.value, truth.mean.value, atol=1e-2)
+
+    untouched = models.Gaussian1D(
+        amplitude=1.0,
+        mean=0.0,
+        stddev=1.2,
+        bounds={
+            'amplitude': (0.0, 10.0),
+            'mean': (-1.0, 1.0),
+            'stddev': (0.1, 3.0),
+        },
+    )
+    untouched.parameters = np.array([2.5, 2.5, 0.8])
+
+    separate = fitter(untouched, x, y, yerr=yerr, inplace=False)
+    assert separate is not untouched
+    assert untouched.mean.value == 2.5
+    assert separate.mean.bounds[0] <= separate.mean.value <= separate.mean.bounds[1]

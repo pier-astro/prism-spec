@@ -1,0 +1,21 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+[OII]3726 3726.032 1
+[OII]3728 3728.815 1
+[NeIII]3868 3868.76 1
+[OIII]5007 4958.911 0.33333333
+[OIII]5007 5006.843 1
+[OI]6300 6300.304 1
+[OI]6363 6363.776 0.33333333
+[NII]6583 6548.05 0.33333333
+[NII]6583 6583.45 1
+[SII]6716 6716.44 1
+[SII]6730 6730.815 1
+[OII]7330 7330.73 1

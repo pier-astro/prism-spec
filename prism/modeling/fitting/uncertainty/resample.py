@@ -50,23 +50,29 @@ def prepare_noise_and_weights(y, yerr, weights, statistic):
                 "Provide data uncertainties or weights for noise generation."
             )
 
-    yerr = np.asarray(yerr)
+    yerr = np.asarray(yerr, dtype=float)
+    if yerr.ndim not in {1, 2}:
+        raise ResampleError('yerr must be symmetric (N,) or asymmetric (2, N).')
+    if yerr.ndim == 2 and yerr.shape[0] != 2:
+        raise ResampleError('Asymmetric yerr must have shape (2, N).')
     yerr = np.maximum(yerr, 1e-10)
     if np.any(~np.isfinite(yerr)):
         raise ResampleError("yerr contains non-finite values.")
+
+    effective_yerr = 0.5 * (yerr[0] + yerr[1]) if yerr.ndim == 2 else yerr
 
     if weights is None:
         if stat == 'poisson':
             weights = 1.0 / np.maximum(np.abs(y), 1e-10)
         else:
-            weights = 1.0 / (yerr ** 2)
+            weights = 1.0 / (effective_yerr ** 2)
     else:
         weights = np.asarray(weights)
         if np.any(~np.isfinite(weights)):
             raise ResampleError("weights contains non-finite values.")
         weights = np.maximum(weights, 1e-20)
 
-    return yerr, weights
+    return yerr, effective_yerr, weights
 
 
 def extract_limits(param, param_samples, lower_percentile, upper_percentile,
@@ -136,7 +142,7 @@ class Bootstrap:
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
                  seed=None, confidence=68, noise_dist='uniform',
                  verbose=True, nproc=1, batch=False,
-                 inplace=True, set_values=True):
+                 inplace=True, set_values=True, xerr=None, perturb_x=False):
         # Frozen copy: all bootstrap iterations start from this state.
         # The original model is never mutated during the run.
         self._initial_model = model.copy()
@@ -147,6 +153,7 @@ class Bootstrap:
         self.fitter = fitter
         self.x = np.asarray(x)
         self.y = np.asarray(y)
+        self.xerr = None if xerr is None else np.asarray(xerr, dtype=float)
         self.yerr = yerr
         self.weights = weights
         self.n_samples = int(n_samples)
@@ -160,6 +167,7 @@ class Bootstrap:
         self.confidence = confidence
         self.set_values = bool(set_values)
         self.noise_dist = noise_dist.lower()
+        self.perturb_x = bool(perturb_x)
 
     @staticmethod
     def _fit_param_names(model):
@@ -196,7 +204,7 @@ class Bootstrap:
         if self.n_samples < 1:
             raise ResampleError("n_samples must be >= 1.")
 
-        yerr, weights = prepare_noise_and_weights(self.y, self.yerr, self.weights, stat)
+        raw_yerr, fit_yerr, weights = prepare_noise_and_weights(self.y, self.yerr, self.weights, stat)
         # Flux Randomization: perturb observed data with measured uncertainties.
         # The observed spectrum carries the signal; only the noise realization
         # changes across iterations (Peterson et al. 1998, PASP 110, 660).
@@ -204,14 +212,40 @@ class Bootstrap:
         n_pts = y_obs.size
         _sqrt3 = np.sqrt(3.0)
 
+        if raw_yerr.ndim == 2 and self.noise_dist == 'gauss':
+            raise ResampleError(
+                "Asymmetric yerr is ambiguous for Gaussian resampling. "
+                "Use noise_dist='uniform' or provide symmetric yerr."
+            )
+
+        if self.perturb_x:
+            if self.xerr is None:
+                raise ResampleError('perturb_x=True requires explicit xerr.')
+            if self.xerr.ndim != 1:
+                raise ResampleError('Only symmetric xerr is supported when perturb_x=True.')
+            if self.xerr.shape != self.x.shape:
+                raise ResampleError('xerr must match x shape when perturb_x=True.')
+            if np.any(~np.isfinite(self.xerr)) or np.any(self.xerr < 0):
+                raise ResampleError('xerr must be finite and non-negative.')
+
         rng = np.random.default_rng(self.seed)
         if stat == 'gauss':
             if self.noise_dist == 'uniform':
                 # ±√3·σ gives Var = σ², matching the Gaussian case.
-                y_synth = rng.uniform(y_obs - _sqrt3 * yerr, y_obs + _sqrt3 * yerr,
-                                      size=(self.n_samples, n_pts))
+                if raw_yerr.ndim == 2:
+                    y_synth = rng.uniform(
+                        y_obs - raw_yerr[0],
+                        y_obs + raw_yerr[1],
+                        size=(self.n_samples, n_pts),
+                    )
+                else:
+                    y_synth = rng.uniform(
+                        y_obs - _sqrt3 * raw_yerr,
+                        y_obs + _sqrt3 * raw_yerr,
+                        size=(self.n_samples, n_pts),
+                    )
             else:
-                y_synth = rng.normal(y_obs, yerr, size=(self.n_samples, n_pts))
+                y_synth = rng.normal(y_obs, raw_yerr, size=(self.n_samples, n_pts))
             fit_stat = 'chi2'
         else:
             # Poisson: λ = observed counts. y_obs must be raw non-negative counts.
@@ -219,21 +253,20 @@ class Bootstrap:
             y_synth = rng.poisson(lam, size=(self.n_samples, n_pts)).astype(float)
             fit_stat = 'poisson'
 
-        yerr_batch = np.broadcast_to(yerr, (self.n_samples, n_pts))
-        weights_batch = np.broadcast_to(weights, (self.n_samples, n_pts))
+        if self.perturb_x:
+            if self.noise_dist == 'uniform':
+                x_synth = rng.uniform(
+                    self.x - _sqrt3 * self.xerr,
+                    self.x + _sqrt3 * self.xerr,
+                    size=(self.n_samples, n_pts),
+                )
+            else:
+                x_synth = rng.normal(self.x, self.xerr, size=(self.n_samples, n_pts))
+        else:
+            x_synth = None
 
-        result = self.fitter.multifit(
-            model=self._initial_model.copy(),
-            x=self.x,
-            y=y_synth,
-            yerr=yerr_batch,
-            weights=weights_batch,
-            statistic=fit_stat,
-            nproc=self.nproc,
-            progress=True,
-            batch=self.batch,
-            **self.fitter_kwargs,
-        )
+        yerr_batch = np.broadcast_to(fit_yerr, (self.n_samples, n_pts))
+        weights_batch = np.broadcast_to(weights, (self.n_samples, n_pts))
 
         param_names = self._fit_param_names(self._initial_model)
         samples = {name: np.full(self.n_samples, np.nan, dtype=float) for name in param_names}
@@ -241,24 +274,63 @@ class Bootstrap:
         n_success = 0
         max_warn = 5
         warned = 0
-        for i in range(self.n_samples):
-            if not bool(result.success.flat[i]):
-                if self.verbose and warned < max_warn:
-                    warnings.warn(
-                        f"Bootstrap iteration {i} failed: {result.messages.flat[i]}",
-                        RuntimeWarning,
-                    )
-                    warned += 1
-                continue
+        if x_synth is None:
+            result = self.fitter.multifit(
+                model=self._initial_model.copy(),
+                x=self.x,
+                y=y_synth,
+                yerr=yerr_batch,
+                weights=weights_batch,
+                statistic=fit_stat,
+                nproc=self.nproc,
+                progress=True,
+                batch=self.batch,
+                **self.fitter_kwargs,
+            )
 
-            fitted_model = result.get_model(i)
-            fitted_params, _, _ = model_to_fit_params(fitted_model)
-            for name, value in zip(param_names, fitted_params):
-                samples[name][i] = value
-            n_success += 1
+            for i in range(self.n_samples):
+                if not bool(result.success.flat[i]):
+                    if self.verbose and warned < max_warn:
+                        warnings.warn(
+                            f"Bootstrap iteration {i} failed: {result.messages.flat[i]}",
+                            RuntimeWarning,
+                        )
+                        warned += 1
+                    continue
+
+                fitted_model = result.get_model(i)
+                fitted_params, _, _ = model_to_fit_params(fitted_model)
+                for name, value in zip(param_names, fitted_params):
+                    samples[name][i] = value
+                n_success += 1
+
+            nfev_arr = result.nfev.ravel()
+        else:
+            nfev_arr = np.full(self.n_samples, np.nan, dtype=float)
+            for i in range(self.n_samples):
+                try:
+                    fitted_model = self.fitter(
+                        model=self._initial_model.copy(),
+                        x=x_synth[i],
+                        y=y_synth[i],
+                        yerr=fit_yerr,
+                        weights=weights,
+                        statistic=fit_stat,
+                        inplace=False,
+                        **self.fitter_kwargs,
+                    )
+                except Exception as exc:
+                    if self.verbose and warned < max_warn:
+                        warnings.warn(f'Bootstrap iteration {i} failed: {exc}', RuntimeWarning)
+                        warned += 1
+                    continue
+
+                fitted_params, _, _ = model_to_fit_params(fitted_model)
+                for name, value in zip(param_names, fitted_params):
+                    samples[name][i] = value
+                n_success += 1
 
         # Post-run diagnostic: warn if most fits barely moved
-        nfev_arr = result.nfev.ravel()
         valid_nfev = nfev_arr[np.isfinite(nfev_arr)]
         if len(valid_nfev) > 0:
             frac_stale = np.mean(valid_nfev < 3)
@@ -405,7 +477,8 @@ class Bootstrap:
 def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
               n_samples=1000, statistic='gauss', fitter_kwargs=None, seed=None,
               verbose=False, nproc=1, batch=False,
-              inplace=True, confidence=68, set_values=True, noise_dist='gauss'):
+              inplace=True, confidence=68, set_values=True, noise_dist='gauss',
+              xerr=None, perturb_x=False):
     """Estimate parameter uncertainties via Flux Randomization (Empirical Monte Carlo).
 
     Generates n_samples synthetic spectra by perturbing the observed flux
@@ -461,6 +534,8 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         confidence=confidence,
         set_values=set_values,
         noise_dist=noise_dist,
+        xerr=xerr,
+        perturb_x=perturb_x,
     ).run()
 
 

@@ -22,7 +22,7 @@ from .base import (
 
 
 class LineGroupBase(LineModelBase):
-    """Base class for models defined from CSVs with columns: name, pos, weight."""
+    """Base class for models defined from line-table files."""
 
     @classmethod
     def from_csv(cls, csv_files, name=None, dirpath=None, bounds=None,
@@ -31,7 +31,7 @@ class LineGroupBase(LineModelBase):
         if not isinstance(csv_files, (list, tuple)):
             csv_files = [csv_files]
         if dirpath is None:
-            dirpath = _base.csv_lines_path
+            dirpath = _base.linetable_path
 
         tables = []
         for f in csv_files:
@@ -47,7 +47,7 @@ class LineGroupBase(LineModelBase):
     @classmethod
     def from_arrays(cls, names, pos, weights=None, name=None, bounds=None,
                     amplitude=None, instfwhm=0.0, domain='wavelength',
-                    medium=None, position_unit=None, **init_kwargs):
+                    medium=None, position_unit=u.AA, **init_kwargs):
         names = np.atleast_1d(names)
         pos = np.atleast_1d(pos)
         if weights is None:
@@ -68,7 +68,7 @@ class LineGroupBase(LineModelBase):
     @classmethod
     def from_templates(cls, linetable, name=None, bounds=None, amplitude=None,
                        instfwhm=0.0, domain='wavelength',
-                       medium=None, position_unit=None, **init_kwargs):
+                       medium=None, position_unit=u.AA, **init_kwargs):
         linetable = _base.normalize_linetable(
             linetable,
             medium=medium,

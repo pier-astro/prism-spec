@@ -1,0 +1,24 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+Lya1215 1215.67 1
+Heps3970 3970.075 1
+Hd4101 4101.735 1
+Hg4340 4340.472 1
+Hb4861 4861.325 1
+Ha6562 6562.795 1
+Pa14 8598.39 1
+Pa13 8665.02 1
+Pa12 8750.46 1
+Pa11 8862.782 1
+Pa10 9014.909 1
+Pa9 9229.014 1
+Pae 9545.969 1
+Pad 10049.368 1
+Pag 10938.106 1

@@ -171,31 +171,6 @@ def get_mask(x, intervals, mask_inside=True):
     else:
         return np.any(w_masks, axis=0)
 
-def compute_reduced_chi2(data, data_err, model, npars):
-    """
-    Compute the reduced chi-squared statistic for a given model and data.
-
-    Parameters
-    ----------
-    data : array-like
-        Observed data (flux).
-    data_err : array-like
-        Uncertainties in the observed data.
-    model : array-like
-        Model predictions.
-    npars : int
-        Number of parameters in the model.
-
-    Returns
-    -------
-    float
-        Reduced chi-squared value.
-    """
-    residuals = (data - model) / data_err
-    chi2 = np.sum(residuals**2)
-    dof = len(data) - npars  # degrees of freedom
-    return chi2 / dof if dof > 0 else np.nan  # Avoid division by zero
-
 
 
 def plot_lines(component, ax=None, show_name=True, text_y_frac=0.95, color='grey', lw=0.75, ls='--', **kwargs):
@@ -221,3 +196,38 @@ def plot_lines(component, ax=None, show_name=True, text_y_frac=0.95, color='grey
             texts.append(text)
     if texts:
         adjust_text(texts, ax=ax) # Adjust text to avoid overlap
+
+
+def get_ebv_from_map(ra, dec, dustpath=None):
+    """Fetch E(B-V) from SFD dust maps at the given coordinates."""
+    try:
+        from sfdmap2 import sfdmap
+    except ImportError:
+        raise ImportError("sfdmap2 is required for this operation. Install with 'pip install sfdmap2'.")
+    import os
+    import warnings
+    if dustpath is None:
+        script_dir = os.path.dirname(__file__)
+        dustpath = os.path.normpath(os.path.join(script_dir, '..', '..', 'resources', 'dust'))
+
+    if not os.path.exists(dustpath):
+        warnings.warn(f"Dust maps not found at {dustpath}. Extinction correction might fail if maps are required.")
+
+    mapper = sfdmap.SFDMap(dustpath)
+    return mapper.ebv(ra, dec)
+
+
+def apply_extinction_correction(wave, flux, fluxerr=None, ebv=0.0, rv=3.1, undo=False):
+    """Apply or undo Galactic extinction correction using the O'Donnell 1994 model."""
+    try:
+        from PyAstronomy import pyasl
+    except ImportError:
+        raise ImportError("PyAstronomy is required for extinction correction.")
+
+    # pyasl.unred uses 10^(0.4 * A_lambda). Negative ebv effectively reverses this.
+    sign = -1.0 if undo else 1.0
+    new_flux = pyasl.unred(wave, flux, sign * ebv, R_V=rv)
+    if fluxerr is not None:
+        new_err = pyasl.unred(wave, fluxerr, sign * ebv, R_V=rv)
+        return new_flux, new_err
+    return new_flux

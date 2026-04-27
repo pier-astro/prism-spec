@@ -25,6 +25,19 @@ from .utils import (
 _DEFAULT_MAX_EVALUATIONS = None
 
 
+def validate_symmetric_yerr(yerr, *, context='fitters'):
+    """Return a symmetric uncertainty array or raise on asymmetric input."""
+    if yerr is None:
+        return None
+    array = np.asarray(yerr)
+    if array.ndim != 1:
+        raise ValueError(
+            f"Asymmetric yerr is not supported by direct {context}. "
+            "Use symmetric yerr or bootstrap(..., noise_dist='uniform') for asymmetric resampling."
+        )
+    return array
+
+
 def get_max_evaluations():
     """Return the Prism global default max evaluations for wrapper fitters."""
     return _DEFAULT_MAX_EVALUATIONS
@@ -71,7 +84,7 @@ def _resolve_max_evaluations(self, call_kwargs):
 def compute_weights(y, yerr, statistic):
     if yerr is None:
         return None
-    yerr = np.asarray(yerr)
+    yerr = validate_symmetric_yerr(yerr)
     stat = str(statistic).lower()
     if stat == 'chi2':
         return 1.0 / yerr
@@ -106,6 +119,8 @@ def _wrap_fitter_call(original_call):
 
     def wrapped_call(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
                      filter_non_finite=False, verbose=False, inplace=True, **kwargs):
+        if yerr is not None:
+            yerr = validate_symmetric_yerr(yerr)
         
         # 1. Handle non-finite
         if filter_non_finite:

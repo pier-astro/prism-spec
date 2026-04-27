@@ -1,0 +1,11 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+NaI5890 5889.951 1
+NaI5896 5895.924 1

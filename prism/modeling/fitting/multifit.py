@@ -20,6 +20,7 @@ import copy
 import multiprocess as mp
 from tqdm.auto import tqdm
 from astropy.modeling.fitting import model_to_fit_params
+from ...data.core import parse_binmap
 
 _MULTIFIT_STAT_KEYS = (
     'cost', 'optimality', 'ndata', 'nparam', 'nfree', 'dof', 'status'
@@ -1322,12 +1323,18 @@ class MultiFitMixin(abc.ABC):
 
     def _fit_multi(self, model, x, y, yerr=None, statistic='chi2', weights=None,
                    nproc=1, spectral_axis=None, progress=True, batch=False,
+                   binmap=None,
                    initpars=None, bounds=None, fixed=None, tied=None,
                    **kwargs):
         """Internal: run fits over all spaxels and accumulate a MultiFitResult."""
         y = np.asarray(y)
         if y.ndim < 2:
             raise ValueError("Multi-spectrum fitting requires y.ndim >= 2.")
+        if yerr is not None and np.asarray(yerr).ndim != y.ndim:
+            raise ValueError(
+                "Asymmetric yerr is not supported by direct multifit calls. "
+                "Use symmetric yerr or bootstrap(..., noise_dist='uniform') for asymmetric resampling."
+            )
 
         wave_len = len(x)
         resolved_axis = self._resolve_spectral_axis(y, wave_len, spectral_axis=spectral_axis)
@@ -1347,6 +1354,26 @@ class MultiFitMixin(abc.ABC):
         yerr_flat    = mapped_yerr.reshape((n_spaxels, wave_len))    if mapped_yerr    is not None else [None] * n_spaxels
         weights_flat = mapped_weights.reshape((n_spaxels, wave_len)) if mapped_weights is not None else [None] * n_spaxels
 
+        if binmap is not None:
+            validated_binmap = parse_binmap(binmap, spatial_shape=spatial_shape, name='binmap')
+            flat_binmap = validated_binmap.reshape(-1)
+            fit_flat_indices = []
+            fit_groups = {}
+            for bin_id in np.unique(flat_binmap):
+                if int(bin_id) < 0:
+                    continue
+                members = np.flatnonzero(flat_binmap == bin_id)
+                if members.size == 0:
+                    continue
+                representative = int(members[0])
+                fit_flat_indices.append(representative)
+                fit_groups[representative] = members.astype(int)
+            if not fit_flat_indices:
+                raise ValueError('binmap does not contain any non-negative bin labels.')
+        else:
+            fit_flat_indices = list(range(n_spaxels))
+            fit_groups = {idx: np.array([idx], dtype=int) for idx in fit_flat_indices}
+
         res = MultiFitResult(
             spatial_shape,
             template_model.param_names,
@@ -1359,7 +1386,7 @@ class MultiFitMixin(abc.ABC):
         )
 
         def task_generator():
-            for idx in range(n_spaxels):
+            for idx in fit_flat_indices:
                 ip, bo = self._multifit_task_overrides(idx, config)
                 yield (idx, template_model, x, y_flat[idx],
                        yerr_flat[idx], statistic, weights_flat[idx], ip, bo, kwargs)
@@ -1370,17 +1397,20 @@ class MultiFitMixin(abc.ABC):
         show_progress = progress
 
         if self.verbose:
-            print(f"Fitting {n_spaxels} spectra on {nproc} core(s)…")
+            if binmap is None:
+                print(f"Fitting {n_spaxels} spectra on {nproc} core(s)…")
+            else:
+                print(f"Fitting {len(fit_flat_indices)} unique bins over {n_spaxels} spectra on {nproc} core(s)…")
 
         t0 = time.perf_counter()
 
         if nproc <= 1:
-            indices = range(n_spaxels)
+            indices = fit_flat_indices
             if show_progress:
-                indices = tqdm(indices, total=n_spaxels, desc="Fitting spectra")
+                indices = tqdm(indices, total=len(fit_flat_indices), desc="Fitting bins" if binmap is not None else "Fitting spectra")
             for idx in indices:
                 ip, bo = self._multifit_task_overrides(idx, config)
-                res.update(*self._fit_single_direct(
+                entry = self._fit_single_direct(
                     idx=idx,
                     model=template_model,
                     x=x,
@@ -1391,7 +1421,9 @@ class MultiFitMixin(abc.ABC):
                     initpars_1d=ip,
                     bounds_1d=bo,
                     kwargs=kwargs,
-                ))
+                )
+                for target_idx in fit_groups[idx]:
+                    res.update(target_idx, entry[1], entry[2], entry[3], entry[4])
         else:
             ctx = mp.get_context('spawn')
             worker_fitter = self._multifit_spawn_fitter()
@@ -1401,17 +1433,19 @@ class MultiFitMixin(abc.ABC):
                 initargs=(worker_fitter, template_model, x, statistic, kwargs),
             ) as pool:
                 def worker_task_generator():
-                    for idx in range(n_spaxels):
+                    for idx in fit_flat_indices:
                         ip, bo = self._multifit_task_overrides(idx, config)
                         yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], ip, bo)
 
-                chunksize = self._multifit_chunksize(n_spaxels, nproc) if batch else 1
+                chunksize = self._multifit_chunksize(len(fit_flat_indices), nproc) if batch else 1
                 it = pool.imap_unordered(_multifit_worker_task, worker_task_generator(),
                                          chunksize=chunksize)
                 if show_progress:
-                    it = tqdm(it, total=n_spaxels, desc="Fitting spectra")
+                    it = tqdm(it, total=len(fit_flat_indices), desc="Fitting bins" if binmap is not None else "Fitting spectra")
                 for result in it:
-                    res.update(*result)
+                    rep_idx, model_params, stdevs, fit_info, cov = result
+                    for target_idx in fit_groups[rep_idx]:
+                        res.update(target_idx, model_params, stdevs, fit_info, cov)
 
         total_time = time.perf_counter() - t0
         self._set_batch_fit_info(res, total_time)
@@ -1430,6 +1464,7 @@ class MultiFitMixin(abc.ABC):
 
     def multifit(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
                  inplace=False, nproc=1, spectral_axis=None, progress=True, batch=False,
+                 binmap=None,
                  initpars=None, bounds=None, fixed=None, tied=None,
                  **kwargs) -> MultiFitResult:
         """
@@ -1500,6 +1535,7 @@ class MultiFitMixin(abc.ABC):
         return self._fit_multi(
             model, x, y, yerr=yerr, statistic=statistic, weights=weights,
             nproc=nproc, spectral_axis=spectral_axis, progress=progress, batch=batch,
+            binmap=binmap,
             initpars=initpars, bounds=bounds, fixed=fixed, tied=tied,
             **kwargs
         )

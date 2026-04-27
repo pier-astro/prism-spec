@@ -16,11 +16,13 @@ from astropy.modeling import Fittable1DModel, Parameter
 from astropy.table import QTable, Table, vstack
 
 from . import profiles
+from ....utils.tools import air_to_vac, vac_to_air
 
 c_kms = profiles.C_KMS
 sigma2fwhm = profiles.SIGMA2FWHM
 DEFAULT_LINETABLE_MEDIUM = 'air'
 VALID_LINETABLE_MEDIA = {'air', 'vacuum'}
+_default_medium = DEFAULT_LINETABLE_MEDIUM
 
 # ---------------------------------------------------------------------------
 # Metric
@@ -62,25 +64,74 @@ class Metric:
         return f"{self.value:.4g} \u00b1 {self.std:.4g}{unit_str}  [{self.lolim:.4g}, {self.uplim:.4g}]"
 
 # ---------------------------------------------------------------------------
-# CSV / wavelength-range globals
+# Line-table / wavelength-range globals
 # ---------------------------------------------------------------------------
 
 script_dir = os.path.dirname(__file__)
 resource_path = os.path.join(script_dir, "..", "..", "..", "..", "resources", "lines")
-csv_lines_path = resource_path
+linetable_path = resource_path
 
 _wmin = 0.0
 _wmax = np.inf
+
+
+def _scalar_float(value, name):
+    arr = np.asarray(value, dtype=float)
+    if arr.size != 1:
+        raise ValueError(f"{name} must be a scalar value.")
+    scalar = float(arr.reshape(-1)[0])
+    if not np.isfinite(scalar):
+        raise ValueError(f"{name} must be finite.")
+    return scalar
+
+
+def _wavelength_limit_value(value, name):
+    if value is None:
+        return None
+    if isinstance(value, u.Quantity):
+        return _scalar_float(value.to_value(u.AA, equivalencies=u.spectral()), name)
+    return _scalar_float(value, name)
+
+
+def _resolve_filter_bounds(minimum, maximum, *, unit=None, target_unit=u.AA):
+    lower_is_quantity = isinstance(minimum, u.Quantity)
+    upper_is_quantity = isinstance(maximum, u.Quantity)
+    if lower_is_quantity != upper_is_quantity:
+        raise ValueError(
+            "min and max must both be spectral Quantities or both be plain scalars.")
+
+    target_unit = u.Unit(target_unit)
+    if lower_is_quantity:
+        lower = minimum.to(target_unit, equivalencies=u.spectral())
+        upper = maximum.to(target_unit, equivalencies=u.spectral())
+    else:
+        resolved_unit = target_unit if unit is None else u.Unit(unit)
+        lower = (_scalar_float(minimum, 'min') * resolved_unit).to(target_unit, equivalencies=u.spectral())
+        upper = (_scalar_float(maximum, 'max') * resolved_unit).to(target_unit, equivalencies=u.spectral())
+
+    lower_val = _scalar_float(lower.to_value(target_unit), 'min')
+    upper_val = _scalar_float(upper.to_value(target_unit), 'max')
+    if lower_val == upper_val:
+        raise ValueError("min and max resolve to the same spectral position.")
+    return (min(lower_val, upper_val) * target_unit,
+            max(lower_val, upper_val) * target_unit)
 
 
 def set_wavelength_range(wmin=None, wmax=None):
     """Set the global wavelength range for line filtering."""
     global _wmin, _wmax
     if wmin is not None:
-        _wmin = wmin
+        _wmin = _wavelength_limit_value(wmin, 'wmin')
     if wmax is not None:
-        _wmax = wmax
+        _wmax = _wavelength_limit_value(wmax, 'wmax')
     print(f"Wavelength range set to: [{_wmin}, {_wmax}]")
+
+
+def set_medium(medium=DEFAULT_LINETABLE_MEDIUM):
+    """Set the session default wavelength medium for line models and headerless line tables."""
+    global _default_medium
+    _default_medium = _validate_medium(medium)
+    return _default_medium
 
 
 def _validate_domain(domain):
@@ -90,10 +141,14 @@ def _validate_domain(domain):
 
 
 def _validate_medium(medium):
-    medium = DEFAULT_LINETABLE_MEDIUM if medium is None else str(medium).strip().lower()
+    medium = str(medium).strip().lower()
     if medium not in VALID_LINETABLE_MEDIA:
         raise ValueError("medium must be 'air' or 'vacuum'.")
     return medium
+
+
+def _resolve_default_medium(medium=None):
+    return _default_medium if medium is None else _validate_medium(medium)
 
 
 def _spectral_position_unit(values, position_unit=None):
@@ -111,17 +166,45 @@ def _spectral_position_unit(values, position_unit=None):
     return None
 
 
-def _resolve_linetable_medium(medium=None, position_unit=None):
+def _resolve_source_linetable_medium(table_medium=None, position_unit=None, fallback_medium=None):
     unit = None if position_unit is None else u.Unit(position_unit)
-    if medium is None:
-        if unit is not None and not unit.is_equivalent(u.AA):
-            return 'vacuum'
-        return DEFAULT_LINETABLE_MEDIUM
-    medium = _validate_medium(medium)
-    if unit is not None and not unit.is_equivalent(u.AA) and medium != 'vacuum':
+    if unit is not None and not unit.is_equivalent(u.AA):
+        if table_medium is not None and _validate_medium(table_medium) != 'vacuum':
+            raise ValueError(
+                "Line tables specified in frequency or energy units imply vacuum wavelengths; medium must be 'vacuum'.")
+        return 'vacuum'
+    if table_medium is not None:
+        return _validate_medium(table_medium)
+    return _resolve_default_medium(fallback_medium)
+
+
+def _convert_line_positions(positions, source_medium, target_medium):
+    source_medium = _validate_medium(source_medium)
+    target_medium = _validate_medium(target_medium)
+    positions = positions.to(u.AA)
+    if source_medium == target_medium:
+        return positions
+    values = positions.to_value(u.AA)
+    if source_medium == 'air' and target_medium == 'vacuum':
+        converted = air_to_vac(values)
+    elif source_medium == 'vacuum' and target_medium == 'air':
+        converted = vac_to_air(values)
+    else:
+        raise ValueError("medium must be 'air' or 'vacuum'.")
+    return np.asarray(converted, dtype=float) * u.AA
+
+
+def _resolve_linetable_medium(medium=None, table_medium=None, position_unit=None):
+    source_medium = _resolve_source_linetable_medium(
+        table_medium=table_medium,
+        position_unit=position_unit,
+        fallback_medium=medium,
+    )
+    target_medium = source_medium if medium is None else _validate_medium(medium)
+    if position_unit is not None and not u.Unit(position_unit).is_equivalent(u.AA) and target_medium != 'vacuum':
         raise ValueError(
             "Line tables specified in frequency or energy units imply vacuum wavelengths; medium must be 'vacuum'.")
-    return medium
+    return source_medium, target_medium
 
 
 def _position_quantity(values, position_unit=None):
@@ -140,7 +223,7 @@ def _position_quantity(values, position_unit=None):
     return quantity.to(u.AA, equivalencies=u.spectral())
 
 
-def normalize_linetable(data, medium=None, position_unit=None):
+def normalize_linetable(data, medium=None, position_unit=u.AA):
     """Return a QTable with columns name, position [AA], and weight."""
     if isinstance(data, QTable):
         table = data.copy(copy_data=True)
@@ -152,9 +235,7 @@ def normalize_linetable(data, medium=None, position_unit=None):
         table = QTable(data)
 
     if 'position' not in table.colnames:
-        if 'pos' not in table.colnames:
-            raise ValueError("Line table format not recognized. Required columns: name, pos/position.")
-        table.rename_column('pos', 'position')
+        raise ValueError("Line tables must define a 'position' column.")
 
     if 'name' not in table.colnames:
         raise ValueError("Line table format not recognized. Required column: name.")
@@ -165,19 +246,35 @@ def normalize_linetable(data, medium=None, position_unit=None):
 
     table['name'] = np.asarray(table['name'], dtype=str)
     input_unit = _spectral_position_unit(table['position'], position_unit=position_unit)
-    table['position'] = _position_quantity(table['position'], position_unit=position_unit)
-    table['weight'] = np.asarray(table['weight'], dtype=float)
-    table.meta['medium'] = _resolve_linetable_medium(
-        medium if medium is not None else table.meta.get('medium'),
+    source_medium, target_medium = _resolve_linetable_medium(
+        medium=medium,
+        table_medium=table.meta.get('medium'),
         position_unit=input_unit,
     )
+    table['position'] = _convert_line_positions(
+        _position_quantity(table['position'], position_unit=position_unit),
+        source_medium,
+        target_medium,
+    )
+    table['weight'] = np.asarray(table['weight'], dtype=float)
+    table.meta['medium'] = target_medium
     return table
 
 
 def read_linetable(path, medium=None, position_unit=None):
-    """Read a CSV line table into a normalised QTable."""
+    """Read an ECSV line table, or a plain CSV with an explicit position unit."""
+    suffix = Path(path).suffix.lower()
+    if suffix == '.ecsv':
+        table = QTable.read(path, format='ascii.ecsv')
+    elif suffix == '.csv':
+        if position_unit is None:
+            raise ValueError(
+                "Plain CSV line tables require position_unit=... because CSV does not store units. Use ECSV for self-describing line tables.")
+        table = QTable.read(path, format='ascii.csv')
+    else:
+        raise ValueError("Line table files must use either the .ecsv or .csv extension.")
     return normalize_linetable(
-        QTable.read(path, format='ascii.csv'),
+        table,
         medium=medium,
         position_unit=position_unit,
     )
@@ -195,31 +292,134 @@ def stack_linetables(tables, medium=None, position_unit=None):
     return table
 
 
-def setup_local_lines(wmin=4000, wmax=7000, dirpath='./lines', overwrite=False):
-    """Read CSV line lists, filter by wavelength range, and write local copies."""
-    set_wavelength_range(wmin=wmin, wmax=wmax)
+def _ensure_directory(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"Directory {path} created.")
+        return True
+    return False
 
-    if not os.path.exists(dirpath):
-        os.makedirs(dirpath)
-        is_created = True
-        print(f"Directory {dirpath} created.")
-    else:
-        is_created = False
 
-    global csv_lines_path
-    csv_lines_path = dirpath
+def _linetable_file_paths(dirpath):
+    paths = sorted(glob.glob(os.path.join(dirpath, '*.ecsv')))
+    paths.extend(sorted(glob.glob(os.path.join(dirpath, '*.csv'))))
+    stems = {}
+    for path in paths:
+        stem = Path(path).stem
+        if stem in stems:
+            raise ValueError(
+                f"Ambiguous line-table inputs found for '{stem}'. Keep only one of .ecsv or .csv.")
+        stems[stem] = path
+    return paths
+
+
+def _write_linetable(path, table, overwrite=False):
+    table = normalize_linetable(table, medium=table.meta.get('medium'))
+    out = QTable()
+    out['name'] = np.asarray(table['name'], dtype=str)
+    out['position'] = table['position'].to(u.AA)
+    out['weight'] = np.asarray(table['weight'], dtype=float)
+    out.meta['medium'] = table.meta.get('medium', DEFAULT_LINETABLE_MEDIUM)
+    lines = [
+        '# %ECSV 1.0',
+        '# ---',
+        '# datatype:',
+        '# - {name: name, datatype: string}',
+        '# - {name: position, unit: Angstrom, datatype: float64}',
+        '# - {name: weight, datatype: float64}',
+        '# meta:',
+        f"#   medium: {out.meta['medium']}",
+        'name position weight',
+    ]
+    for row in out:
+        lines.append(
+            f"{str(row['name'])} {float(row['position'].to_value(u.AA)):.15g} {float(row['weight']):.15g}")
+
+    if os.path.exists(path) and not overwrite:
+        raise OSError(f"File exists and overwrite=False: {path}")
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write('\n'.join(lines) + '\n')
+
+
+def _trim_linetable_file(filepath, output_dirpath, min, max, unit=None, position_unit=None,
+                         overwrite=False):
+    table = read_linetable(filepath, position_unit=position_unit)
+    lower, upper = _resolve_filter_bounds(
+        min,
+        max,
+        unit=unit,
+        target_unit=table['position'].unit,
+    )
+    trimmed = table[(table['position'] >= lower) & (table['position'] <= upper)]
+    output_path = os.path.join(output_dirpath, f"{Path(filepath).stem}.ecsv")
+    _write_linetable(output_path, trimmed, overwrite=overwrite)
+
+
+def setup_local_lines(min=4000, max=7000, unit=u.AA, dirpath='./lines', overwrite=False):
+    """Copy packaged line lists locally after filtering by a spectral range.
+
+    Parameters
+    ----------
+    min, max : float or `~astropy.units.Quantity`
+        Spectral bounds used to trim the packaged Prism line lists. When plain
+        scalars are provided, they are interpreted in ``unit``. When
+        ``Quantity`` bounds are provided, ``unit`` is ignored and spectral
+        equivalencies are used.
+    unit : unit-like, optional
+        Unit for scalar ``min``/``max`` inputs. Defaults to Angstrom.
+    dirpath : str, optional
+        Output directory for the trimmed CSV files.
+    overwrite : bool, optional
+        Rewrite files even if ``dirpath`` already exists.
+
+    Notes
+    -----
+    Local copies are always written as ECSV with an explicit Angstrom unit and
+    wavelength-medium metadata.
+    """
+    lower, upper = _resolve_filter_bounds(min, max, unit=unit, target_unit=u.AA)
+    set_wavelength_range(wmin=lower, wmax=upper)
+
+    is_created = _ensure_directory(dirpath)
+
+    global linetable_path
+    linetable_path = dirpath
 
     if overwrite or is_created:
-        for files in glob.glob(resource_path + "/*.csv"):
-            table = read_linetable(files)
-            position = table['position']
-            table = table[(position > wmin * u.AA) & (position < wmax * u.AA)]
-            name = os.path.join(dirpath, Path(files).name)
-            out = QTable()
-            out['name'] = np.asarray(table['name'], dtype=str)
-            out['pos'] = table['position'].to_value(u.AA)
-            out['weight'] = np.asarray(table['weight'], dtype=float)
-            out.write(name, format='ascii.csv', overwrite=True)
+        trim_line_lists(min, max, resource_path, dirpath, unit=unit, overwrite=True)
+
+
+def trim_line_lists(min, max, input_dirpath, output_dirpath, unit=None, overwrite=False):
+    """Trim user line-table files and rewrite them as self-describing ECSV.
+
+    ECSV files carry their own units and are read directly. Plain CSV files are
+    only accepted when ``unit`` is provided, because CSV does not store units.
+    The trimmed outputs are always written as canonical ECSV files with the
+    ``position`` column stored in Angstrom.
+    """
+    if not os.path.isdir(input_dirpath):
+        raise ValueError(f"Input directory does not exist: {input_dirpath}")
+
+    is_created = _ensure_directory(output_dirpath)
+    if not overwrite and not is_created:
+        return
+
+    filepaths = _linetable_file_paths(input_dirpath)
+    if not filepaths:
+        raise ValueError(f"No line-table files were found in {input_dirpath}")
+
+    for filepath in filepaths:
+        suffix = Path(filepath).suffix.lower()
+        csv_position_unit = unit if suffix == '.csv' else None
+        _trim_linetable_file(
+            filepath,
+            output_dirpath,
+            min=min,
+            max=max,
+            unit=unit,
+            position_unit=csv_position_unit,
+            overwrite=True,
+        )
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -301,11 +501,11 @@ class LineModelBase(Fittable1DModel):
         spline = CubicSpline(wl, fwhm, extrapolate=True)
         return arr.copy(), 'spline', spline, spline.derivative()
 
-    def __init__(self, *args, instfwhm=0.0, domain='wavelength', medium=DEFAULT_LINETABLE_MEDIUM,
+    def __init__(self, *args, instfwhm=0.0, domain='wavelength', medium=None,
                  **kwargs):
         raw, mode, value_or_spline, deriv = self._normalize_instfwhm(instfwhm)
         self._domain = _validate_domain(domain)
-        self._medium = _validate_medium(medium)
+        self._medium = _resolve_default_medium(medium)
         self._instfwhm_raw = raw
         self._instfwhm_mode = mode
         if mode == 'constant':
@@ -345,7 +545,7 @@ class LineModelBase(Fittable1DModel):
 
     @medium.setter
     def medium(self, value):
-        self._medium = _validate_medium(value)
+        self._medium = _resolve_default_medium(value)
 
     @staticmethod
     def _as_value(value, unit=None):

@@ -70,3 +70,8 @@ version = {attr = "prism._version.__version__"}
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra"
+
+# Warning caused by PyAstronomy
+filterwarnings = [
+    "ignore:scipy\\.misc is deprecated.*:DeprecationWarning",
+]

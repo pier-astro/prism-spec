@@ -1,0 +1,26 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+HeII1640 1640.391 1
+HeII2733 2733.309 1
+HeI2945 2945.106 1
+HeI3187 3187.745 1
+HeII3203 3203.112 1
+HeI4143 4143.761 1
+HeI4471 4471.48 1
+HeII4685 4685.704 1
+HeI5875 5875.621 1
+HeI6678 6678.151 1
+HeI7065 7065.19 1
+HeI7281 7281.349 1
+HeI7816 7816.137 1
+HeII8236 8236.79 1
+HeI10027 10027.73 1
+HeI10031 10031.16 1
+HeI10830 10830.34 1

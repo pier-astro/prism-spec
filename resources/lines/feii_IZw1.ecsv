@@ -1,0 +1,24 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+feii 4418.957 1
+feii 4449.616 1
+feii 4471.273 1
+feii 4493.529 1
+feii 4614.551 1
+feii 4625.481 1
+feii 4628.786 1
+feii 4631.873 1
+feii 4660.593 1
+feii 4668.923 1
+feii 4740.828 1
+feii 5131.21 1
+feii 5369.19 1
+feii 5396.232 1
+feii 5427.826 1

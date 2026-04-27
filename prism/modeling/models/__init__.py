@@ -11,19 +11,19 @@ Single-line models
 Line-group models
 -----------------
 ``GaussianLines``, ``LorentzianLines``, ``VoigtLines``
-    Dynamically generated multi-line Fittable1DModel, built from a CSV
-    table (``name``, ``pos``, ``weight`` columns).  Lines sharing the same
+    Dynamically generated multi-line Fittable1DModel, built from line-table
+    files (preferably ECSV with ``name``, ``position``, ``weight`` columns;
+    plain CSV requires an explicit ``position_unit``). Lines sharing the same
     ``name`` are amplitude-tied through a single parameter.  Constructed
     via ``from_csv()``, ``from_arrays()``, or ``from_templates()``.
 
 Continuum models
 ----------------
-``Powerlaw``
-    Simple power law: ``amplitude * (x / x0) ** index``.
-``BrokenPowerlaw``
-    Broken power law with different slopes below/above a break wavelength.
 ``BalmerContinuum``
     Blackbody-based Balmer pseudo-continuum below the Balmer edge (3646 Å).
+
+For standard power-law continua, use Astropy's built-in models from
+``astropy.modeling.powerlaws``.
 
 Empirical models
 ----------------

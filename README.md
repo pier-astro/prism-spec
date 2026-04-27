@@ -65,16 +65,17 @@ cube = Cube.from_fits("examples/data/datacube.fits")
 
 - Emission/absorption lines (`GaussianLine`, `LorentzianLine`, `VoigtLine`)
 - Tied line groups from CSV templates (`GaussianLines`, `LorentzianLines`, `VoigtLines`)
-- Continua (`Powerlaw`, `BrokenPowerlaw`, `BalmerContinuum`)
+- Continua (`BalmerContinuum`) plus Astropy's built-in power-law models
 - AGN convenience factories (`nlr`, `blr`, `fe`, `fe_uv`, `balmer`)
 
 ```python
-from prism.modeling.models import setup_local_lines, Powerlaw, nlr, blr
+from astropy.modeling.powerlaws import PowerLaw1D
+from prism.modeling.models import setup_local_lines, nlr, blr
 
-# Optional: create local filtered CSV line lists
-setup_local_lines(wmin=4000, wmax=8000, dirpath="./lines", overwrite=False)
+# Optional: create local filtered ECSV line lists
+setup_local_lines(min=4000, max=8000, unit='AA', dirpath="./lines", overwrite=False)
 
-continuum = Powerlaw(amplitude=1.0, x0=5500.0, index=-1.5)
+continuum = PowerLaw1D(amplitude=1.0, x_0=5500.0, alpha=1.5)
 narrow = nlr(name="nlr", instfwhm=120.0)
 broad = blr(name="blr", instfwhm=120.0)
 

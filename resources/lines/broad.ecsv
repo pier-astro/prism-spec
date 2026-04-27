@@ -1,0 +1,28 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, unit: Angstrom, datatype: float64}
+# - {name: weight, datatype: float64}
+# meta:
+#   medium: air
+name position weight
+CIV1548 1548.204 1
+CIV1550 1550.784 1
+AlIII1854 1854.716 1
+AlIII1862 1862.79 1
+CIII]1908 1908.734 1
+MgII2800 2800 1
+NaI5890 5889.951 1
+NaI5896 5895.924 1
+OI6046 6046.44 1
+OI7002 7002.23 1
+OI7254 7254.45 1
+OI7774 7774.17 1
+OI8446 8446.36 1
+CaII8498 8498.02 1
+CaII8542 8542.09 1
+CaII8662 8662.14 1
+NI8680 8680.28 1
+NI8703 8703.25 1
+NI8711 8711.7 1

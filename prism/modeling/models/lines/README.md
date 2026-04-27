@@ -48,7 +48,7 @@ All line templates are stored internally as rest wavelengths in Angstrom.
 
 For the built-in resources under `resources/lines`, this means:
 
-- positions are tabulated in air wavelengths
+- positions are stored explicitly in Angstrom inside ECSV files
 - the line table metadata records `medium='air'`
 
 For user-provided inputs, Prism normalises everything into the same internal wavelength representation.
@@ -78,7 +78,7 @@ If the amplitude is a quantity, the returned profile, flux, and EW follow that d
 Line-group models are built from line tables with columns:
 
 - `name`
-- `pos` or `position`
+- `position`
 - optional `weight`
 
 Internally Prism stores them as `QTable` with:
@@ -87,7 +87,18 @@ Internally Prism stores them as `QTable` with:
 - `weight` as a numeric scaling factor
 - `meta['medium']` set to `air` or `vacuum`
 
+Medium resolution follows a strict precedence rule:
+
+- an explicit `medium=...` passed to the line model constructor wins
+- otherwise, if an input ECSV line table declares `meta['medium']`, that file header wins
+- otherwise Prism falls back to the current session default medium
+- the session default medium is `air` unless changed with `set_medium(...)`
+
+If a file declares one medium and the line model is constructed with another, Prism converts the tabulated line positions accordingly before building the model.
+
 If the input line positions are supplied in frequency or energy units, Prism converts them to wavelength immediately and assigns `medium='vacuum'`, because those spectral conversions are vacuum definitions.
+
+For arrays or other inputs that do not carry medium metadata, Prism assumes the values are already expressed in the requested medium. If no medium is requested, the session default applies.
 
 ## Units and Astropy Conventions
 
@@ -208,14 +219,14 @@ print(line.flux.quantity)
 print(line.eqw(1.5 * u.Jy).quantity)
 ```
 
-### 3. Line Group from Built-in CSV Files
+### 3. Line Group from Built-in ECSV Files
 
 ```python
 from prism.modeling import models
 
 hhe_nlr = models.GaussianLines.from_csv(
     name='hhe_nlr',
-    csv_files=['hydrogen.csv', 'helium.csv'],
+  csv_files=['hydrogen.ecsv', 'helium.ecsv'],
     amplitude=1,
     offset=0,
     fwhm=500,
@@ -237,28 +248,39 @@ This remains valid. In this example:
 - `offset=0` is interpreted as `0 km / s`
 - `fwhm=500` is interpreted as `500 km / s`
 
-### 4. Custom CSV with Energy Positions
+### 4. Custom ECSV with Energy Positions
 
-If a plain CSV stores transition positions in energy or frequency units, the unit must be declared explicitly.
+If an ECSV stores transition positions in energy or frequency units, the unit lives in the file itself.
 
-Example CSV:
+Example ECSV payload:
 
-```text
-name,pos,weight
-Ha,1.8891391061,1.0
-NII,1.8833990031,1.0
+```yaml
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: name, datatype: string}
+# - {name: position, datatype: float64, unit: eV}
+# - {name: weight, datatype: float64}
+# meta: !!omap
+# - {medium: vacuum}
+# schema: astropy-2.0
+name position weight
+Ha 1.8891391061 1.0
+NII 1.8833990031 1.0
 ```
 
 Usage:
 
 ```python
 from prism.modeling.models import GaussianLines
+from prism.modeling.models.lines import set_medium
+
+set_medium('vacuum')
 
 custom = GaussianLines.from_csv(
-    csv_files=['energy_lines.csv'],
+  csv_files=['energy_lines.ecsv'],
     amplitude=5.0,
     fwhm=300.0,
-    position_unit='eV',
 )
 
 print(custom.lines['position'])
@@ -267,7 +289,39 @@ print(custom.lines.meta['medium'])
 
 The table is converted internally to Angstrom and marked as vacuum.
 
-### 5. Array Input with Quantities
+### 5. Plain CSV with Explicit Position Unit
+
+If a user keeps a plain CSV, Prism requires an explicit `position_unit`.
+
+```text
+name,position,weight
+Ha,1.8891391061,1.0
+NII,1.8833990031,1.0
+```
+
+```python
+custom = GaussianLines.from_csv(
+  csv_files=['energy_lines.csv'],
+  amplitude=5.0,
+  fwhm=300.0,
+  position_unit='eV',
+)
+```
+
+### 6. Header Medium vs Explicit Model Medium
+
+If a file declares `medium: air` but the model is constructed with `medium='vacuum'`, Prism converts the stored wavelengths before creating the line model.
+
+```python
+air_lines = GaussianLines.from_csv(csv_files=['hydrogen.ecsv'])
+vac_lines = GaussianLines.from_csv(csv_files=['hydrogen.ecsv'], medium='vacuum')
+
+print(air_lines.lines.meta['medium'])
+print(vac_lines.lines.meta['medium'])
+print(air_lines.lines['position'][0], vac_lines.lines['position'][0])
+```
+
+### 7. Array Input with Quantities
 
 ```python
 import astropy.units as u

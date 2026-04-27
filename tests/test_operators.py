@@ -3,9 +3,10 @@ import warnings
 import astropy.units as u
 import numpy as np
 from astropy.modeling.fitting import TRFLSQFitter as NativeTRFLSQFitter
+from astropy.modeling.powerlaws import ExponentialCutoffPowerLaw1D, PowerLaw1D
 
 from prism.modeling.fitting import ScipyTRF, TRFLSQFitter, tie
-from prism.modeling.models import BSpline, FixedTemplate, Powerlaw
+from prism.modeling.models import BSpline, FixedTemplate
 from prism.modeling.models.lines import GaussianLine
 from prism.modeling.operators.instrument import InstrumentResponse, SpectralResponse
 
@@ -57,15 +58,42 @@ def test_spectral_response_pipe_supports_quantity_aware_prism_trf():
 def test_fixed_template_and_bspline_support_quantity_fitting():
     x = np.linspace(1.0, 10.0, 128) * u.AA
     template = FixedTemplate(x.value, 1.0 + 0.1 * np.sin(x.value))
-    truth = template * Powerlaw(amplitude=2.0 * u.Jy, x0=5.0 * u.AA, index=0.0)
-    fitted_template = TRFLSQFitter()(template * Powerlaw(amplitude=1.7 * u.Jy, x0=5.0 * u.AA, index=0.0), x, truth(x))
+    truth = template * PowerLaw1D(amplitude=2.0 * u.Jy, x_0=5.0 * u.AA, alpha=0.0)
+    fitted_template = TRFLSQFitter()(template * PowerLaw1D(amplitude=1.7 * u.Jy, x_0=5.0 * u.AA, alpha=0.0), x, truth(x))
     assert fitted_template.right.amplitude.unit == u.Jy
-    assert fitted_template.right.x0.unit == u.AA
+    assert fitted_template.right.x_0.unit == u.AA
 
     x2 = np.linspace(0.0, 10.0, 128) * u.AA
     truth_spline = BSpline(np.linspace(0.0, 10.0, 8), degree=3, c0=1.0 * u.Jy, c1=1.2 * u.Jy, c2=0.8 * u.Jy, c3=1.1 * u.Jy)
     fitted_spline = TRFLSQFitter()(BSpline(np.linspace(0.0, 10.0, 8), degree=3, c0=0.9 * u.Jy, c1=1.0 * u.Jy, c2=0.9 * u.Jy, c3=1.0 * u.Jy), x2, truth_spline(x2))
     assert fitted_spline.c0.unit == u.Jy
+
+
+def test_cutoff_powerlaw_supports_quantity_evaluation_and_fitting():
+    x = np.linspace(1000.0, 9000.0, 256) * u.AA
+    truth = ExponentialCutoffPowerLaw1D(
+        amplitude=2.0 * u.Jy,
+        x_0=3000.0 * u.AA,
+        alpha=1.2,
+        x_cutoff=5000.0 * u.AA,
+        bounds={'x_0': (1.0 * u.AA, None), 'x_cutoff': (1.0 * u.AA, None), 'alpha': (0.0, None)},
+    )
+
+    fitted = TRFLSQFitter()(
+        ExponentialCutoffPowerLaw1D(
+            amplitude=1.7 * u.Jy,
+            x_0=3000.0 * u.AA,
+            alpha=1.0,
+            x_cutoff=4500.0 * u.AA,
+            bounds={'x_0': (1.0 * u.AA, None), 'x_cutoff': (1.0 * u.AA, None), 'alpha': (0.0, None)},
+        ),
+        x,
+        truth(x),
+    )
+
+    assert fitted.amplitude.unit == u.Jy
+    assert fitted.x_0.unit == u.AA
+    assert fitted.x_cutoff.unit == u.AA
 
 
 def test_native_astropy_tied_jacobian_patch_remains_active():

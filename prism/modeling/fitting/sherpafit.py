@@ -4,7 +4,13 @@ Sherpa-based fitters for prism.modeling.fitting
 
 import numpy as np
 from astropy.modeling.fitting import Fitter, model_to_fit_params
-from .extension import _coerce_max_evaluations, _fitter_covariance, _fitter_stdevs, get_max_evaluations
+from .extension import (
+    _coerce_max_evaluations,
+    _fitter_covariance,
+    _fitter_stdevs,
+    get_max_evaluations,
+    validate_symmetric_yerr,
+)
 from .multifit import MultiFitMixin
 from .utils import _get_tied_info, _apply_tied_fast
 
@@ -60,7 +66,8 @@ class SherpaFitter(MultiFitMixin, Fitter):
         else:
             self.fit_kwargs['maxfev'] = coerced
 
-    def __call__(self, model, x, y, z=None, weights=None, statistic='chi2', yerr=None, **kwargs):
+    def __call__(self, model, x, y, z=None, weights=None, statistic='chi2', yerr=None,
+                 inplace=True, **kwargs):
         if 'uncertainties' in kwargs:
             raise TypeError("The 'uncertainties' parameter is no longer supported.")
         
@@ -69,18 +76,20 @@ class SherpaFitter(MultiFitMixin, Fitter):
         # So we reverse-engineer yerr if it's missing but weights are given.
         if statistic == 'poisson':
             raise NotImplementedError("Poisson statistics not supported in Sherpa wrappers yet.")
+        if yerr is not None:
+            yerr = validate_symmetric_yerr(yerr)
         
-        model = model.copy()
-        init_values, fit_indices, _ = model_to_fit_params(model)
+        fit_model = model if inplace else model.copy()
+        init_values, fit_indices, _ = model_to_fit_params(fit_model)
         
-        bounds_list = [getattr(model, n).bounds for n in model.param_names]
+        bounds_list = [getattr(fit_model, n).bounds for n in fit_model.param_names]
         all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
                                 b[1] if b[1] is not None else np.inf)
                                for b in bounds_list])
         param_bounds = all_bounds[fit_indices]
 
-        tied_info = _get_tied_info(model)
-        params_cache = model.parameters.copy()
+        tied_info = _get_tied_info(fit_model)
+        params_cache = fit_model.parameters.copy()
         has_tied = bool(tied_info)
         
         # Reverse engineer yerr
@@ -108,11 +117,11 @@ class SherpaFitter(MultiFitMixin, Fitter):
         
         def statfunc(p):
             params_cache[fit_indices] = p
-            model.parameters = params_cache
+            fit_model.parameters = params_cache
             if has_tied:
-                _apply_tied_fast(model, tied_info, params_cache)
+                _apply_tied_fast(fit_model, tied_info, params_cache)
             
-            resid = (model(x) - y)
+            resid = (fit_model(x) - y)
             weighted_resid = resid * np.sqrt(weights_sq)
             stat = np.sum(weighted_resid**2)
             return stat, weighted_resid
@@ -158,11 +167,11 @@ class SherpaFitter(MultiFitMixin, Fitter):
                 self.fit_info[k] = v
         
         params_cache[fit_indices] = fitted_params
-        model.parameters = params_cache
+        fit_model.parameters = params_cache
         if tied_info:
-            _apply_tied_fast(model, tied_info, params_cache)
+            _apply_tied_fast(fit_model, tied_info, params_cache)
             
-        return model
+        return fit_model
 
 
 class SherpaLM(SherpaFitter):

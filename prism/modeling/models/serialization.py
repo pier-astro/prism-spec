@@ -190,7 +190,7 @@ def _linegroup_constructor(loader, node):
     return obj
 
 # ---------------------------------------------------------------------------
-# Continuum models  (Powerlaw, BrokenPowerlaw — plain Fittable1DModel)
+# Continuum models  (BalmerContinuum — plain Fittable1DModel)
 # ---------------------------------------------------------------------------
 
 def _continuum_representer(dumper, obj):
@@ -369,10 +369,10 @@ def register():
     """Register all prism models with the Astropy YAML loader/dumper."""
     from .lines import GaussianLine, VoigtLine, LorentzianLine
     from .lines import GaussianLines, LorentzianLines, VoigtLines, LineGroupBase
-    from .continuum import Powerlaw, BrokenPowerlaw, BalmerContinuum
+    from .continuum import BalmerContinuum
 
     line_models = [GaussianLine, VoigtLine, LorentzianLine]
-    continuum_models = [Powerlaw, BrokenPowerlaw, BalmerContinuum]
+    continuum_models = [BalmerContinuum]
 
     for cls in line_models:
         tag = f'!prism.{cls.__name__}'

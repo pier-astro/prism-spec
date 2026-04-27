@@ -10,7 +10,13 @@ import numpy as np
 from scipy import optimize
 from numpy.linalg import LinAlgError
 from astropy.modeling.fitting import Fitter, model_to_fit_params
-from .extension import _coerce_max_evaluations, _fitter_covariance, _fitter_stdevs, get_max_evaluations
+from .extension import (
+    _coerce_max_evaluations,
+    _fitter_covariance,
+    _fitter_stdevs,
+    get_max_evaluations,
+    validate_symmetric_yerr,
+)
 from .multifit import MultiFitMixin
 from .utils import (
     _analytic_jacobian_parameter_major,
@@ -125,6 +131,8 @@ class ScipyFitter(MultiFitMixin, Fitter):
         """
         Implement SciPy least_squares fitting.
         """
+        if yerr is not None:
+            yerr = validate_symmetric_yerr(yerr)
         if yerr is not None and weights is None:
             weights = 1.0 / np.asarray(yerr)
         model = model.copy()
