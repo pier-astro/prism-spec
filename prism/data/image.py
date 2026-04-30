@@ -229,6 +229,7 @@ class Image:
 
     @property
     def values(self):
+        """numpy.ndarray: The image data values."""
         return self._values
 
     @values.setter
@@ -265,6 +266,7 @@ class Image:
 
     @property
     def data(self):
+        """numpy.ndarray: Alias for the `values` property."""
         return self._values
 
     @data.setter
@@ -273,6 +275,7 @@ class Image:
 
     @property
     def err(self):
+        """numpy.ndarray: Standard deviation (1-sigma) uncertainties of the image values."""
         return self._err
 
     @err.setter
@@ -282,6 +285,7 @@ class Image:
 
     @property
     def var(self):
+        """numpy.ndarray: Variance array of the image values (square of `err`)."""
         return self._err ** 2
 
     @var.setter
@@ -295,6 +299,13 @@ class Image:
         self.is_var = True
 
     def copy(self):
+        """Create a deep copy of the image container.
+
+        Returns
+        -------
+        Image
+            A new instance with independent arrays and metadata.
+        """
         header = self.header.copy() if hasattr(self.header, 'copy') else dict(self.header)
         return Image(
             values=self.values.copy(),
@@ -315,6 +326,21 @@ class Image:
         )
 
     def crop(self, yslice=None, xslice=None, inplace=False):
+        """Extract a subregion by applying index slices or boolean masks along the spatial axes.
+
+        Parameters
+        ----------
+        yslice, xslice : slice, array-like integer indices, or array-like bool, optional
+            Indexing information for the spatial (y, x) axes. 
+            Default is ``None`` for all axes (i.e. no cropping).
+        inplace : bool, optional
+            Modify the image in place. Default is ``False``.
+
+        Returns
+        -------
+        Image
+            The cropped image object. WCS is updated if slices are contiguous.
+        """
         target = self if inplace else self.copy()
         original_values = target.values
         original_err = target.err
@@ -365,12 +391,25 @@ class Image:
 
     @property
     def unique_bins(self):
+        """numpy.ndarray: Unique valid spatial bin indices present in the ``binmap``.
+
+        Excludes negative bin labels.
+        """
         if self.binmap is None:
             return np.arange(self.shape[0] * self.shape[1], dtype=int) if self.values.ndim == 2 else np.arange(self.shape[0], dtype=int)
         bins = np.unique(self.binmap)
         return bins[bins >= 0]
 
     def iter_bins(self):
+        """Iterate over all spatial bins.
+
+        Yields
+        ------
+        bin_id : int
+            The integer label of the current bin.
+        mask : numpy.ndarray of bool
+            A spatial boolean mask selecting pixels belonging to the bin.
+        """
         if self.values.ndim != 2:
             raise ValueError('Bin iteration is only supported for 2-D images.')
         if self.binmap is None:
@@ -383,6 +422,35 @@ class Image:
             yield int(bin_id), self.binmap == bin_id
 
     def apply_binmap(self, binmap=None, method='mean', inplace=False):
+        """Rebin the spatial pixels based on the given bin map.
+
+        Pixels belonging to the same bin ID are aggregated into a single pseudo-pixel
+        using the specified method. This updates the image flux and propagates the errors
+        in quadrature.
+
+        Parameters
+        ----------
+        binmap : array-like, optional
+            An integer array defining bin memberships. If ``None``, uses the image's 
+            existing ``binmap`` attribute.
+        method : {'sum', 'mean', 'median'}, optional
+            Aggregation method for the pixels in a bin. Default is ``'mean'``.
+            - 'sum': adds the flux values (errors add in quadrature).
+            - 'mean': averages the flux values (errors add in quadrature and scale by 1/N).
+            - 'median': calculates the median (errors approximate median standard error).
+        inplace : bool, optional
+            Modify the image in place. Default is ``False``.
+
+        Returns
+        -------
+        Image
+            A new image (or self if inplace) where all pixels in a given bin are 
+            replaced by the aggregated bin values.
+            
+        Examples
+        --------
+        >>> binned_img = image.apply_binmap(method='sum')
+        """
         if self.values.ndim != 2:
             raise ValueError('Bin maps are only supported for 2-D images.')
         target = self if inplace else self.copy()
@@ -449,6 +517,31 @@ class Image:
         return (scales[0] * scales[1]).to(area_unit)
 
     def measure_region(self, mask, method='sum'):
+        """Measure photometric properties within a specific region defined by a mask.
+
+        Calculates the aggregated value, propagated uncertainty, and area/barycenter
+        for the given spatial mask. Errors add in quadrature.
+
+        Parameters
+        ----------
+        mask : array-like
+            A 2D spatial array of weights (values between 0 and 1). Typically a boolean mask.
+        method : {'sum', 'mean', 'median'}, optional
+            Method used to collapse the region.
+
+        Returns
+        -------
+        RegionMeasurement
+            Object containing the aggregated values, uncertainties, and region metadata.
+            
+        Examples
+        --------
+        >>> import numpy as np
+        >>> mask = np.zeros(image.shape, dtype=bool)
+        >>> mask[10:20, 10:20] = True
+        >>> reg = image.measure_region(mask, method='sum')
+        >>> print(reg.value, reg.err)
+        """
         if self.values.ndim != 2:
             raise ValueError('Region measurements are only supported for 2-D images.')
 
@@ -611,6 +704,13 @@ class Image:
         )
 
     def to_nddata(self):
+        """Convert the image to an `astropy.nddata.NDDataArray` format.
+
+        Returns
+        -------
+        astropy.nddata.NDDataArray
+            The equivalent Astropy data object holding the image data and metadata.
+        """
         header = self.header.copy() if hasattr(self.header, 'copy') else dict(self.header)
         meta = {
             'prism_header': header,
@@ -646,6 +746,26 @@ class Image:
         valuetype=None,
         binmap=None,
     ):
+        """Instantiate an Image from an `astropy.nddata.NDData` object.
+
+        Parameters
+        ----------
+        nddata : astropy.nddata.NDData
+            The source object containing arrays and metadata.
+        x, y : array-like, optional
+            Coordinate grids. Fallback values if not found in metadata.
+        xunit, yunit : str or astropy.units.Unit, optional
+            Units for the coordinate grids.
+        xtype, ytype, valuetype : str, optional
+            Semantic labels for axes and values.
+        binmap : array-like, optional
+            Spatial binmap.
+
+        Returns
+        -------
+        Image
+            The newly created image object.
+        """
         if not isinstance(nddata, NDData):
             raise TypeError('nddata must implement the Astropy NDData interface.')
 
@@ -689,6 +809,28 @@ class Image:
 
     @classmethod
     def from_fits(cls, filename, ext_values=None, ext_err=None, ext_var=None, ext_mask=None, ext_wcs=None, ext_binmap=None):
+        """Construct an Image instance by reading a FITS file.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Path to the target FITS file.
+        ext_values : str or int, optional
+            Extension containing data values (defaults to 'DATA' or 0).
+        ext_err, ext_var : str or int, optional
+            Extensions containing standard deviation or variance arrays.
+        ext_mask : str or int, optional
+            Extension containing the boolean or bit mask.
+        ext_wcs : str or int, optional
+            Extension from which to extract WCS information (defaults to `ext_values`).
+        ext_binmap : str or int, optional
+            Extension containing the spatial bin labels.
+
+        Returns
+        -------
+        Image
+            The loaded 2-D image.
+        """
         headers = {}
         with fits.open(filename) as hdul:
             ext_names = [hdu.name.upper() for hdu in hdul]
@@ -781,6 +923,31 @@ class Image:
         return cls(values=values, err=err, var=var, x=x, y=y, mask=loaded_mask, wcs=wcs, header=headers, unit=unit, binmap=loaded_binmap)
 
     def write(self, filename, overwrite=False, err=True, mask=False, cd_matrix=False, is_var=None, binmap=False):
+        """Write the image data to a FITS file.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Destination FITS file path.
+        overwrite : bool, optional
+            Overwrite the file if it exists. Default is ``False``.
+        err : bool, optional
+            Save the uncertainty array to the FITS file. Default is ``True``.
+        mask : bool, optional
+            Save the mask array. Default is ``False``.
+        cd_matrix : bool, optional
+            Convert WCS keywords to the legacy CD matrix form. Default is ``False``.
+        is_var : bool, optional
+            If ``True``, save uncertainties as variance ('STAT').
+            If ``False``, save as standard deviation ('ERR').
+            Default infers from the original load or assignment.
+        binmap : bool, optional
+            Save the spatial binmap if present. Default is ``False``.
+            
+        Examples
+        --------
+        >>> image.write('output_image.fits', overwrite=True, err=True)
+        """
         from prism.data.cube import wcs_to_cd_matrix
 
         primary_header = fits.Header()

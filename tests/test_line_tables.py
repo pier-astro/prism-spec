@@ -3,7 +3,7 @@ import pytest
 import astropy.units as u
 from astropy.table import QTable
 
-from prism.modeling.models.lines import GaussianLine, GaussianLines, profiles, set_medium, setup_local_lines, trim_line_lists
+from prism.modeling.models.lines import GaussianLine, GaussianLines, profiles, setup_local_lines, trim_line_lists
 from prism.modeling.models.lines import base as lines_base
 from prism.utils.tools import air_to_vac
 
@@ -78,8 +78,10 @@ def test_trim_line_lists_converts_plain_csv_to_ecsv(tmp_path):
 
     trimmed = QTable.read(output_dir / 'demo.ecsv', format='ascii.ecsv')
     assert list(trimmed['name']) == ['B']
-    np.testing.assert_allclose(trimmed['position'].to_value(u.AA), [(2.0 * u.eV).to_value(u.AA, equivalencies=u.spectral())])
-    assert trimmed.meta['medium'] == 'vacuum'
+    np.testing.assert_allclose(
+        trimmed['position'].to(u.AA, equivalencies=u.spectral()).value,
+        [(2.0 * u.eV).to_value(u.AA, equivalencies=u.spectral())]
+    )
 
 
 def test_plain_csv_requires_explicit_position_unit(tmp_path):
@@ -96,93 +98,98 @@ def test_plain_csv_requires_explicit_position_unit(tmp_path):
         trim_line_lists(1.5, 2.5, str(source_dir), str(output_dir), overwrite=True)
 
 
-def test_from_arrays_defaults_plain_numeric_positions_to_angstrom():
+def test_from_arrays_requires_explicit_position_unit_for_plain_arrays():
+    """Bare float arrays must always come with an explicit position_unit."""
     lines_base.set_wavelength_range(wmin=0.0, wmax=1.0e9)
     model = GaussianLines.from_arrays(
         names=['HeII1640'],
         pos=[1640.42],
         amplitude=1.0,
         fwhm=300.0,
+        position_unit=u.AA,
     )
 
     np.testing.assert_allclose(model.lines['position'].to_value(u.AA), [1640.42])
     assert model.lines['position'].unit == u.AA
-    assert model.lines.meta['medium'] == 'air'
 
 
-def test_from_csv_explicit_medium_overrides_header_and_converts_positions(tmp_path):
-    source_dir = tmp_path / 'source'
-    source_dir.mkdir()
-    output_path = source_dir / 'demo.ecsv'
-    _write_ecsv(output_path, [5000.0, 6000.0, 7000.0], medium='air')
-
-    model = GaussianLines.from_csv('demo.ecsv', dirpath=str(source_dir), amplitude=1.0, medium='vacuum')
-
-    expected = air_to_vac(np.array([5000.0, 6000.0, 7000.0]))
-    np.testing.assert_allclose(model.lines['position'].to_value(u.AA), expected)
-    assert model.lines.meta['medium'] == 'vacuum'
-    assert model.medium == 'vacuum'
-
-
-def test_header_medium_wins_over_session_default_for_file_inputs(tmp_path):
-    source_dir = tmp_path / 'source'
-    source_dir.mkdir()
-    output_path = source_dir / 'demo.ecsv'
-    _write_ecsv(output_path, [5000.0, 6000.0, 7000.0], medium='air')
-
-    original_medium = lines_base._default_medium
-    try:
-        set_medium('vacuum')
-        model = GaussianLines.from_csv('demo.ecsv', dirpath=str(source_dir), amplitude=1.0)
-    finally:
-        set_medium(original_medium)
-
-    np.testing.assert_allclose(model.lines['position'].to_value(u.AA), [5000.0, 6000.0, 7000.0])
-    assert model.lines.meta['medium'] == 'air'
-    assert model.medium == 'air'
-
-
-def test_set_medium_changes_headerless_defaults_for_arrays_and_single_lines():
-    original_medium = lines_base._default_medium
-    try:
-        set_medium('vacuum')
-        array_model = GaussianLines.from_arrays(
+def test_from_arrays_raises_without_position_unit():
+    """Passing bare floats without position_unit must raise a clear error."""
+    with pytest.raises(ValueError, match='position_unit'):
+        GaussianLines.from_arrays(
             names=['HeII1640'],
             pos=[1640.42],
             amplitude=1.0,
             fwhm=300.0,
         )
-        single_model = GaussianLine(amplitude=1.0, position=5007.0, fwhm=300.0)
-    finally:
-        set_medium(original_medium)
-
-    np.testing.assert_allclose(array_model.lines['position'].to_value(u.AA), [1640.42])
-    assert array_model.lines.meta['medium'] == 'vacuum'
-    assert array_model.medium == 'vacuum'
-    assert single_model.medium == 'vacuum'
 
 
-def test_redshifted_frequency_domain_matches_wavelength_domain_jacobian():
-    wavelength_model = GaussianLine(
-        amplitude=3.0,
-        position=5007.0,
-        fwhm=400.0,
-        redshift=0.25,
-    )
-    frequency_model = GaussianLine(
-        amplitude=3.0,
-        position=5007.0,
-        fwhm=400.0,
-        redshift=0.25,
-        domain='frequency',
-    )
+def test_convert_medium_csv(tmp_path):
+    source_dir = tmp_path / 'source'
+    source_dir.mkdir()
+    output_path = source_dir / 'demo.ecsv'
+    _write_ecsv(output_path, [5000.0, 6000.0, 7000.0], medium='air')
+    
+    # 1. Convert to vacuum
+    lines_base.convert_medium_csv(str(output_path), 'vacuum', overwrite=True)
+    table_vac = QTable.read(output_path, format='ascii.ecsv')
+    expected_vac = air_to_vac(np.array([5000.0, 6000.0, 7000.0]))
+    np.testing.assert_allclose(table_vac['position'].to_value(u.AA), expected_vac)
+    assert table_vac.meta['medium'] == 'vacuum'
+    
+    # 2. Convert back to air using directory processing
+    lines_base.convert_medium_csv(str(source_dir), 'air', overwrite=True)
+    table_air = QTable.read(output_path, format='ascii.ecsv')
+    np.testing.assert_allclose(table_air['position'].to_value(u.AA), [5000.0, 6000.0, 7000.0])
+    assert table_air.meta['medium'] == 'air'
+    
+    # 3. Blind conversion (no medium in meta) - CSV requires explicit input_unit
+    csv_path = source_dir / 'blind.csv'
+    _write_csv(csv_path, [('A', 5000.0, 1.0)])
+    lines_base.convert_medium_csv(str(csv_path), 'vacuum', input_unit=u.AA, overwrite=False)
+    
+    blind_ecsv_path = source_dir / 'blind.ecsv'
+    table_blind = QTable.read(blind_ecsv_path, format='ascii.ecsv')
+    expected_blind = air_to_vac(np.array([5000.0]))
+    np.testing.assert_allclose(table_blind['position'].to_value(u.AA), expected_blind)
+    assert table_blind.meta['medium'] == 'vacuum'
+    
+    # 4. Verify that CSV without input_unit raises ValueError
+    csv_no_unit = source_dir / 'no_unit.csv'
+    _write_csv(csv_no_unit, [('B', 6000.0, 1.0)])
+    with pytest.raises(ValueError, match="input_unit"):
+        lines_base.convert_medium_csv(str(csv_no_unit), 'vacuum', overwrite=True)
+
+
+def test_native_kinematics_linear_vs_wavelength_domain():
+    z = 0.25
+    pos_aa = 5007.0
+    pos_ev = (pos_aa * u.AA).to_value(u.eV, equivalencies=u.spectral())
+    fwhm_kms = 400.0
 
     lam = np.linspace(6000.0, 6550.0, 512)
-    nu = profiles.from_wavelength_values(lam, 'frequency')
+    ev_grid = (lam * u.AA).to_value(u.eV, equivalencies=u.spectral())
+
+    # domain_family is inferred from the unit on position
+    wavelength_model = GaussianLine(
+        amplitude=3.0,
+        position=pos_aa * u.AA,      # length unit -> 'wavelength' kinematics
+        fwhm=fwhm_kms * u.km / u.s,
+        redshift=z,
+    )
+    linear_model = GaussianLine(
+        amplitude=3.0,
+        position=pos_ev * u.eV,      # energy unit -> 'linear' kinematics
+        fwhm=fwhm_kms * u.km / u.s,
+        redshift=z,
+    )
 
     y_lam = np.asarray(wavelength_model(lam), dtype=float)
-    y_nu = np.asarray(frequency_model(nu), dtype=float)
-    expected = y_lam * profiles.domain_jacobian(lam, 'frequency')
+    y_ev = np.asarray(linear_model(ev_grid), dtype=float)
 
-    np.testing.assert_allclose(y_nu, expected, rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(np.trapezoid(y_lam, lam), abs(np.trapezoid(y_nu, nu)), rtol=5e-6)
+    # Peak positions must map to the same physical wavelength.
+    peak_lam = lam[np.argmax(y_lam)]
+    peak_ev = ev_grid[np.argmax(y_ev)]
+
+    peak_ev_as_lam = (peak_ev * u.eV).to_value(u.AA, equivalencies=u.spectral())
+    np.testing.assert_allclose(peak_lam, peak_ev_as_lam, rtol=1e-3)

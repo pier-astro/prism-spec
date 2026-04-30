@@ -226,14 +226,47 @@ class InstrumentResponse:
         R_values: np.ndarray, 
         interp_kind: str = 'linear'
     ) -> "InstrumentResponse":
-        """Build from variable resolution R(λ)."""
+        """Build a response matrix using a variable spectral resolution R(λ).
+
+        The resolving power R = λ / Δλ is interpolated onto the target grid to
+        compute the corresponding Gaussian FWHM and sigma at each wavelength.
+
+        Parameters
+        ----------
+        wavelength_grid : numpy.ndarray
+            The target 1-D wavelength grid.
+        lambda_R : numpy.ndarray
+            Wavelengths at which the resolving power is defined.
+        R_values : numpy.ndarray
+            Resolving power R values corresponding to ``lambda_R``.
+        interp_kind : str, optional
+            Interpolation method used by `scipy.interpolate.interp1d`. Default is ``'linear'``.
+
+        Returns
+        -------
+        InstrumentResponse
+            The generated response matrix.
+        """
         sigmas = cls._compute_sigmas_variable(wavelength_grid, lambda_R, R_values, interp_kind)
         matrix = cls._build_sparse_gaussian_matrix(wavelength_grid, sigmas)
         return cls(wavelength_grid, matrix)
 
     @classmethod
     def from_fixed_fwhm(cls, wavelength_grid: np.ndarray, fwhm: float) -> "InstrumentResponse":
-        """Build from fixed FWHM (in same units as wavelength_grid)."""
+        """Build a response matrix from a fixed Gaussian FWHM.
+
+        Parameters
+        ----------
+        wavelength_grid : numpy.ndarray
+            The target 1-D wavelength grid.
+        fwhm : float
+            Full-width at half-maximum in the same units as the wavelength grid.
+
+        Returns
+        -------
+        InstrumentResponse
+            The generated response matrix.
+        """
         if fwhm <= 0:
             raise ValueError("FWHM must be positive.")
         sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
@@ -243,7 +276,20 @@ class InstrumentResponse:
 
     @classmethod
     def from_fixed_resolution(cls, wavelength_grid: np.ndarray, R: float) -> "InstrumentResponse":
-        """Build from fixed resolution R = λ/Δλ."""
+        """Build a response matrix from a fixed spectral resolution R.
+
+        Parameters
+        ----------
+        wavelength_grid : numpy.ndarray
+            The target 1-D wavelength grid.
+        R : float
+            Resolving power R = λ / Δλ.
+
+        Returns
+        -------
+        InstrumentResponse
+            The generated response matrix.
+        """
         if R <= 0:
             raise ValueError("Resolution R must be positive.")
         delta_lam = wavelength_grid / R
@@ -253,7 +299,20 @@ class InstrumentResponse:
 
     @classmethod
     def from_fixed_sigma(cls, wavelength_grid: np.ndarray, sigma: float) -> "InstrumentResponse":
-        """Build from fixed sigma (in same units as wavelength_grid)."""
+        """Build a response matrix from a fixed Gaussian sigma.
+
+        Parameters
+        ----------
+        wavelength_grid : numpy.ndarray
+            The target 1-D wavelength grid.
+        sigma : float
+            Standard deviation of the Gaussian LSF in the same units as the grid.
+
+        Returns
+        -------
+        InstrumentResponse
+            The generated response matrix.
+        """
         if sigma <= 0:
             raise ValueError("Sigma must be positive.")
         sigmas = np.full(len(wavelength_grid), sigma)
@@ -262,7 +321,20 @@ class InstrumentResponse:
 
     @classmethod
     def from_array(cls, wavelength_grid: np.ndarray, matrix: np.ndarray) -> "InstrumentResponse":
-        """Create from a dense or sparse matrix."""
+        """Create an InstrumentResponse from an existing matrix.
+
+        Parameters
+        ----------
+        wavelength_grid : numpy.ndarray
+            The 1-D wavelength grid matching the matrix dimensions.
+        matrix : numpy.ndarray or scipy.sparse.spmatrix
+            The square response matrix (dense or sparse).
+
+        Returns
+        -------
+        InstrumentResponse
+            The wrapped response matrix.
+        """
         if matrix.shape[0] != matrix.shape[1]:
             raise ValueError("Response matrix must be square.")
         if matrix.shape[0] != len(wavelength_grid):
@@ -275,7 +347,19 @@ class InstrumentResponse:
     
     @classmethod
     def from_fits(cls, filename: str) -> "InstrumentResponse":
-        """Load from FITS file."""
+        """Load an instrument response from a standard FITS file format.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the FITS file containing the wavelength grid (ext 1) 
+            and response matrix (ext 2).
+
+        Returns
+        -------
+        InstrumentResponse
+            The loaded response matrix.
+        """
         with fits.open(filename) as hdul:
             wavelength_grid = hdul[1].data
             dense_matrix = hdul[2].data.astype(np.float64)
@@ -284,11 +368,25 @@ class InstrumentResponse:
 
     @classmethod
     def from_instrument(cls, instrument: str) -> "InstrumentResponse":
-        """
-        Load from instrument name in the archive.
-        
-        Searches user directory (~/.prism/instruments/) first,
+        """Load an instrument response by its registered archive name.
+
+        Searches the user directory (``~/.prism/instruments/``) first,
         then falls back to package defaults.
+
+        Parameters
+        ----------
+        instrument : str
+            The registered name of the instrument (e.g., 'MUSE-WFM').
+
+        Returns
+        -------
+        InstrumentResponse
+            The loaded response matrix.
+
+        Raises
+        ------
+        ValueError
+            If the instrument name is not found in either the user or package archive.
         """
         # Check user directory first
         user_mapping = _load_user_mapping()
@@ -351,7 +449,15 @@ class InstrumentResponse:
     # ---- SAVE & REGISTER ----
     
     def save_fits(self, filename: str, compress: bool = True) -> None:
-        """Save wavelength grid and matrix to FITS file."""
+        """Save the wavelength grid and response matrix to a FITS file.
+
+        Parameters
+        ----------
+        filename : str
+            The output FITS file path.
+        compress : bool, optional
+            If True, uses FITS tile compression for the matrix. Default is ``True``.
+        """
         if self.response_matrix is None:
             raise ValueError("No response matrix to save.")
         primary_hdu = fits.PrimaryHDU()
@@ -368,20 +474,19 @@ class InstrumentResponse:
         self, instrument_name: str, 
         compress: bool = True, clobber: bool = False
     ) -> None:
-        """
-        Save the response matrix to user directory and register it.
+        """Save the response matrix and register it in the user archive.
         
-        The file is saved to ~/.prism/instruments/<instrument_name>.fits
-        and registered in the user's instrument archive.
+        The file is saved to ``~/.prism/instruments/<instrument_name>.fits``
+        and registered in the user's instrument archive YAML file.
         
         Parameters
         ----------
         instrument_name : str
-            Name to register the instrument under
-        compress : bool
-            Use FITS compression (default True)
-        clobber : bool
-            Overwrite existing file/entry (default False)
+            Name to register the instrument under.
+        compress : bool, optional
+            Use FITS compression. Default is ``True``.
+        clobber : bool, optional
+            Overwrite an existing file or registry entry. Default is ``False``.
         """
         user_dir = _ensure_user_response_dir()
         filename = f"{instrument_name}.fits"
@@ -397,7 +502,20 @@ class InstrumentResponse:
     # ---- CROP ----
     
     def crop(self, new_wavelengths: np.ndarray, renormalize: bool = True) -> "InstrumentResponse":
-        """Crop the response matrix to match a new wavelength grid."""
+        """Crop the response matrix to match a new subset wavelength grid.
+
+        Parameters
+        ----------
+        new_wavelengths : numpy.ndarray
+            The target wavelength grid to crop to. Must be a subset of the original grid.
+        renormalize : bool, optional
+            If True, renormalizes the matrix rows to conserve flux. Default is ``True``.
+
+        Returns
+        -------
+        InstrumentResponse
+            A new cropped response matrix.
+        """
         cropped_matrix = _crop_response_matrix(
             self.response_matrix, self.wavelength_grid, new_wavelengths, renormalize=renormalize
         )

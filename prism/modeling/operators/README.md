@@ -1,4 +1,35 @@
-# Operators
+# prism.modeling.operators
+
+The `prism.modeling.operators` module provides instrumental line-spread-function (LSF) handling via linear matrix operators.
+
+## Convolution via Linear Operator Models
+Prism allows you to incorporate instrumental resolution directly into an Astropy model evaluation pipe, preserving exact chain-rule analytic Jacobians.
+```python
+from prism.modeling.operators import SpectralResponse
+
+rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=redshift)
+observed_model = source_model | rsp
+```
+
+## Instrument Archive
+Responses are stored as sparse matrices in an internal archive, resolving convolutions into fast sparse matrix multiplications.
+- `InstrumentResponse`: Tools for building (from FWHM, variable R, or array), loading, saving, and cropping response matrices.
+- Custom instrument definitions can be saved to the user's home directory (`~/.prism/instruments/`) using `.save_and_register()`.
+
+## Examples
+```python
+from prism.modeling.operators import InstrumentResponse
+
+# Create a fixed-FWHM Gaussian LSF
+ir = InstrumentResponse.from_fixed_fwhm(wave_grid, fwhm=2.5)
+
+# Save it to the registry for later use in modeling
+ir.save_and_register('MY_CUSTOM_INST')
+```
+
+---
+
+# Additional Notes
 
 `prism.modeling.operators` extends Astropy's native pipe operator so a right-hand Prism operator can see both:
 

@@ -108,8 +108,6 @@ def _linemodel_representer(dumper, obj):
     if isinstance(instfwhm_raw, np.ndarray):
         instfwhm_raw = instfwhm_raw.tolist()
     state['_instfwhm'] = instfwhm_raw
-    state['_domain'] = obj.domain
-    state['_medium'] = obj.medium
     if obj.name:
         state['_name'] = obj.name
     return dumper.represent_mapping(f'!prism.{obj.__class__.__name__}', state)
@@ -117,10 +115,8 @@ def _linemodel_representer(dumper, obj):
 def _linemodel_constructor(loader, node, cls):
     mapping = loader.construct_mapping(node, deep=True)
     instfwhm = mapping.pop('_instfwhm', 0.0)
-    domain = mapping.pop('_domain', 'wavelength')
-    medium = mapping.pop('_medium', 'air')
     mdl_name = mapping.pop('_name', None)
-    obj = cls(instfwhm=instfwhm, domain=domain, medium=medium, name=mdl_name)
+    obj = cls(instfwhm=instfwhm, name=mdl_name)
     for pn, state in mapping.items():
         if hasattr(obj, pn):
             _restore_param(obj, pn, state)
@@ -139,18 +135,21 @@ def _linegroup_representer(dumper, obj):
     else:
         base_name = type(obj).__name__
 
+    # Serialise positions in the model's native spectral unit (not forced to AA).
+    pos_unit = getattr(type(obj), '_position_unit', u.AA)
+    pos_unit_str = pos_unit.to_string()
+
     state = {
         '_base': base_name,
+        '_position_unit': pos_unit_str,
         '_linetable': [
             {
                 'name': str(row['name']),
-                'position': float(row['position'].to_value(u.AA)),
+                'position': float(row['position'].to(pos_unit, equivalencies=u.spectral()).value),
                 'weight': float(row['weight']),
             }
             for row in obj._linetable
         ],
-        '_medium': obj.lines.meta.get('medium', obj.medium),
-        '_domain': obj.domain,
     }
     instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
     if isinstance(instfwhm_raw, np.ndarray):
@@ -171,18 +170,19 @@ def _linegroup_constructor(loader, node):
     base_name = mapping.pop('_base')
     records = mapping.pop('_linetable')
     instfwhm = mapping.pop('_instfwhm', 0.0)
-    domain = mapping.pop('_domain', 'wavelength')
-    medium = mapping.pop('_medium', 'air')
     mdl_name = mapping.pop('_name', None)
+
+    # Restore the native spectral unit (defaults to AA for old files).
+    pos_unit_str = mapping.pop('_position_unit', 'Angstrom')
+    pos_unit = u.Unit(pos_unit_str)
 
     base_cls = getattr(_lines_mod, base_name)
     linetable = QTable()
     linetable['name'] = [record['name'] for record in records]
-    linetable['position'] = [record['position'] for record in records] * u.AA
+    linetable['position'] = [record['position'] for record in records] * pos_unit
     linetable['weight'] = [record['weight'] for record in records]
-    linetable.meta['medium'] = medium
     obj = base_cls.from_templates(
-        linetable, instfwhm=instfwhm, name=mdl_name, domain=domain, medium=medium)
+        linetable, instfwhm=instfwhm, name=mdl_name)
 
     for pn, state in mapping.items():
         if hasattr(obj, pn):

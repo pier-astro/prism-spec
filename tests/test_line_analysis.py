@@ -29,6 +29,7 @@ def _build_selection_model():
         amplitude=2.0,
         offset=0.0,
         fwhm=300.0,
+        position_unit=u.AA,
     )
     hb_broad = GaussianLines.from_arrays(
         names=['Hb4861'],
@@ -37,6 +38,7 @@ def _build_selection_model():
         amplitude=1.5,
         offset=150.0,
         fwhm=1800.0,
+        position_unit=u.AA,
     )
     oiii = GaussianLines.from_arrays(
         names=['[OIII]5007'],
@@ -45,6 +47,7 @@ def _build_selection_model():
         amplitude=4.0,
         offset=0.0,
         fwhm=250.0,
+        position_unit=u.AA,
     )
     hb_narrow.amp_hb4861.std = 0.10
     hb_broad.amp_hb4861.std = 0.08
@@ -55,9 +58,11 @@ def _build_fitted_model():
     wave = np.linspace(4820.0, 4930.0, 600)
     hb_narrow = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
+        position_unit=u.AA,
         amplitude=1.0, offset=0.0, fwhm=300.0)
     hb_broad = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
+        position_unit=u.AA,
         amplitude=0.7, offset=60.0, fwhm=1600.0)
     true_model = hb_narrow + hb_broad
 
@@ -68,10 +73,12 @@ def _build_fitted_model():
     init_narrow = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
         amplitude=0.8, offset=10.0, fwhm=420.0,
+        position_unit=u.AA,
         bounds={'amplitude': (0, 5), 'offset': (-200, 200), 'fwhm': (80, 800)})
     init_broad = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
         amplitude=0.5, offset=30.0, fwhm=1200.0,
+        position_unit=u.AA,
         bounds={'amplitude': (0, 5), 'offset': (-400, 400), 'fwhm': (700, 4000)})
 
     fitter = ScipyTRF(calc_uncertainties=True)
@@ -84,9 +91,11 @@ def _build_multifit_cube(wave):
     continuum = models.Const1D(amplitude=0.12, name='continuum')
     hb_narrow = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
+        position_unit=u.AA,
         amplitude=1.2, offset=0.0, fwhm=300.0)
     hb_broad = GaussianLines.from_arrays(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
+        position_unit=u.AA,
         amplitude=0.8, offset=85.0, fwhm=1700.0)
     true_model = continuum + hb_narrow + hb_broad
 
@@ -105,9 +114,11 @@ def _build_multifit_cube(wave):
         models.Const1D(amplitude=0.10, name='continuum')
         + GaussianLines.from_arrays(
             names=['Hb4861'], pos=[4861.333], name='hb_narrow',
+            position_unit=u.AA,
             amplitude=1.0, offset=15.0, fwhm=420.0)
         + GaussianLines.from_arrays(
             names=['Hb4861'], pos=[4861.333], name='hb_broad',
+            position_unit=u.AA,
             amplitude=0.6, offset=40.0, fwhm=1400.0)
     )
     return cube, yerr, init_model

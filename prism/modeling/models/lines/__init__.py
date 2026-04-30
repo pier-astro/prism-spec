@@ -3,7 +3,10 @@ prism.modeling.models.lines — emission-line spectral models.
 """
 from .base import (
     Metric, LineModelBase,
-    set_wavelength_range, set_medium, setup_local_lines, trim_line_lists,
+    set_wavelength_range, 
+    convert_linetable_domain, convert_linetable_medium,
+    convert_domain_csv, convert_medium_csv,
+    setup_local_lines, trim_line_lists,
     c_kms, sigma2fwhm,
 )
 from .single import GaussianLine, LorentzianLine, VoigtLine

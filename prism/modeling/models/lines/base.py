@@ -20,9 +20,6 @@ from ....utils.tools import air_to_vac, vac_to_air
 
 c_kms = profiles.C_KMS
 sigma2fwhm = profiles.SIGMA2FWHM
-DEFAULT_LINETABLE_MEDIUM = 'air'
-VALID_LINETABLE_MEDIA = {'air', 'vacuum'}
-_default_medium = DEFAULT_LINETABLE_MEDIUM
 
 # ---------------------------------------------------------------------------
 # Metric
@@ -127,28 +124,10 @@ def set_wavelength_range(wmin=None, wmax=None):
     print(f"Wavelength range set to: [{_wmin}, {_wmax}]")
 
 
-def set_medium(medium=DEFAULT_LINETABLE_MEDIUM):
-    """Set the session default wavelength medium for line models and headerless line tables."""
-    global _default_medium
-    _default_medium = _validate_medium(medium)
-    return _default_medium
-
-
 def _validate_domain(domain):
-    if domain not in profiles.DOMAIN_UNITS:
+    if domain not in profiles.DOMAIN_FAMILIES:
         raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
     return domain
-
-
-def _validate_medium(medium):
-    medium = str(medium).strip().lower()
-    if medium not in VALID_LINETABLE_MEDIA:
-        raise ValueError("medium must be 'air' or 'vacuum'.")
-    return medium
-
-
-def _resolve_default_medium(medium=None):
-    return _default_medium if medium is None else _validate_medium(medium)
 
 
 def _spectral_position_unit(values, position_unit=None):
@@ -166,47 +145,6 @@ def _spectral_position_unit(values, position_unit=None):
     return None
 
 
-def _resolve_source_linetable_medium(table_medium=None, position_unit=None, fallback_medium=None):
-    unit = None if position_unit is None else u.Unit(position_unit)
-    if unit is not None and not unit.is_equivalent(u.AA):
-        if table_medium is not None and _validate_medium(table_medium) != 'vacuum':
-            raise ValueError(
-                "Line tables specified in frequency or energy units imply vacuum wavelengths; medium must be 'vacuum'.")
-        return 'vacuum'
-    if table_medium is not None:
-        return _validate_medium(table_medium)
-    return _resolve_default_medium(fallback_medium)
-
-
-def _convert_line_positions(positions, source_medium, target_medium):
-    source_medium = _validate_medium(source_medium)
-    target_medium = _validate_medium(target_medium)
-    positions = positions.to(u.AA)
-    if source_medium == target_medium:
-        return positions
-    values = positions.to_value(u.AA)
-    if source_medium == 'air' and target_medium == 'vacuum':
-        converted = air_to_vac(values)
-    elif source_medium == 'vacuum' and target_medium == 'air':
-        converted = vac_to_air(values)
-    else:
-        raise ValueError("medium must be 'air' or 'vacuum'.")
-    return np.asarray(converted, dtype=float) * u.AA
-
-
-def _resolve_linetable_medium(medium=None, table_medium=None, position_unit=None):
-    source_medium = _resolve_source_linetable_medium(
-        table_medium=table_medium,
-        position_unit=position_unit,
-        fallback_medium=medium,
-    )
-    target_medium = source_medium if medium is None else _validate_medium(medium)
-    if position_unit is not None and not u.Unit(position_unit).is_equivalent(u.AA) and target_medium != 'vacuum':
-        raise ValueError(
-            "Line tables specified in frequency or energy units imply vacuum wavelengths; medium must be 'vacuum'.")
-    return source_medium, target_medium
-
-
 def _position_quantity(values, position_unit=None):
     unit = _spectral_position_unit(values, position_unit=position_unit)
     if isinstance(values, u.Quantity):
@@ -216,15 +154,14 @@ def _position_quantity(values, position_unit=None):
         if getattr(quantity, 'unit', None) not in (None, u.dimensionless_unscaled):
             quantity = quantity if unit is None else quantity.to(unit, equivalencies=u.spectral())
         else:
-            base_unit = u.AA if unit is None else unit
-            quantity = np.asarray(values, dtype=float) * base_unit
-    if quantity.unit.is_equivalent(u.AA):
-        return quantity.to(u.AA)
-    return quantity.to(u.AA, equivalencies=u.spectral())
+            if unit is None:
+                raise ValueError("Line table positions have no units and position_unit=None was passed. You must specify the position_unit.")
+            quantity = np.asarray(values, dtype=float) * unit
+    return quantity
 
 
-def normalize_linetable(data, medium=None, position_unit=u.AA):
-    """Return a QTable with columns name, position [AA], and weight."""
+def normalize_linetable(data, position_unit=None):
+    """Return a QTable with columns name, position, and weight."""
     if isinstance(data, QTable):
         table = data.copy(copy_data=True)
     elif isinstance(data, Table):
@@ -245,23 +182,115 @@ def normalize_linetable(data, medium=None, position_unit=u.AA):
         table['name'] = _make_unique(table['name'])
 
     table['name'] = np.asarray(table['name'], dtype=str)
-    input_unit = _spectral_position_unit(table['position'], position_unit=position_unit)
-    source_medium, target_medium = _resolve_linetable_medium(
-        medium=medium,
-        table_medium=table.meta.get('medium'),
-        position_unit=input_unit,
-    )
-    table['position'] = _convert_line_positions(
-        _position_quantity(table['position'], position_unit=position_unit),
-        source_medium,
-        target_medium,
-    )
+    table['position'] = _position_quantity(table['position'], position_unit=position_unit)
     table['weight'] = np.asarray(table['weight'], dtype=float)
-    table.meta['medium'] = target_medium
     return table
 
 
-def read_linetable(path, medium=None, position_unit=None):
+def _compute_spectral_jacobian(positions, target_unit):
+    """Numerically evaluate the spectral density Jacobian |dx/dy| for weight scaling."""
+    delta = 1e-5
+    x1 = positions * (1.0 - delta)
+    x2 = positions * (1.0 + delta)
+    
+    y1 = x1.to(target_unit, equivalencies=u.spectral())
+    y2 = x2.to(target_unit, equivalencies=u.spectral())
+    
+    dx = np.abs((x2 - x1).value)
+    dy = np.abs((y2 - y1).value)
+    
+    return dx / dy
+
+
+def convert_linetable_domain(data, output_unit, input_unit=None):
+    """Convert a line table to a new spectral domain, scaling weights accordingly to conserve flux.
+
+    Parameters
+    ----------
+    data : QTable, Table, DataFrame, or dict
+        Input line table.
+    output_unit : unit-like
+        Target spectral unit (e.g., u.eV, u.Hz, u.AA).
+    input_unit : unit-like, optional
+        Input unit for the 'position' column if not defined in the table.
+
+    Returns
+    -------
+    QTable
+        Converted line table with positions in the target domain and re-normalized weights.
+    """
+    table = normalize_linetable(data, position_unit=input_unit)
+    target_unit = u.Unit(output_unit)
+    
+    positions = table['position']
+    if positions.unit.is_equivalent(target_unit):
+        table['position'] = positions.to(target_unit)
+        return table
+        
+    converted_positions = positions.to(target_unit, equivalencies=u.spectral())
+    
+    # Scale weights by the Jacobian |dx_old / dx_new|
+    jacobian = _compute_spectral_jacobian(positions, target_unit)
+    table['weight'] = table['weight'] * jacobian
+    
+    # Normalize weights so max in each template group is 1.0
+    for name in np.unique(table['name']):
+        mask = table['name'] == name
+        group_weights = table['weight'][mask]
+        max_weight = np.max(group_weights)
+        if max_weight > 0:
+            table['weight'][mask] = group_weights / max_weight
+            
+    table['position'] = converted_positions
+    return table
+
+
+def convert_linetable_medium(data, target_medium, input_unit=None):
+    """Convert line table wavelengths between air and vacuum.
+
+    Parameters
+    ----------
+    data : QTable, Table, DataFrame, or dict
+        Input line table.
+    target_medium : {'air', 'vacuum'}
+        Target wavelength medium for the line positions.
+    input_unit : unit-like, optional
+        Input unit for the 'position' column if not defined in the table.
+
+    Returns
+    -------
+    QTable
+        Converted line table with positions in the target wavelength medium.
+    """
+    target_medium = str(target_medium).strip().lower()
+    if target_medium not in {'air', 'vacuum'}:
+        raise ValueError("target_medium must be 'air' or 'vacuum'.")
+
+    table = normalize_linetable(data, position_unit=input_unit)
+    source_medium = table.meta.get('medium')
+    
+    # If already in target medium, return as-is
+    if source_medium == target_medium:
+        return table
+    
+    # Infer source medium if not explicitly set
+    if source_medium is None:
+        source_medium = 'vacuum' if target_medium == 'air' else 'air'
+    
+    positions = table['position'].to(u.AA)
+    values = positions.to_value(u.AA)
+    if source_medium == 'air' and target_medium == 'vacuum':
+        converted = air_to_vac(values)
+    else:
+        converted = vac_to_air(values)
+        
+    table['position'] = np.asarray(converted, dtype=float) * u.AA
+    table.meta['medium'] = target_medium
+    
+    return table
+
+
+def read_linetable(path, position_unit=None):
     """Read an ECSV line table, or a plain CSV with an explicit position unit."""
     suffix = Path(path).suffix.lower()
     if suffix == '.ecsv':
@@ -275,21 +304,144 @@ def read_linetable(path, medium=None, position_unit=None):
         raise ValueError("Line table files must use either the .ecsv or .csv extension.")
     return normalize_linetable(
         table,
-        medium=medium,
         position_unit=position_unit,
     )
 
 
-def stack_linetables(tables, medium=None, position_unit=None):
-    """Stack line tables while preserving a single explicit wavelength medium."""
-    normed = [normalize_linetable(table, medium=medium, position_unit=position_unit) for table in tables]
-    table = normed[0] if len(normed) == 1 else vstack(normed, metadata_conflicts='silent')
-    source_mediums = {tbl.meta.get('medium', DEFAULT_LINETABLE_MEDIUM) for tbl in normed}
-    resolved_medium = medium if medium is not None else source_mediums.pop()
-    if medium is None and len(source_mediums) > 0:
-        raise ValueError("All line tables must use the same wavelength medium.")
-    table.meta['medium'] = _validate_medium(resolved_medium)
-    return table
+def stack_linetables(tables, position_unit=None):
+    """Stack line tables."""
+    normed = [normalize_linetable(table, position_unit=position_unit) for table in tables]
+    return normed[0] if len(normed) == 1 else vstack(normed, metadata_conflicts='silent')
+
+
+def convert_domain_csv(paths, output_unit, input_unit=None, output_dir=None, overwrite=False):
+    """Convert line table files to a new spectral domain and rewrite as ECSV.
+
+    Reads tabular line tables natively, inspecting columns for physical units. 
+    Converts positions to the target spectral domain, re-normalizes weights 
+    to conserve flux, and writes output as a self-describing ECSV.
+
+    Parameters
+    ----------
+    paths : str or list of str
+        File path(s) to CSV or ECSV line tables, or a directory path.
+    output_unit : unit-like
+        Target spectral unit (e.g., u.eV, u.Hz, u.AA).
+    input_unit : unit-like, optional
+        Input unit for the 'position' column. Required only if the input file 
+        does not carry unit metadata natively.
+    output_dir : str, optional
+        Output directory for converted files. If None, files are written to the same
+        location as input files.
+    overwrite : bool, optional
+        Whether to overwrite existing ECSV files. Default is False.
+    """
+    if isinstance(paths, str):
+        if os.path.isdir(paths):
+            paths = _linetable_file_paths(paths)
+        else:
+            paths = [paths]
+    
+    if output_dir is not None:
+        _ensure_directory(output_dir)
+    
+    for path in paths:
+        try:
+            table = QTable.read(path)
+        except Exception as e:
+            print(f"Skipping {path}: {e}")
+            continue
+
+        pos_col = table['position'] if 'position' in table.colnames else None
+        if pos_col is None:
+            print(f"Skipping {path}: no 'position' column found.")
+            continue
+            
+        if getattr(pos_col, 'unit', None) is None:
+            if input_unit is None:
+                raise ValueError(
+                    f"File '{path}' does not contain unit metadata for the 'position' column. "
+                    "You must provide the `input_unit` parameter to define the starting domain."
+                )
+            table['position'] = np.asarray(pos_col, dtype=float) * u.Unit(input_unit)
+            
+        # Convert the domain
+        converted = convert_linetable_domain(table, output_unit)
+        
+        # Determine output path
+        if output_dir is not None:
+            out_path = os.path.join(output_dir, Path(path).stem + '.ecsv')
+        else:
+            out_path = str(Path(path).with_suffix('.ecsv'))
+        
+        _write_linetable(out_path, converted, overwrite=overwrite)
+
+
+def convert_medium_csv(paths, target_medium, input_unit=None, output_dir=None, overwrite=False):
+    """Convert line table files between air and vacuum and rewrite as ECSV.
+
+    Reads tabular line tables natively, inspecting columns for physical units. 
+    Converts wavelengths between air and vacuum, and writes output as ECSV 
+    with medium metadata.
+
+    Parameters
+    ----------
+    paths : str or list of str
+        File path(s) to CSV or ECSV line tables, or a directory path.
+    target_medium : {'air', 'vacuum'}
+        Target wavelength medium for the line positions.
+    input_unit : unit-like, optional
+        Input unit for the 'position' column. Required only if the input file 
+        does not carry unit metadata natively.
+    output_dir : str, optional
+        Output directory for converted files. If None, files are written to the same
+        location as input files.
+    overwrite : bool, optional
+        Whether to overwrite existing files. Default is False.
+    """
+    target_medium = str(target_medium).strip().lower()
+    if target_medium not in {'air', 'vacuum'}:
+        raise ValueError("target_medium must be 'air' or 'vacuum'.")
+
+    if isinstance(paths, str):
+        if os.path.isdir(paths):
+            paths = _linetable_file_paths(paths)
+        else:
+            paths = [paths]
+    
+    if output_dir is not None:
+        _ensure_directory(output_dir)
+    
+    for path in paths:
+        try:
+            table = QTable.read(path)
+        except Exception as e:
+            print(f"Skipping {path}: {e}")
+            continue
+
+        pos_col = table['position'] if 'position' in table.colnames else None
+        if pos_col is None:
+            print(f"Skipping {path}: no 'position' column found.")
+            continue
+            
+        if getattr(pos_col, 'unit', None) is None:
+            if input_unit is None:
+                raise ValueError(
+                    f"File '{path}' does not contain unit metadata for the 'position' column. "
+                    "You must provide the `input_unit` parameter."
+                )
+            table['position'] = np.asarray(pos_col, dtype=float) * u.Unit(input_unit)
+            
+        # Convert the medium
+        converted = convert_linetable_medium(table, target_medium)
+        
+        # Determine output path
+        if output_dir is not None:
+            out_path = os.path.join(output_dir, Path(path).stem + '.ecsv')
+        else:
+            out_path = str(Path(path).with_suffix('.ecsv'))
+        
+        _write_linetable(out_path, converted, overwrite=overwrite)
 
 
 def _ensure_directory(path):
@@ -314,26 +466,33 @@ def _linetable_file_paths(dirpath):
 
 
 def _write_linetable(path, table, overwrite=False):
-    table = normalize_linetable(table, medium=table.meta.get('medium'))
+    table = normalize_linetable(table)
     out = QTable()
     out['name'] = np.asarray(table['name'], dtype=str)
-    out['position'] = table['position'].to(u.AA)
+    # Write natively to the unit the table was left in
+    out['position'] = table['position']
     out['weight'] = np.asarray(table['weight'], dtype=float)
-    out.meta['medium'] = table.meta.get('medium', DEFAULT_LINETABLE_MEDIUM)
+    if 'medium' in table.meta:
+        out.meta['medium'] = table.meta['medium']
+    
+    pos_unit_str = out['position'].unit.to_string() if out['position'].unit else 'dimensionless'
     lines = [
         '# %ECSV 1.0',
         '# ---',
         '# datatype:',
         '# - {name: name, datatype: string}',
-        '# - {name: position, unit: Angstrom, datatype: float64}',
+        f'# - {{name: position, unit: {pos_unit_str}, datatype: float64}}',
         '# - {name: weight, datatype: float64}',
-        '# meta:',
-        f"#   medium: {out.meta['medium']}",
-        'name position weight',
     ]
+    if 'medium' in out.meta:
+        lines.extend([
+            '# meta:',
+            f"#   medium: {out.meta['medium']}",
+        ])
+    lines.append('name position weight')
     for row in out:
         lines.append(
-            f"{str(row['name'])} {float(row['position'].to_value(u.AA)):.15g} {float(row['weight']):.15g}")
+            f"{str(row['name'])} {float(row['position'].value):.15g} {float(row['weight']):.15g}")
 
     if os.path.exists(path) and not overwrite:
         raise OSError(f"File exists and overwrite=False: {path}")
@@ -501,11 +660,15 @@ class LineModelBase(Fittable1DModel):
         spline = CubicSpline(wl, fwhm, extrapolate=True)
         return arr.copy(), 'spline', spline, spline.derivative()
 
-    def __init__(self, *args, instfwhm=0.0, domain='wavelength', medium=None,
-                 **kwargs):
+    def __init__(self, *args, instfwhm=0.0, velocity_unit=u.km/u.s, **kwargs):
         raw, mode, value_or_spline, deriv = self._normalize_instfwhm(instfwhm)
-        self._domain = _validate_domain(domain)
-        self._medium = _resolve_default_medium(medium)
+
+        vel_unit = u.Unit(velocity_unit)
+        if not vel_unit.is_equivalent(u.km/u.s):
+            raise ValueError("velocity_unit must be a unit of velocity (e.g. km/s, m/s).")
+        self.velocity_unit = vel_unit
+        self._to_kms = vel_unit.to(u.km/u.s)
+
         self._instfwhm_raw = raw
         self._instfwhm_mode = mode
         if mode == 'constant':
@@ -517,35 +680,92 @@ class LineModelBase(Fittable1DModel):
             self._instfwhm_spline = value_or_spline
             self._instfwhm_spline_deriv = deriv
         self.instfwhm = raw
-        param_names = list(type(self).param_names)
-        coerced_args = list(args)
-        for index, value in enumerate(coerced_args[:len(param_names)]):
-            coerced_args[index] = type(self)._coerce_init_parameter(param_names[index], value)
+
+        # Coerce plain scalar inputs to Quantities for parameters that define a default unit
+        param_names = type(self).param_names
+        coerced_args = [
+            self._coerce_init_parameter(pname, val) for pname, val in zip(param_names, args)
+        ]
         coerced_kwargs = {
-            key: type(self)._coerce_init_parameter(key, value) if key in param_names else value
-            for key, value in kwargs.items()
+            key: self._coerce_init_parameter(key, val) if key in param_names else val
+            for key, val in kwargs.items()
         }
         super().__init__(*coerced_args, **coerced_kwargs)
+        # Cache the position unit now, while it is still intact.
+        # During fitting Astropy replaces parameter values with raw floats,
+        # stripping instance-level units; reading from the cache keeps
+        # domain_family and input_units stable throughout the fit loop.
+        # Group models set _position_unit before calling this __init__, so
+        # we only write it here for single-line models (no pre-existing value).
+        if not hasattr(self, '_position_unit') or self._position_unit is None:
+            pos_param = getattr(self, 'position', None)
+            if pos_param is not None:
+                raw_unit = getattr(pos_param, 'unit', None)
+                self._position_unit = raw_unit if (raw_unit and raw_unit != u.dimensionless_unscaled) else None
+
+    @property
+    def domain_family(self):
+        """Kinematic family inferred from the physical type of the position unit.
+
+        For single-line models the unit comes from the ``position`` parameter.
+        For group models (which have no ``position`` parameter) the unit is
+        read from the ``_linetable`` position column, which always carries the
+        unit the table was built with.
+
+        Returns
+        -------
+        str
+            ``'wavelength'`` if the position unit measures length, or
+            ``'linear'`` if it measures frequency, energy, or temperature.
+
+        Raises
+        ------
+        ValueError
+            If no unit can be determined.
+        """
+        # Both single-line and group models cache the resolved spectral unit as
+        # _position_unit — set in __init__ (single) or from_templates (group).
+        pos_unit = self._position_unit
+
+        if pos_unit is None or pos_unit == u.dimensionless_unscaled:
+            raise ValueError(
+                "Cannot infer domain_family: no spectral unit found on the position "
+                "parameter or line table. Provide positions with an explicit unit "
+                "(e.g. position=5000*u.AA)."
+            )
+        ptype = pos_unit.physical_type
+        if ptype == 'length':
+            return 'wavelength'
+        if ptype in ('frequency', 'energy', 'temperature'):
+            return 'linear'
+        raise ValueError(
+            f"Cannot infer domain_family from position unit '{pos_unit}' "
+            f"(physical_type='{ptype}'). Use a spectral unit such as u.AA, u.nm, "
+            "u.Hz, u.eV, or u.K."
+        )
 
     @property
     def input_units(self):
-        return {self.inputs[0]: profiles.domain_unit(self.domain)}
+        """Map the first model input to the position unit for Astropy unit handling.
 
-    @property
-    def domain(self):
-        return self._domain
+        When this property is defined, Astropy automatically intercepts any
+        `~astropy.units.Quantity` passed to ``model(x)`` and converts it to
+        ``self.position.unit`` before forwarding the bare numeric array to
+        :meth:`evaluate`. This removes the need for manual unit stripping inside
+        ``evaluate`` and enables transparent cross-unit evaluation, e.g. passing
+        ``x`` in nm when the model is defined in Å.
 
-    @domain.setter
-    def domain(self, value):
-        self._domain = _validate_domain(value)
-
-    @property
-    def medium(self):
-        return self._medium
-
-    @medium.setter
-    def medium(self, value):
-        self._medium = _resolve_default_medium(value)
+        Returns
+        -------
+        dict or None
+            ``{input_name: position_unit}`` if the position parameter carries
+            a unit; ``None`` otherwise (so unitless models still accept plain
+            floats without Astropy raising an error).
+        """
+        pos_unit = self._position_unit
+        if pos_unit is None or pos_unit == u.dimensionless_unscaled:
+            return None
+        return {self.inputs[0]: pos_unit}
 
     @staticmethod
     def _as_value(value, unit=None):
@@ -557,9 +777,16 @@ class LineModelBase(Fittable1DModel):
         if arr.size != 1:
             raise ValueError("Line-model parameters must be scalar values.")
         return float(arr.reshape(-1)[0])
+        
+    def _as_kms(self, velocity_value):
+        """Converts the flexible velocity input into km/s for internal math."""
+        if isinstance(velocity_value, u.Quantity):
+            return velocity_value.to_value(u.km/u.s)
+        return velocity_value * self._to_kms
 
     @classmethod
     def _coerce_init_parameter(cls, name, value):
+        """Wrap plain numeric inputs in the parameter's default unit (if defined)."""
         param = getattr(cls, name, None)
         unit = getattr(param, 'unit', None)
         if unit is None or isinstance(value, (u.Quantity, Parameter)):
@@ -578,6 +805,20 @@ class LineModelBase(Fittable1DModel):
             if unit is not None:
                 mapping[pname] = unit
         return mapping
+
+    def _model_output_unit(self):
+        """Retrieve the output unit implied by the amplitude parameter(s)."""
+        for pname in self.param_names:
+            if pname == 'amplitude' or pname.startswith('amp_'):
+                return getattr(getattr(self, pname), 'unit', None)
+        return None
+
+    @property
+    def return_units(self):
+        output_unit = self._model_output_unit()
+        if output_unit is not None:
+            return {self.outputs[0]: output_unit}
+        return None
 
     @staticmethod
     def _output_unit_from_amplitude(amplitude):
@@ -599,113 +840,28 @@ class LineModelBase(Fittable1DModel):
                     "All quantity amplitudes in a line group must share compatible output units.") from exc
         return output_unit
 
-    def _center_jacobian(self, center):
-        jac = profiles.domain_jacobian(np.asarray([center], dtype=float), self.domain)
-        return float(np.asarray(jac, dtype=float).reshape(-1)[0])
-
-    def _native_amplitude_value(self, amplitude, center, output_unit=None, for_deriv=False):
-        amp_unit = self._output_unit_from_amplitude(amplitude)
-        if amp_unit is None:
-            return self._as_value(amplitude), output_unit
-
-        target_unit = amp_unit if output_unit is None else output_unit
-        amp_value = self._as_value(amplitude, target_unit)
-        if self.domain != 'wavelength':
-            if for_deriv:
-                raise NotImplementedError(
-                    "fit_deriv with quantity amplitudes is not supported for frequency or energy domains.")
-            amp_value /= self._center_jacobian(center)
-        return amp_value, target_unit
-
     @staticmethod
     def _parameter_payload(param):
         return param.quantity if getattr(param, 'unit', None) is not None else param.value
 
-    def _model_output_unit(self, amplitude_unit=None):
-        if amplitude_unit is not None:
-            return amplitude_unit
-        if hasattr(self, 'amplitude'):
-            return getattr(self.amplitude, 'unit', None)
-        return None
-
-    def _flux_unit(self, amplitude_unit=None):
-        output_unit = self._model_output_unit(amplitude_unit)
-        if output_unit is None:
-            return None
-        return output_unit * profiles.domain_unit(self.domain)
-
-    def _eqw_unit(self, amplitude_unit=None):
-        return None if self._model_output_unit(amplitude_unit) is None else profiles.domain_unit(self.domain)
-
-    def _coerce_output_scalar(self, value, output_unit=None, name='value'):
-        if isinstance(value, u.Quantity):
-            if output_unit is None:
-                raise ValueError(
-                    f"{name} was provided as a Quantity, but this model has no output unit.")
-            return self._as_value(value, output_unit)
-        return self._as_value(value)
-
-    def _coerce_output_array(self, values, output_unit=None, name='value'):
-        if isinstance(values, u.Quantity):
-            if output_unit is None:
-                raise ValueError(
-                    f"{name} was provided as a Quantity array, but this model has no output unit.")
-            return np.asarray(values.to_value(output_unit), dtype=float)
-        return np.asarray(values, dtype=float)
-
     def _coerce_domain_axis(self, x):
-        if isinstance(x, u.Quantity):
-            return np.asarray(
-                x.to_value(profiles.domain_unit(self.domain), equivalencies=u.spectral()),
-                dtype=float,
-            )
         return np.asarray(x, dtype=float)
 
-    def _default_domain_grid(self, center_aa, fwhm_aa, window=None, num=4096):
+    def _default_domain_grid(self, center_x, fwhm_x, window=None, num=4096):
         if window is None:
-            hw = 6.0 * fwhm_aa
-            wave_window = np.array([center_aa - hw, center_aa + hw], dtype=float)
-            edges = profiles.from_wavelength_values(wave_window, self.domain)
-            low, high = float(np.min(edges)), float(np.max(edges))
+            hw = 6.0 * fwhm_x
+            low, high = center_x - hw, center_x + hw
         else:
             low, high = window
-            if isinstance(low, u.Quantity):
-                low = low.to_value(profiles.domain_unit(self.domain), equivalencies=u.spectral())
-            if isinstance(high, u.Quantity):
-                high = high.to_value(profiles.domain_unit(self.domain), equivalencies=u.spectral())
-            low = float(low)
-            high = float(high)
+            low = float(low.value) if isinstance(low, u.Quantity) else float(low)
+            high = float(high.value) if isinstance(high, u.Quantity) else float(high)
         return np.linspace(low, high, int(num), dtype=float)
-
-    def _domain_center_value(self, center_aa):
-        return float(profiles.from_wavelength_values(np.asarray([center_aa], dtype=float), self.domain)[0])
 
     @staticmethod
     def _metric_frame(rows, index):
         frame = pd.DataFrame(rows, index=list(index), columns=['value', 'std', 'lolim', 'uplim', 'unit'])
         frame['unit'] = [None if unit in (None, '') else u.Unit(unit) for unit in frame['unit']]
         return frame
-
-    def _prepare_input_grid(self, x):
-        is_scalar = np.ndim(x) == 0
-        if isinstance(x, u.Quantity):
-            x_values = x.to_value(profiles.domain_unit(self.domain), equivalencies=u.spectral())
-        else:
-            x_values = np.asarray(x, dtype=float)
-        x_domain = np.atleast_1d(np.asarray(x_values, dtype=float))
-        x_native = profiles.to_wavelength_values(x_domain, self.domain)
-        jacobian = profiles.domain_jacobian(x_native, self.domain)
-        return x_native, jacobian, is_scalar
-
-    @staticmethod
-    def _apply_domain_jacobian(values, jacobian):
-        return np.asarray(values, dtype=float) * np.asarray(jacobian, dtype=float)
-
-    def _finalize_output(self, values, jacobian, is_scalar, amplitude_unit=None):
-        out = self._apply_domain_jacobian(values, jacobian)
-        if amplitude_unit is not None:
-            out = out * amplitude_unit
-        return out[0] if is_scalar else out
 
     def instfwhm_val(self, center):
         if self._instfwhm_mode == 'constant':
@@ -730,7 +886,6 @@ class LineModelBase(Fittable1DModel):
             std=float(flux_std) if flux_std is not None else float('nan'),
             lolim=float(flux_lo) if flux_lo is not None else float('nan'),
             uplim=float(flux_hi) if flux_hi is not None else float('nan'),
-            unit=self._flux_unit(),
         )
 
     def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096) -> Metric:
@@ -749,15 +904,14 @@ class LineModelBase(Fittable1DModel):
         -------
         Metric
         """
-        output_unit = self._model_output_unit()
         if continuum is None:
-            center, _ = self._infer_center_fwhm_aa()
-            continuum = self(self._domain_center_value(center))
+            center, _ = self._infer_center_fwhm_x()
+            continuum = self(center)
 
         if method == 'constant-continuum':
-            continuum_val = self._coerce_output_scalar(continuum, output_unit, name='continuum')
+            continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
             if not np.isfinite(continuum_val) or continuum_val == 0.0:
-                result = Metric(value=float('nan'), unit=self._eqw_unit(output_unit))
+                result = Metric(value=float('nan'))
                 self.ew = result
                 return result
             f = self.flux
@@ -770,27 +924,26 @@ class LineModelBase(Fittable1DModel):
                 std=ew_std,
                 lolim=ew_lo,
                 uplim=ew_hi,
-                unit=self._eqw_unit(output_unit),
             )
 
         elif method == 'integration':
             if x is None:
-                center, fwhm_aa = self._infer_center_fwhm_aa()
-                x_arr = self._default_domain_grid(center, fwhm_aa, window=window, num=num)
+                center, fwhm_x = self._infer_center_fwhm_x()
+                x_arr = self._default_domain_grid(center, fwhm_x, window=window, num=num)
             else:
                 x_arr = self._coerce_domain_axis(x)
-            y_line = self._coerce_output_array(self(x_arr), output_unit, name='line profile')
+            y_line = np.asarray(self(x_arr), dtype=float)
             if callable(continuum):
-                y_cont = self._coerce_output_array(continuum(x_arr), output_unit, name='continuum')
+                y_cont = np.asarray(continuum(x_arr), dtype=float)
             else:
-                continuum_val = self._coerce_output_scalar(continuum, output_unit, name='continuum')
+                continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
                 y_cont = np.full_like(x_arr, continuum_val, dtype=float)
             safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
             try:
                 ew_val = float(np.trapezoid(y_line / safe, x_arr))
             except AttributeError:
                 ew_val = float(np.trapz(y_line / safe, x_arr))
-            result = Metric(value=ew_val, unit=self._eqw_unit(output_unit))
+            result = Metric(value=ew_val)
 
         else:
             raise ValueError("method must be 'constant-continuum' or 'integration'.")
@@ -798,16 +951,16 @@ class LineModelBase(Fittable1DModel):
         self.ew = result
         return result
 
-    def _infer_center_fwhm_aa(self):
+    def _infer_center_fwhm_x(self):
         center = profiles.observed_center(
-            self.position.value, self.offset.value, self.redshift.value)
+            self.position.value, self._as_kms(self.offset.value), self.redshift.value, domain_family=self.domain_family)
         if hasattr(self, 'fwhm'):
-            fwhm_aa = self.fwhm.value / c_kms * center
+            fwhm_x = self._as_kms(self.fwhm.value) / c_kms * center
         elif hasattr(self, 'fwhm_G'):
-            fwhm_aa = self.fwhm_G.value / c_kms * center
+            fwhm_x = self._as_kms(self.fwhm_G.value) / c_kms * center
         else:
-            fwhm_aa = 10.0
-        return center, max(fwhm_aa, 0.1)
+            fwhm_x = 10.0
+        return center, max(fwhm_x, 0.1)
 
     def _flux_jacobian(self, flux_val):
         from astropy.modeling.fitting import model_to_fit_params

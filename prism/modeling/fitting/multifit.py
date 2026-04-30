@@ -201,6 +201,16 @@ class _MultiFitComponentView:
             additive=self._additive,
         )
 
+    @property
+    def flux(self):
+        """Return a Metric array with flux value, uncertainty, and confidence limits."""
+        return self._parent._result._component_flux(self._key, additive=self._additive)
+
+    def ew(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096):
+        """Compute the equivalent width of the component."""
+        return self._parent._result._component_ew(
+            self._key, additive=self._additive, continuum=continuum, method=method, x=x, window=window, num=num)
+
     def __repr__(self):
         mode = 'additive' if self._additive else 'components'
         return f"MultiFitComponentView(name={self.name!r}, mode={mode})"
@@ -602,6 +612,56 @@ class MultiFitResult:
         return self._evaluate_component(component, x=x, spectral_axis=spectral_axis,
                                         additive=True)
 
+    def _component_flux(self, component, additive=False):
+        """Return array-valued Metric for the flux of a component."""
+        vals, stds, los, his = [], [], [], []
+        for flat_index in range(self.n_spaxels):
+            comp_model = self.get_component_model(flat_index, component, additive=additive)
+            if hasattr(comp_model, 'flux'):
+                f = comp_model.flux
+                vals.append(f.value)
+                stds.append(f.std)
+                los.append(f.lolim)
+                his.append(f.uplim)
+            else:
+                vals.append(np.nan)
+                stds.append(np.nan)
+                los.append(np.nan)
+                his.append(np.nan)
+        from ..models.lines.base import Metric
+        return Metric(
+            value=np.array(vals).reshape(self.shape),
+            std=np.array(stds).reshape(self.shape),
+            lolim=np.array(los).reshape(self.shape),
+            uplim=np.array(his).reshape(self.shape)
+        )
+
+    def _component_ew(self, component, additive=False, continuum=None, method='constant-continuum', x=None, window=None, num=4096):
+        """Return array-valued Metric for the equivalent width of a component."""
+        vals, stds, los, his = [], [], [], []
+        is_cont_array = isinstance(continuum, np.ndarray) and continuum.shape == self.shape
+        for flat_index in range(self.n_spaxels):
+            comp_model = self.get_component_model(flat_index, component, additive=additive)
+            if hasattr(comp_model, 'eqw'):
+                idx_cont = continuum[np.unravel_index(flat_index, self.shape)] if is_cont_array else continuum
+                f = comp_model.eqw(continuum=idx_cont, method=method, x=x, window=window, num=num)
+                vals.append(f.value)
+                stds.append(f.std)
+                los.append(f.lolim)
+                his.append(f.uplim)
+            else:
+                vals.append(np.nan)
+                stds.append(np.nan)
+                los.append(np.nan)
+                his.append(np.nan)
+        from ..models.lines.base import Metric
+        return Metric(
+            value=np.array(vals).reshape(self.shape),
+            std=np.array(stds).reshape(self.shape),
+            lolim=np.array(los).reshape(self.shape),
+            uplim=np.array(his).reshape(self.shape)
+        )
+
     # ------------------------------------------------------------------
     # Model evaluation
     # ------------------------------------------------------------------
@@ -809,6 +869,9 @@ class MultiFitResult:
 
     #: Alias for :meth:`to_fits`.
     save = to_fits
+
+    def to_image(self):
+        raise NotImplementedError("MultiFitResult.to_image() is not implemented. Use to_fits() instead.")
 
 
 

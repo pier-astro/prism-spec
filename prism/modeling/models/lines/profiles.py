@@ -18,55 +18,7 @@ SQRT_LN2 = np.sqrt(np.log(2))
 C_KMS = 299792.458  # speed of light in km/s (IAU)
 C_AA_S = 2.99792458e18  # speed of light in Angstrom / s
 HC_AA_EV = 12398.419843320027  # h * c in Angstrom * eV
-DOMAIN_UNITS = {
-    'wavelength': u.AA,
-    'frequency': u.Hz,
-    'energy': u.eV,
-}
-
-
-def domain_unit(domain):
-    try:
-        return DOMAIN_UNITS[domain]
-    except KeyError as exc:
-        raise ValueError(
-            "domain must be 'wavelength', 'frequency', or 'energy'.") from exc
-
-
-def to_wavelength_values(x, domain):
-    """Convert wavelength/frequency/energy samples to wavelength in Angstrom."""
-    arr = np.asanyarray(x, dtype=float)
-    if domain == 'wavelength':
-        return arr
-    if domain == 'frequency':
-        return C_AA_S / arr
-    if domain == 'energy':
-        return HC_AA_EV / arr
-    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
-
-
-def from_wavelength_values(wavelength, domain):
-    """Convert wavelength in Angstrom to the requested spectral domain."""
-    lam = np.asanyarray(wavelength, dtype=float)
-    if domain == 'wavelength':
-        return lam
-    if domain == 'frequency':
-        return C_AA_S / lam
-    if domain == 'energy':
-        return HC_AA_EV / lam
-    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
-
-
-def domain_jacobian(wavelength, domain):
-    """Return |d lambda / d domain| for spectral-density conversion."""
-    lam = np.asanyarray(wavelength, dtype=float)
-    if domain == 'wavelength':
-        return np.ones_like(lam, dtype=float)
-    if domain == 'frequency':
-        return lam ** 2 / C_AA_S
-    if domain == 'energy':
-        return lam ** 2 / HC_AA_EV
-    raise ValueError("domain must be 'wavelength', 'frequency', or 'energy'.")
+DOMAIN_FAMILIES = ('wavelength', 'linear')
 
 # ---------------------------------------------------------------------------
 # Pure profile functions
@@ -198,9 +150,11 @@ def voigt_flux(amplitude, sigma, gamma):
 # Velocity-parameterised helpers
 # ---------------------------------------------------------------------------
 
-def observed_center(pos, offset, redshift):
-    """Observed center wavelength from rest position, velocity offset, and redshift."""
-    return pos * (1.0 + redshift) * np.exp(offset / C_KMS)
+def observed_center(pos, offset, redshift, domain_family='wavelength'):
+    """Observed center wavelength/energy from rest position, velocity offset, and redshift."""
+    if domain_family == 'wavelength':
+        return pos * (1.0 + redshift) * np.exp(offset / C_KMS)
+    return pos / ((1.0 + redshift) * np.exp(offset / C_KMS))
 
 
 def gaussian_profile_params(center, amplitude, weight, fwhm, redshift, instfwhm_val):
@@ -249,7 +203,7 @@ def voigt_profile_params(center, amplitude, weight, fwhm_G, fwhm_L, redshift, in
 # ---------------------------------------------------------------------------
 
 def gaussian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
-                            instfwhm_val, instfwhm_deriv_val):
+                            instfwhm_val, instfwhm_deriv_val, domain_family='wavelength'):
     """Full chain-rule derivatives for a Gaussian line in velocity parameterisation.
 
     Parameters
@@ -257,13 +211,13 @@ def gaussian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
     instfwhm_val : float or array
         Instrumental FWHM (km/s) evaluated at observed center.
     instfwhm_deriv_val : float or array
-        d(instfwhm_kms)/d(center_Å) evaluated at observed center.
+        d(instfwhm_kms)/d(center_x) evaluated at observed center.
 
     Returns
     -------
     val, d_amp, d_pos, d_off, d_fwhm, d_z : arrays
     """
-    center = observed_center(pos, offset, redshift)
+    center = observed_center(pos, offset, redshift, domain_family=domain_family)
     amp_eff, sigma_eff = gaussian_profile_params(
         center, amplitude, weight, fwhm, redshift, instfwhm_val)
 
@@ -271,15 +225,16 @@ def gaussian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
 
     d_amp = d_amp_eff * weight / (1.0 + redshift)
 
-    # Velocity-to-wavelength Jacobian
-    d_center_d_pos = (1.0 + redshift) * np.exp(offset / C_KMS)
-    d_center_d_off = center / C_KMS
+    # Velocity-to-native Jacobian
+    sign = 1.0 if domain_family == 'wavelength' else -1.0
+    d_center_d_pos = (1.0 + redshift) * np.exp(offset / C_KMS) if domain_family == 'wavelength' else 1.0 / ((1.0 + redshift) * np.exp(offset / C_KMS))
+    d_center_d_off = sign * center / C_KMS
 
     # Width Jacobian
-    fwhm_A = fwhm / C_KMS * center
-    instfwhm_A = instfwhm_val / C_KMS * center
-    sigma_int = fwhm_A / SIGMA2FWHM
-    sigma_inst = instfwhm_A / SIGMA2FWHM
+    fwhm_x = fwhm / C_KMS * center
+    instfwhm_x = instfwhm_val / C_KMS * center
+    sigma_int = fwhm_x / SIGMA2FWHM
+    sigma_inst = instfwhm_x / SIGMA2FWHM
 
     safe_se = np.where(sigma_eff != 0, sigma_eff, 1.0)
     dse_dsi = np.where(sigma_eff != 0, sigma_int / safe_se, 0.0)
@@ -299,8 +254,8 @@ def gaussian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
     d_fwhm = d_sigma_eff * dse_df
 
     # Redshift derivatives
-    d_center_d_z = center / (1.0 + redshift)
-    dsi_dz = sigma_int / (1.0 + redshift)
+    d_center_d_z = sign * center / (1.0 + redshift)
+    dsi_dz = sign * sigma_int / (1.0 + redshift)
     dsn_dz = dsn_dc * d_center_d_z
     dse_dz = dse_dsi * dsi_dz + dse_dsn * dsn_dz
 
@@ -311,12 +266,12 @@ def gaussian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
 
 
 def voigt_velocity_deriv(x, pos, amplitude, weight, offset, fwhm_G, fwhm_L,
-                         redshift, instfwhm_val, instfwhm_deriv_val):
+                         redshift, instfwhm_val, instfwhm_deriv_val, domain_family='wavelength'):
     """Full chain-rule derivatives for a Voigt line in velocity parameterisation.
 
     Returns ``(val, d_amp, d_pos, d_off, d_fwhm_G, d_fwhm_L, d_z)``.
     """
-    center = observed_center(pos, offset, redshift)
+    center = observed_center(pos, offset, redshift, domain_family=domain_family)
     amp_eff, sigma_eff, gamma = voigt_profile_params(
         center, amplitude, weight, fwhm_G, fwhm_L, redshift, instfwhm_val)
 
@@ -325,14 +280,15 @@ def voigt_velocity_deriv(x, pos, amplitude, weight, offset, fwhm_G, fwhm_L,
 
     d_amp = d_amp_eff * weight / (1.0 + redshift)
 
-    d_center_d_pos = (1.0 + redshift) * np.exp(offset / C_KMS)
-    d_center_d_off = center / C_KMS
+    sign = 1.0 if domain_family == 'wavelength' else -1.0
+    d_center_d_pos = (1.0 + redshift) * np.exp(offset / C_KMS) if domain_family == 'wavelength' else 1.0 / ((1.0 + redshift) * np.exp(offset / C_KMS))
+    d_center_d_off = sign * center / C_KMS
 
     # Sigma effective Jacobian
-    fwhm_G_A = fwhm_G / C_KMS * center
-    instfwhm_A = instfwhm_val / C_KMS * center
-    sigma_int = fwhm_G_A / SIGMA2FWHM
-    sigma_inst = instfwhm_A / SIGMA2FWHM
+    fwhm_G_x = fwhm_G / C_KMS * center
+    instfwhm_x = instfwhm_val / C_KMS * center
+    sigma_int = fwhm_G_x / SIGMA2FWHM
+    sigma_inst = instfwhm_x / SIGMA2FWHM
 
     safe_se = np.where(sigma_eff != 0, sigma_eff, 1.0)
     dse_dsi = np.where(sigma_eff != 0, sigma_int / safe_se, 0.0)
@@ -358,11 +314,11 @@ def voigt_velocity_deriv(x, pos, amplitude, weight, offset, fwhm_G, fwhm_L,
     d_fwhm_L = d_gamma * dg_dfL
 
     # Redshift derivatives
-    d_center_d_z = center / (1.0 + redshift)
-    dsi_dz = sigma_int / (1.0 + redshift)
+    d_center_d_z = sign * center / (1.0 + redshift)
+    dsi_dz = sign * sigma_int / (1.0 + redshift)
     dsn_dz = dsn_dc * d_center_d_z
     dse_dz = dse_dsi * dsi_dz + dse_dsn * dsn_dz
-    dg_dz = gamma / (1.0 + redshift)
+    dg_dz = sign * gamma / (1.0 + redshift)
 
     d_ampeff_dz = -amp_eff / (1.0 + redshift)
     d_z = (d_amp_eff * d_ampeff_dz + d_center * d_center_d_z

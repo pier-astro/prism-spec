@@ -33,6 +33,18 @@ class SherpaFitter(MultiFitMixin, Fitter):
     std = property(_fitter_stdevs)
     
     def __init__(self, method='levmar', calc_uncertainties=False, verbose=False, **kwargs):
+        """
+        Parameters
+        ----------
+        method : {'levmar', 'neldermead', 'moncar'}, optional
+            The Sherpa optimization method to use. Default is ``'levmar'``.
+        calc_uncertainties : bool, optional
+            Compute parameter uncertainties after fitting. Default is ``False``.
+        verbose : bool, optional
+            Enable verbose output from the Sherpa optimizer. Default is ``False``.
+        **kwargs
+            Additional arguments passed to the specific Sherpa optimizer.
+        """
         if not HAS_SHERPA:
             raise ImportError("Sherpa is not installed. Install with: pip install sherpa")
         
@@ -52,6 +64,7 @@ class SherpaFitter(MultiFitMixin, Fitter):
 
     @property
     def max_evaluations(self):
+        """int or None: Maximum number of model evaluations during the fit."""
         value = self.fit_kwargs.get('maxfev', self.fit_kwargs.get('max_nfev'))
         if value is not None:
             return value
@@ -68,6 +81,34 @@ class SherpaFitter(MultiFitMixin, Fitter):
 
     def __call__(self, model, x, y, z=None, weights=None, statistic='chi2', yerr=None,
                  inplace=True, **kwargs):
+        """Perform the fit.
+
+        Parameters
+        ----------
+        model : astropy.modeling.core.Model
+            The model to fit to the data.
+        x, y : array-like
+            Independent and dependent data arrays.
+        z : array-like, optional
+            Secondary independent data array for 2D models. Default is ``None``.
+        weights : array-like, optional
+            Weights for the fit (1 / yerr^2). Used if `yerr` is not provided.
+        statistic : str, optional
+            The fit statistic to minimize. Sherpa wrappers typically use a chi-square
+            equivalent when errors/weights are provided, or least-squares otherwise.
+            Poisson is not yet supported. Default is ``'chi2'``.
+        yerr : array-like, optional
+            1-sigma uncertainties on `y`. Default is ``None``.
+        inplace : bool, optional
+            Update the model in place. Default is ``True``.
+        **kwargs
+            Extra optimization arguments to merge with those provided at initialization.
+
+        Returns
+        -------
+        astropy.modeling.core.Model
+            The fitted model. If `inplace=False`, a new copy is returned.
+        """
         if 'uncertainties' in kwargs:
             raise TypeError("The 'uncertainties' parameter is no longer supported.")
         
@@ -175,15 +216,48 @@ class SherpaFitter(MultiFitMixin, Fitter):
 
 
 class SherpaLM(SherpaFitter):
+    """Levenberg-Marquardt optimizer using the Sherpa backend.
+
+    An efficient gradient-based local optimizer. Excellent for well-behaved,
+    smooth functions when good initial parameter guesses are available.
+    """
     def __init__(self, **kwargs):
+        """
+        Parameters
+        ----------
+        **kwargs
+            Optimization parameters passed to `sherpa.optmethods.LevMar`.
+        """
         super().__init__(method='levmar', **kwargs)
 
 
 class SherpaSimplex(SherpaFitter):
+    """Nelder-Mead (Simplex) optimizer using the Sherpa backend.
+
+    A gradient-free local optimizer that is robust to noisy objective functions,
+    though it typically converges slower than Levenberg-Marquardt.
+    """
     def __init__(self, **kwargs):
+        """
+        Parameters
+        ----------
+        **kwargs
+            Optimization parameters passed to `sherpa.optmethods.NelderMead`.
+        """
         super().__init__(method='neldermead', **kwargs)
 
 
 class SherpaMonCar(SherpaFitter):
+    """Monte Carlo global optimizer using the Sherpa backend.
+
+    A global optimization method that randomly samples the parameter space.
+    Best for complex likelihood surfaces with multiple local minima.
+    """
     def __init__(self, **kwargs):
+        """
+        Parameters
+        ----------
+        **kwargs
+            Optimization parameters passed to `sherpa.optmethods.MonCar`.
+        """
         super().__init__(method='moncar', **kwargs)

@@ -4,6 +4,7 @@ import numpy as np
 from astropy.modeling import models
 from astropy.modeling.powerlaws import PowerLaw1D
 
+import astropy.units as u
 import prism.modeling.display as model_display
 from prism.modeling.fitting import TRFLSQFitter
 from prism.modeling.fitting.utils import tie
@@ -74,14 +75,17 @@ def test_model_display_workflow():
 
         tied_lines = GaussianLines.from_arrays(
             names=['Hb4861'], pos=[4861.333], name='nlr', amplitude=2.0, offset=0.0, fwhm=300.0,
+            position_unit=u.AA,
         ) + GaussianLines.from_arrays(
             names=['OIII5007'], pos=[5006.803], name='hhe_nlr', amplitude=1.0, offset=0.0, fwhm=300.0,
+            position_unit=u.AA,
         )
         tied_lines.offset_1.tied = tie('nlr', lambda m: m.offset)
         assert '= offset_0' in format_fit_text(tied_lines)
 
         prism_model = PowerLaw1D(name='pl') + GaussianLines.from_arrays(
             names=['Hb4861'], pos=[4861.333], name='hb', amplitude=2.0, offset=0.0, fwhm=300.0,
+            position_unit=u.AA,
         )
         assert 'pl + hb' in format_model_text(prism_model)
 

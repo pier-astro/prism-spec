@@ -357,14 +357,21 @@ class Data1D:
 
     @property
     def axis(self):
+        """AxisInfo: A packaged representation of the primary spectral/spatial coordinate axis."""
         return AxisInfo(values=self.x, unit=self.xunit, kind=self.xtype)
 
     @property
     def values(self):
+        """numpy.ndarray: The primary 1-D values (alias for `y`)."""
         return self.y
 
     @property
     def dx(self):
+        """float or numpy.ndarray: The step size of the x-axis. 
+
+        Returns a single float if the step is uniform, or an array of diffs if non-uniform.
+        Returns an empty array if the axis has fewer than 2 elements.
+        """
         if self.x.size < 2:
             return np.array([], dtype=float)
         delta = np.diff(self.x)
@@ -373,6 +380,13 @@ class Data1D:
         return delta
 
     def copy(self):
+        """Create a deep copy of the 1-D data container.
+
+        Returns
+        -------
+        Data1D
+            A new instance with independent arrays and metadata.
+        """
         return self.__class__(
             x=self.x.copy(),
             y=self.y.copy(),

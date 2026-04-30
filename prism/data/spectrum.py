@@ -143,22 +143,33 @@ class Spectrum(Data1D):
 
     @property
     def orig_x(self):
+        """numpy.ndarray: The original spectral coordinate array before any crop or rebin."""
         return self._original_x
 
     @property
     def orig_y(self):
+        """numpy.ndarray: The original spectral values before any crop or rebin."""
         return self._original_y
 
     @property
     def orig_xerr(self):
+        """numpy.ndarray or None: The original coordinate uncertainties."""
         return self._original_xerr
 
     @property
     def orig_yerr(self):
+        """numpy.ndarray or None: The original value uncertainties."""
         return self._original_yerr
 
     @property
     def var(self):
+        """numpy.ndarray or None: The variance array computed from symmetric `yerr`.
+
+        Raises
+        ------
+        ValueError
+            If `yerr` is asymmetric (not a 1-D array).
+        """
         if self.yerr is None:
             return None
         if self.yerr.ndim != 1:
@@ -166,6 +177,13 @@ class Spectrum(Data1D):
         return self.yerr ** 2
 
     def copy(self):
+        """Create an independent deep copy of the spectrum.
+
+        Returns
+        -------
+        Spectrum
+            A new instance with independent arrays and metadata.
+        """
         copied = self.__class__(
             x=self._original_x.copy(),
             y=self._original_y.copy(),
@@ -217,6 +235,10 @@ class Spectrum(Data1D):
         -------
         None
             The object is updated in place.
+            
+        Examples
+        --------
+        >>> spec.crop(bounds=(4000.0, 5000.0))
         """
         if self._rebinned:
             raise RuntimeError('Cannot crop after rebinning.')
@@ -265,6 +287,12 @@ class Spectrum(Data1D):
         Rebinning replaces the stored full-resolution arrays. Because the new grid
         is no longer a masked view of the original sampling, :meth:`reset` cannot
         recover the pre-rebinned state.
+        
+        Examples
+        --------
+        >>> spec.rebin(factor=2)
+        >>> # or rebin to a new specific wavelength grid
+        >>> spec.rebin(new_x=np.linspace(4000, 5000, 100))
         """
         if self.yerr is not None and self.yerr.ndim != 1:
             raise ValueError('Rebinning does not support asymmetric yerr.')
@@ -292,6 +320,16 @@ class Spectrum(Data1D):
         self._update_working_arrays()
 
     def reset(self):
+        """Restore the original sampling by removing any active crop.
+
+        This recovers the masked view of the original grid provided during
+        initialization.
+
+        Notes
+        -----
+        This operation is invalid if the spectrum was rebinned, since
+        rebinning irreversibly destroys the original grid.
+        """
         if self._rebinned:
             warnings.warn('Cannot reset a rebinned spectrum. Re-initialize the object instead.', UserWarning)
             return
@@ -304,6 +342,13 @@ class Spectrum(Data1D):
         self._update_working_arrays()
 
     def require_original_grid(self):
+        """Check whether the active grid corresponds to the original sampling.
+
+        Raises
+        ------
+        RuntimeError
+            If the spectrum has been resampled via :meth:`rebin`.
+        """
         if self._rebinned:
             raise RuntimeError('Operation requires the original coordinate grid, but the spectrum has been rebinned.')
 
@@ -508,6 +553,27 @@ class Spectrum(Data1D):
         return values
 
     def plot_spectrum(self, ax=None):
+        """Render the 1-D spectrum using Matplotlib.
+
+        Plots the spectral flux values as a mid-step function with errorbars.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Target axes for the plot. If ``None``, a new figure and axes
+            are created and immediately displayed.
+
+        Returns
+        -------
+        None
+        
+        Examples
+        --------
+        >>> import matplotlib.pyplot as plt
+        >>> fig, ax = plt.subplots()
+        >>> spec.plot_spectrum(ax=ax)
+        >>> plt.show()
+        """
         created_fig = False
         if ax is None:
             _, ax = plt.subplots()

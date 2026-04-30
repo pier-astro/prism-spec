@@ -1,6 +1,29 @@
-# Fitting
+# prism.modeling.fitting
 
-`prism.modeling.fitting` provides Prism fitters, multi-spectrum fitting, and uncertainty helpers while staying as close as possible to Astropy's fitting interface.
+The `prism.modeling.fitting` module implements a unified and extended fitting infrastructure for Astropy models, providing robust, high-performance optimization options.
+
+## Features
+- **MultiFitMixin**: Automatically handles broadcasting 1-D models over 2-D/3-D spatial maps via the `.multifit()` method, utilizing multiprocessing and masking.
+- **Bootstrap Uncertainties**: Robust parameter uncertainties using empirical bootstrap resampling (`.bootstrap_uncertainties()`).
+- **Sherpa Fitters**: Wrappers around CIAO's `sherpa` optimizers allowing chi-square optimization.
+  - `SherpaLM`: Levenberg-Marquardt (fast, local gradient-based).
+  - `SherpaSimplex`: Nelder-Mead (robust, gradient-free).
+  - `SherpaMonCar`: Monte Carlo global optimization.
+
+## Usage
+Simply instantiate a fitter, pass it a parameterized model and the observed data, and receive the optimized model back.
+
+```python
+from prism.modeling.fitting.sherpafit import SherpaLM
+from astropy.modeling.models import Gaussian1D
+
+fitter = SherpaLM()
+model = Gaussian1D(amplitude=1, mean=5000, stddev=10)
+
+best_fit = fitter(model, x, y, yerr=yerr)
+```
+
+---
 
 ## What Lives Here
 

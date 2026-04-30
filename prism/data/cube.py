@@ -63,7 +63,17 @@ def _axis_indices(indexer, size, *, axis_name):
     if array.dtype == bool:
         if array.shape != (size,):
             raise ValueError(f'{axis_name} boolean mask must have shape ({size},); got {array.shape}.')
+        
+        # Check if the boolean mask represents a single contiguous chunk
+        true_indices = np.where(array)[0]
+        if len(true_indices) > 0:
+            if true_indices[-1] - true_indices[0] == len(true_indices) - 1:
+                return slice(true_indices[0], true_indices[-1] + 1), True
+        elif len(true_indices) == 0:
+            return slice(0, 0), True  # Empty mask
+            
         return array, False
+        
     if array.ndim != 1:
         raise ValueError(f'{axis_name} indexer must be a slice, 1-D integer array, or boolean mask.')
     return array.astype(int, copy=False), False
@@ -203,6 +213,7 @@ class Cube:
 
     @property
     def values(self):
+        """numpy.ndarray: The cube data values."""
         return self._values
 
     @values.setter
@@ -240,6 +251,7 @@ class Cube:
 
     @property
     def data(self):
+        """numpy.ndarray: Alias for the `values` property."""
         return self._values
 
     @data.setter
@@ -248,6 +260,7 @@ class Cube:
 
     @property
     def err(self):
+        """numpy.ndarray: Standard deviation (1-sigma) uncertainties of the cube values."""
         return self._err
 
     @err.setter
@@ -257,6 +270,7 @@ class Cube:
 
     @property
     def var(self):
+        """numpy.ndarray: Variance array of the cube values (square of `err`)."""
         return self._err ** 2
 
     @var.setter
@@ -277,6 +291,13 @@ class Cube:
         return self if inplace else self.copy()
 
     def copy(self):
+        """Create a deep copy of the cube container.
+
+        Returns
+        -------
+        Cube
+            A new instance with independent arrays and metadata.
+        """
         header = self.header.copy() if hasattr(self.header, 'copy') else dict(self.header)
         copied = Cube(
             values=self.values.copy(),
@@ -304,6 +325,26 @@ class Cube:
         return copied
 
     def crop(self, zslice=None, yslice=None, xslice=None, inplace=False):
+        """Extract a subcube by applying index slices or boolean masks along the axes.
+
+        Parameters
+        ----------
+        zslice, yslice, xslice : slice, array-like integer indices, or array-like bool, optional
+            Indexing information for the spectral (z) and spatial (y, x) axes. 
+            Default is ``None`` for all axes (i.e. no cropping).
+        inplace : bool, optional
+            Modify the cube in place. Default is ``False``.
+
+        Returns
+        -------
+        Cube
+            The cropped cube object. WCS is updated if slices are contiguous.
+            
+        Examples
+        --------
+        >>> cube_cropped = cube.crop(yslice=slice(10, 50), xslice=slice(10, 50))
+        >>> print(cube_cropped.shape)
+        """
         target = self if inplace else self.copy()
         original_values = target.values
         original_err = target.err
@@ -353,11 +394,60 @@ class Cube:
 
         return target
 
-    def crop_spectral(self, zslice, inplace=False):
-        return self.crop(zslice=zslice, inplace=inplace)
+    def crop_spectral(self, slice=None, min=None, max=None, inplace=False):
+            """Crop the cube along its spectral dimension only.
+
+            Parameters
+            ----------
+            slice : slice, array-like integer indices, or array-like bool, optional
+                Indexing information for the spectral axis. If provided, `min` and `max` 
+                are ignored.
+            min : float, optional
+                Minimum physical spectral value to keep.
+            max : float, optional
+                Maximum physical spectral value to keep.
+            inplace : bool, optional
+                Modify the cube in place. Default is ``False``.
+
+            Returns
+            -------
+            Cube
+                The cropped cube object.
+                
+            Examples
+            --------
+            >>> # Crop using a boolean mask or index slice
+            >>> cube_red = cube.crop_spectral(slice(100, 200))
+            >>> 
+            >>> # Crop using physical ranges (preserves WCS efficiently)
+            >>> cube_range = cube.crop_spectral(min=4000, max=5000)
+            """
+            if slice is None:
+                if min is None and max is None:
+                    return self if inplace else self.copy()
+                
+                # Efficiently find indices handling both ascending and descending arrays
+                ascending = self.z[-1] >= self.z[0] if len(self.z) > 1 else True
+                
+                if ascending:
+                    start = np.searchsorted(self.z, min) if min is not None else None
+                    end = np.searchsorted(self.z, max, side='right') if max is not None else None
+                else:
+                    z_rev = self.z[::-1]
+                    start = len(self.z) - np.searchsorted(z_rev, max, side='right') if max is not None else None
+                    end = len(self.z) - np.searchsorted(z_rev, min) if min is not None else None
+                    
+                # Use np.s_ to safely generate a slice object even if start/end are None
+                slice = np.s_[start:end]
+
+            return self.crop(zslice=slice, inplace=inplace)
 
     @property
     def unique_bins(self):
+        """numpy.ndarray: Unique valid spatial bin indices present in the ``binmap``.
+
+        Excludes negative bin labels (commonly used to represent unbinned/ignored spaxels).
+        """
         if self.values.ndim != 3:
             raise ValueError('Bin maps are only supported for 3-D cubes.')
         if self.binmap is None:
@@ -366,6 +456,15 @@ class Cube:
         return bins[bins >= 0]
 
     def iter_bins(self):
+        """Iterate over all spatial bins.
+
+        Yields
+        ------
+        bin_id : int
+            The integer label of the current bin.
+        mask : numpy.ndarray of bool
+            A 2D spatial boolean mask selecting spaxels belonging to the bin.
+        """
         if self.values.ndim != 3:
             raise ValueError('Bin iteration is only supported for 3-D cubes.')
         if self.binmap is None:
@@ -378,6 +477,35 @@ class Cube:
             yield int(bin_id), self.binmap == bin_id
 
     def apply_binmap(self, binmap=None, method='mean', inplace=False):
+        """Rebin the spatial pixels based on the given bin map.
+
+        Spaxels belonging to the same bin ID are aggregated into a single pseudo-spaxel
+        using the specified method. This updates the cube flux and propagates the errors
+        in quadrature.
+
+        Parameters
+        ----------
+        binmap : array-like, optional
+            A 2D integer array defining bin memberships. If ``None``, uses the cube's 
+            existing ``binmap`` attribute.
+        method : {'sum', 'mean', 'median'}, optional
+            Aggregation method for the spaxels in a bin. Default is ``'mean'``.
+            - 'sum': adds the flux values (errors add in quadrature).
+            - 'mean': averages the flux values (errors add in quadrature and scale by 1/N).
+            - 'median': calculates the median (errors approximate median standard error).
+        inplace : bool, optional
+            Modify the cube in place. Default is ``False``.
+
+        Returns
+        -------
+        Cube
+            A new cube (or self if inplace) where all spaxels in a given bin are 
+            replaced by the aggregated bin values.
+            
+        Examples
+        --------
+        >>> binned_cube = cube.apply_binmap(method='sum')
+        """
         if self.values.ndim != 3:
             raise ValueError('Bin maps are only supported for 3-D cubes.')
         target = self if inplace else self.copy()
@@ -418,6 +546,18 @@ class Cube:
         return target
 
     def pixel_scales(self, unit='arcsec'):
+        """Calculate the spatial pixel scales based on WCS or coordinates.
+
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            The angular unit for the output pixel scales. Default is ``'arcsec'``.
+
+        Returns
+        -------
+        astropy.units.Quantity
+            The ``(x_scale, y_scale)`` pixel size with physical units.
+        """
         return pixel_scales_from_wcs_or_coords(
             wcs=self.wcs,
             x=self.x,
@@ -428,6 +568,24 @@ class Cube:
         )
 
     def spatial_scale(self, redshift=None, distance=None, unit='kpc', cosmology=None):
+        """Calculate the physical spatial scales using the source redshift or distance.
+
+        Parameters
+        ----------
+        redshift : float, optional
+            The redshift of the object. Defaults to the cube's `redshift` attribute.
+        distance : astropy.units.Quantity, optional
+            The explicit angular diameter distance to the object.
+        unit : str or astropy.units.Unit, optional
+            The output physical unit. Default is ``'kpc'``.
+        cosmology : astropy.cosmology.Cosmology, optional
+            Cosmology model. Default is the current `astropy.cosmology.default_cosmology`.
+
+        Returns
+        -------
+        astropy.units.Quantity
+            The physical pixel dimensions as an array.
+        """
         return physical_scales_from_angular(
             self.pixel_scales(unit='arcsec'),
             redshift=redshift or self.redshift,
@@ -437,6 +595,24 @@ class Cube:
         )
 
     def pixel_area(self, unit='arcsec2', redshift=None, distance=None, cosmology=None):
+        """Compute the spatial area of a single pixel.
+
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            The output area unit (e.g., 'arcsec2', 'kpc2'). Default is ``'arcsec2'``.
+        redshift : float, optional
+            Redshift for computing physical areas.
+        distance : astropy.units.Quantity, optional
+            Explicit distance for computing physical areas.
+        cosmology : astropy.cosmology.Cosmology, optional
+            Cosmology model.
+
+        Returns
+        -------
+        astropy.units.Quantity
+            The area per spaxel.
+        """
         area_unit = normalize_unit(unit) or (u.arcsec ** 2)
         if area_unit.is_equivalent(u.arcsec ** 2):
             scales = self.pixel_scales(unit=u.arcsec)
@@ -445,6 +621,34 @@ class Cube:
         return (scales[0] * scales[1]).to(area_unit)
 
     def extract_spectrum(self, mask, method='sum'):
+        """Extract a 1-D spectrum from the 3-D cube using a spatial mask.
+
+        Collapses the spatial dimensions by applying weights. Propagates errors based
+        on the chosen extraction method. The resulting spectrum is assigned a new spatial
+        center calculated via the barycenter of the mask.
+
+        Parameters
+        ----------
+        mask : array-like
+            A 2D spatial array of weights (values between 0 and 1). Typically a boolean mask.
+        method : {'sum', 'mean', 'median'}, optional
+            Method used to extract the spectrum.
+            - 'sum': simple unweighted/weighted sum of pixel values.
+            - 'mean': weighted average of pixels.
+            - 'median': median calculation (requires binary masks).
+
+        Returns
+        -------
+        Spectrum
+            A new `Spectrum` object containing the extracted flux and errors.
+            
+        Examples
+        --------
+        >>> import numpy as np
+        >>> mask = np.zeros(cube.shape[1:], dtype=bool)
+        >>> mask[10:20, 10:20] = True
+        >>> spec = cube.extract_spectrum(mask, method='sum')
+        """
         if self.values.ndim != 3:
             raise ValueError('Spectrum extraction is only supported for 3-D cubes.')
 
@@ -500,6 +704,17 @@ class Cube:
         )
 
     def to_nddata(self):
+        """Convert the cube to an `astropy.nddata.NDDataArray` format.
+
+        This packages the cube's values, uncertainties, mask, and metadata into a
+        standardized Astropy data structure. Useful for exporting or passing into
+        Astropy functions.
+
+        Returns
+        -------
+        astropy.nddata.NDDataArray
+            The equivalent Astropy data object.
+        """
         header = self.header.copy() if hasattr(self.header, 'copy') else dict(self.header)
         meta = {
             'prism_header': header,
@@ -542,6 +757,28 @@ class Cube:
         binmap=None,
         redshift=None,
     ):
+        """Instantiate a Cube from an `astropy.nddata.NDData` object.
+
+        Parameters
+        ----------
+        nddata : astropy.nddata.NDData
+            The source NDData object containing arrays and uncertainties.
+        x, y, z : array-like, optional
+            Coordinate grids. Fallback values if not found in `nddata.meta`.
+        xunit, yunit, zunit : str or astropy.units.Unit, optional
+            Units for the coordinate grids.
+        xtype, ytype, ztype, valuetype : str, optional
+            Explicit semantic labels.
+        binmap : array-like, optional
+            Initial binmap structure.
+        redshift : float, optional
+            Source redshift.
+
+        Returns
+        -------
+        Cube
+            The newly created prism spectral cube.
+        """
         if not isinstance(nddata, NDData):
             raise TypeError('nddata must implement the Astropy NDData interface.')
 
@@ -699,6 +936,15 @@ class Cube:
         return self._apply_rop(other, np.divide, lambda e1, e2, d1, d2: np.sqrt((e1 / d2) ** 2 + ((d1 * e2) / d2 ** 2) ** 2))
 
     def get_masked(self):
+        """Return flattened 1-D arrays of data selecting valid spectral channels.
+
+        A channel is considered valid if all its spatial pixels are valid (i.e. not masked).
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            `(z_valid, values_valid, err_valid)` arrays selecting only non-masked spectral points.
+        """
         spatial_axes = tuple(range(1, self.mask.ndim))
         channel_valid = self.mask.all(axis=spatial_axes)
         return self.z[channel_valid], self.values[channel_valid], self.err[channel_valid]
@@ -718,6 +964,36 @@ class Cube:
         ztype=None,
         redshift=None,
     ):
+        """Construct a Cube instance by reading FITS files.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Path to the target FITS file.
+        ext_values : str or int, optional
+            Extension containing the data values (defaults to 'DATA', 'SCI', or 1).
+        ext_err, ext_var : str or int, optional
+            Extensions containing standard deviation or variance arrays.
+        ext_mask : str or int, optional
+            Extension containing the boolean or bit mask.
+        ext_binmap : str or int, optional
+            Extension containing the spatial bin labels.
+        z : array-like, optional
+            Explicit spectral coordinate array.
+        z_ext : str or int, optional
+            FITS extension or table from which to extract the spectral axis.
+        ext_wcs : str or int, optional
+            Extension from which to extract WCS information (defaults to `ext_values`).
+        ztype : str, optional
+            Type label for the spectral axis.
+        redshift : float, optional
+            Optional redshift metadata to store in the cube.
+
+        Returns
+        -------
+        Cube
+            The spectral cube loaded from disk.
+        """
         with fits.open(filename) as hdul:
             headers = {'PRIMARY': hdul[0].header.copy()}
             ext_names = [hdu.name.upper() for hdu in hdul]
@@ -875,6 +1151,22 @@ class Cube:
         return values
 
     def frequencies(self, unit=None):
+        """Convert the spectral axis to frequency.
+        
+        Parameters
+        ----------
+        unit : str or astropy.units.Unit, optional
+            The target frequency unit.
+            
+        Returns
+        -------
+        numpy.ndarray
+            The spectral axis in frequency units.
+            
+        Examples
+        --------
+        >>> freqs = cube.frequencies(unit='GHz')
+        """
         values, _ = convert_spectral_axis(self.z, self.ztype, self.zunit, 'frequency', unit)
         return values
 
@@ -882,7 +1174,7 @@ class Cube:
         values, _ = convert_spectral_axis(self.z, self.ztype, self.zunit, 'energy', unit)
         return values
 
-    def velocity(self, rest=None, unit=None, convention='doppler'):
+    def velocities(self, rest=None, unit=None, convention='doppler'):
         values, _ = convert_spectral_axis(
             self.z,
             self.ztype,
@@ -936,6 +1228,31 @@ class Cube:
                 warnings.warn(f'Could not update WCS CUNIT3: {e}', UserWarning)
 
     def write(self, filename, overwrite=False, err=True, mask=False, binmap=False, cd_matrix=False, is_var=None, keep_keywords='default'):
+        """Write the cube data to a FITS file.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Destination FITS file path.
+        overwrite : bool, optional
+            Overwrite the file if it exists. Default is ``False``.
+        err : bool, optional
+            Save the uncertainty array to the FITS file. Default is ``True``.
+        mask : bool, optional
+            Save the mask array. Default is ``False``.
+        binmap : bool, optional
+            Save the spatial binmap if present. Default is ``False``.
+        cd_matrix : bool, optional
+            Convert WCS keywords to the legacy CD matrix form. Default is ``False``.
+        is_var : bool, optional
+            If ``True``, save uncertainties as variance ('STAT'). Default infers from load.
+        keep_keywords : str or list, optional
+            FITS headers to keep. Default is ``'default'``.
+
+        Examples
+        --------
+        >>> cube.write('output.fits', overwrite=True, err=True, mask=True)
+        """
         wcs_header = self.wcs.to_header() if self.wcs else fits.Header()
 
         if cd_matrix:
@@ -1005,61 +1322,115 @@ class Cube:
 
         fits.HDUList(hdus).writeto(filename, overwrite=overwrite)
 
-    def to_image(self, zmask=None, zbounds=None, method='sum'):
-        from prism.data.image import Image
+    def get_image(self, min=None, max=None, weights=None, method='sum'):
+            """Collapse the cube along the spectral axis to create a 2-D Image.
 
-        try:
-            image_wcs = self.wcs.celestial if self.wcs is not None else None
-        except Exception:
-            image_wcs = None
+            Parameters
+            ----------
+            min : float, optional
+                Minimum physical spectral value to include.
+            max : float, optional
+                Maximum physical spectral value to include.
+            weights : array-like, optional
+                A 1-D array of weights (or a boolean mask) for the spectral channels. 
+                Can be used to apply a filter transmission curve. Default is equal weights.
+            method : {'sum', 'mean', 'median'}, optional
+                Aggregation method for the spectral channels. Default is ``'sum'``.
+                Note: 'median' is only supported if `weights` are purely boolean (0 or 1).
 
-        axis_mask = np.ones(self.shape[0], dtype=bool)
-        if zmask is not None:
-            axis_mask &= np.asarray(zmask, dtype=bool)
-        if zbounds is not None:
-            axis_mask &= (self.z >= zbounds[0]) & (self.z <= zbounds[1])
+            Returns
+            -------
+            Image
+                A new 2-D `Image` object.
+                
+            Examples
+            --------
+            >>> # Simple sum between 5000 and 5050
+            >>> img = cube.get_image(min=5000, max=5050, method='sum')
+            >>>
+            >>> # Apply a synthetic filter transmission curve
+            >>> transmission = my_filter_curve(cube.z)
+            >>> img_band = cube.get_image(weights=transmission, method='sum')
+            """
+            from prism.data.image import Image
 
-        valid_values = self.values[axis_mask]
-        valid_err = self.err[axis_mask]
-        pixel_mask = self.mask[axis_mask] if self.mask is not None else np.ones_like(valid_values, dtype=bool)
+            try:
+                image_wcs = self.wcs.celestial if self.wcs is not None else None
+            except Exception:
+                image_wcs = None
 
-        masked_values = np.where(pixel_mask, valid_values, np.nan)
-        masked_var = np.where(pixel_mask, valid_err ** 2, np.nan)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', category=RuntimeWarning)
-            if method == 'sum':
-                image_values = np.nansum(masked_values, axis=0)
-                image_err = np.sqrt(np.nansum(masked_var, axis=0))
-            elif method == 'mean':
-                count = np.sum(pixel_mask, axis=0)
-                image_values = np.nanmean(masked_values, axis=0)
-                image_err = np.sqrt(np.nansum(masked_var, axis=0) / np.maximum(count, 1) ** 2)
-            elif method == 'median':
-                count = np.sum(pixel_mask, axis=0)
-                image_values = np.nanmedian(masked_values, axis=0)
-                image_err = np.sqrt(np.nansum(masked_var, axis=0) / np.maximum(count, 1) ** 2) * 1.2533
+            # Handle weights and boolean masks natively
+            if weights is not None:
+                w = np.asarray(weights, dtype=float)
+                if w.shape != (self.shape[0],):
+                    raise ValueError(f"weights must be a 1-D array of length {self.shape[0]}")
             else:
-                raise ValueError("method must be one of 'sum', 'mean', or 'median'.")
+                w = np.ones(self.shape[0], dtype=float)
 
-        image_mask = np.sum(pixel_mask, axis=0) > 0
-        image_values[~image_mask] = 0.0
-        image_err[~image_mask] = 0.0
+            # Handle min/max boundaries
+            axis_mask = w > 0  # Only process channels with non-zero weight to save memory
+            if min is not None:
+                axis_mask &= (self.z >= min)
+            if max is not None:
+                axis_mask &= (self.z <= max)
 
-        return Image(
-            values=image_values,
-            err=image_err,
-            x=None if self.x is None else self.x.copy(),
-            y=None if self.y is None else self.y.copy(),
-            mask=image_mask,
-            wcs=image_wcs,
-            header=self.header.get('PRIMARY', self.header),
-            unit=self.unit,
-            xunit=self.xunit,
-            yunit=self.yunit,
-            binmap=None if self.binmap is None else self.binmap.copy(),
-            xtype=self.xtype,
-            ytype=self.ytype,
-            valuetype=self.valuetype,
-            is_var=False,
-        )
+            if not np.any(axis_mask):
+                raise ValueError("The provided min, max, or weights selected zero spectral channels.")
+
+            # Slice down to valid channels
+            valid_values = self.values[axis_mask]
+            valid_err = self.err[axis_mask]
+            valid_w = w[axis_mask][:, None, None]  # Broadcast weights to 3D (z, y, x)
+            pixel_mask = self.mask[axis_mask] if self.mask is not None else np.ones_like(valid_values, dtype=bool)
+
+            # Mask invalid spatial pixels
+            masked_values = np.where(pixel_mask, valid_values, np.nan)
+            masked_var = np.where(pixel_mask, valid_err ** 2, np.nan)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', category=RuntimeWarning)
+                
+                if method == 'sum':
+                    image_values = np.nansum(masked_values * valid_w, axis=0)
+                    image_err = np.sqrt(np.nansum(masked_var * (valid_w ** 2), axis=0))
+                    
+                elif method == 'mean':
+                    weight_sum = np.nansum(np.where(pixel_mask, valid_w, np.nan), axis=0)
+                    safe_weight_sum = np.where(weight_sum > 0, weight_sum, 1.0) # Avoid division by zero
+                    
+                    image_values = np.nansum(masked_values * valid_w, axis=0) / safe_weight_sum
+                    image_err = np.sqrt(np.nansum(masked_var * (valid_w ** 2), axis=0)) / safe_weight_sum
+                    
+                elif method == 'median':
+                    if not np.all((valid_w == 1.0) | (valid_w == 0.0)):
+                        raise ValueError("method='median' is only supported when weights are strictly boolean (0 or 1).")
+                    
+                    count = np.sum(pixel_mask, axis=0)
+                    image_values = np.nanmedian(masked_values, axis=0)
+                    image_err = np.sqrt(np.nansum(masked_var, axis=0) / np.maximum(count, 1) ** 2) * 1.2533
+                    
+                else:
+                    raise ValueError("method must be one of 'sum', 'mean', or 'median'.")
+
+            # Re-mask spatial pixels that were completely invalid across all sliced spectral channels
+            image_mask = np.sum(pixel_mask, axis=0) > 0
+            image_values[~image_mask] = 0.0
+            image_err[~image_mask] = 0.0
+
+            return Image(
+                values=image_values,
+                err=image_err,
+                x=None if self.x is None else self.x.copy(),
+                y=None if self.y is None else self.y.copy(),
+                mask=image_mask,
+                wcs=image_wcs,
+                header=self.header.get('PRIMARY', self.header),
+                unit=self.unit,
+                xunit=self.xunit,
+                yunit=self.yunit,
+                binmap=None if self.binmap is None else self.binmap.copy(),
+                xtype=self.xtype,
+                ytype=self.ytype,
+                valuetype=self.valuetype,
+                is_var=False,
+            )

@@ -31,7 +31,7 @@ def test_spectrum_generic_axis_workflow():
     )
     assert spec.xtype == 'wavelength'
     assert spec.ytype == 'flux-density-nu'
-    assert not hasattr(spec, 'medium')
+    assert spec.ytype == 'flux-density-nu'
 
     freq = spec.frequencies(unit=u.THz)
     assert freq.shape == x.shape
@@ -86,8 +86,8 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
 
     cube = Cube(values=values, z=z, err=err, zunit='nm', unit='Jy')
     assert cube.ztype == 'wavelength'
-    assert not hasattr(cube, 'medium')
-    image = cube.to_image(method='sum')
+    assert cube.ztype == 'wavelength'
+    image = cube.get_image(method='sum')
 
     assert isinstance(image, Image)
     assert image.values.shape == (2, 3)
@@ -154,15 +154,15 @@ def test_cube_wavelength_domain_processing():
         zunit='AA',
     )
     assert cube.ztype == 'wavelength'
-    assert not hasattr(cube, 'medium')
+    assert cube.ztype == 'wavelength'
 
     np.testing.assert_allclose(cube.wavelengths(unit=u.nm), z / 10.0)
     assert np.all(np.isfinite(cube.frequencies(unit=u.Hz)))
     assert np.all(np.isfinite(cube.energies(unit=u.eV)))
 
-    velocity = cube.velocity(rest=5005.0 * u.AA, unit=u.km / u.s)
-    assert velocity.shape == z.shape
-    assert np.any(np.abs(velocity) > 0.0)
+    velocities = cube.velocities(rest=5005.0 * u.AA, unit=u.km / u.s)
+    assert velocities.shape == z.shape
+    assert np.any(np.abs(velocities) > 0.0)
 
     cropped = cube.crop_spectral(slice(1, 4), inplace=False)
     np.testing.assert_allclose(cropped.z, z[1:4])

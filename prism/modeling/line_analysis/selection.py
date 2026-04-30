@@ -135,19 +135,20 @@ def _evaluate_linegroup_template(model, template_name, x, position=None):
     shared_values = [getattr(model, pname).value
                      for pname in model._shared_params.keys()]
 
-    x_native, jacobian, is_scalar = model._prepare_input_grid(x)
+    x_native = model._coerce_domain_axis(x)
+    is_scalar = np.ndim(x) == 0
+    x_native = np.atleast_1d(x_native)
     total = np.zeros_like(x_native, dtype=float)
     centers = []
     widths = []
 
     args = model._single_profile_args(
-        member_pos, amplitude, member_weight, *shared_values,
-        output_unit=amplitude_unit)
+        member_pos, amplitude, member_weight, *shared_values)
     total += model._profile_func(x_native, *args)
     centers.append(float(args[1]))
     widths.append(_profile_width_from_args(model, args))
 
-    values = model._finalize_output(total, jacobian, is_scalar, amplitude_unit)
+    values = total[0] if is_scalar else total
     return (values, np.asarray(centers, dtype=float),
             np.asarray(widths, dtype=float), resolved)
 
@@ -184,8 +185,7 @@ def _evaluate_component_profile(model, x):
             for pos, weight in zip(model._tmpl_positions[idx],
                                    model._tmpl_weights[idx]):
                 args = model._single_profile_args(
-                    pos, amplitude, weight, *shared_values,
-                    output_unit=amplitude_unit)
+                    pos, amplitude, weight, *shared_values)
                 centers.append(float(args[1]))
                 widths.append(_profile_width_from_args(model, args))
         return (values, np.asarray(centers, dtype=float),
@@ -311,8 +311,8 @@ class SelectedLineProfile:
             yield components[entry.component_key]
 
     @property
-    def domain(self):
-        domains = {getattr(component, 'domain', 'wavelength')
+    def domain_family(self):
+        domains = {getattr(component, 'domain_family', 'wavelength')
                    for component in self._iter_components()}
         if len(domains) != 1:
             raise ValueError("Selected line combines components from different domains.")
@@ -320,7 +320,7 @@ class SelectedLineProfile:
 
     @property
     def axis_unit(self):
-        return profiles.domain_unit(self.domain)
+        return u.AA if self.domain_family == 'wavelength' else u.eV
 
     @property
     def output_unit(self):
@@ -372,10 +372,13 @@ class SelectedLineProfile:
             position = float(getattr(component.position, 'value', component.position))
         else:
             position = float(entry.template_position)
-        return np.asarray(
-            [float(profiles.from_wavelength_values(np.asarray([position], dtype=float), self.domain)[0])],
-            dtype=float,
-        )
+        if self.domain_family == 'linear':
+            # Need to convert wavelength to linear. But wait, probe_axis_value is supposed to return a native axis array.
+            # position is in AA. We just convert it using `convert_linetable_domain` logic? No, u.Quantity.
+            position_q = position * u.AA
+            position = position_q.to_value(u.eV, equivalencies=u.spectral())
+            
+        return np.asarray([float(position)], dtype=float)
 
     def _iter_evaluated_entries(self, x):
         components = get_components(self.source_model, additive=self.additive)
@@ -415,9 +418,9 @@ class SelectedLineProfile:
             float(np.min(centers - padding * widths)),
             float(np.max(centers + padding * widths)),
         ], dtype=float)
-        if self.domain == 'wavelength':
+        if self.domain_family == 'wavelength':
             return float(wave_window[0]), float(wave_window[1])
-        edges = profiles.from_wavelength_values(wave_window, self.domain)
+        edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
         return float(np.min(edges)), float(np.max(edges))
 
     def evaluate(self, x):
@@ -540,7 +543,10 @@ class SelectedLineProfile:
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
             wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
-            x_cont_edges = profiles.from_wavelength_values(wave_window, self.domain)
+            if self.domain_family == 'wavelength':
+                x_cont_edges = wave_window
+            else:
+                x_cont_edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
             x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
             cont_vals = (
                 self._coerce_output_array(self.source_model(x_cont), name='continuum model')
@@ -592,7 +598,10 @@ class SelectedLineProfile:
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
             wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
-            x_cont_edges = profiles.from_wavelength_values(wave_window, self.domain)
+            if self.domain_family == 'wavelength':
+                x_cont_edges = wave_window
+            else:
+                x_cont_edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
             x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
             _cvals = (
                 self._coerce_output_array(self.source_model(x_cont), name='continuum model')
