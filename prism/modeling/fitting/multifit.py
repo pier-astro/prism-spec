@@ -19,6 +19,7 @@ import os
 import copy
 import multiprocess as mp
 from tqdm.auto import tqdm
+import pandas as pd
 from astropy.modeling.fitting import model_to_fit_params
 from ...data.core import parse_binmap
 
@@ -619,21 +620,33 @@ class MultiFitResult:
             comp_model = self.get_component_model(flat_index, component, additive=additive)
             if hasattr(comp_model, 'flux'):
                 f = comp_model.flux
-                vals.append(f.value)
-                stds.append(f.std)
-                los.append(f.lolim)
-                his.append(f.uplim)
+                # If f is a DataFrame (from LineGroups), we can extract its columns
+                if isinstance(f, pd.DataFrame):
+                    vals.append(np.asarray(f['value']))
+                    stds.append(np.asarray(f['std']))
+                    los.append(np.asarray(f['lolim']))
+                    his.append(np.asarray(f['uplim']))
+                else:
+                    vals.append(f.value)
+                    stds.append(f.std)
+                    los.append(f.lolim)
+                    his.append(f.uplim)
             else:
                 vals.append(np.nan)
                 stds.append(np.nan)
                 los.append(np.nan)
                 his.append(np.nan)
         from ..models.lines.base import Metric
+        vals_arr = np.array(vals)
+        target_shape = self.shape + vals_arr.shape[1:]
+        
+        # If the original returned a DataFrame, return a DataFrame of Metric objects
+        # Or just a single Metric holding arrays. The Metric object supports arrays!
         return Metric(
-            value=np.array(vals).reshape(self.shape),
-            std=np.array(stds).reshape(self.shape),
-            lolim=np.array(los).reshape(self.shape),
-            uplim=np.array(his).reshape(self.shape)
+            value=vals_arr.reshape(target_shape),
+            std=np.array(stds).reshape(target_shape),
+            lolim=np.array(los).reshape(target_shape),
+            uplim=np.array(his).reshape(target_shape)
         )
 
     def _component_ew(self, component, additive=False, continuum=None, method='constant-continuum', x=None, window=None, num=4096):
@@ -645,21 +658,29 @@ class MultiFitResult:
             if hasattr(comp_model, 'eqw'):
                 idx_cont = continuum[np.unravel_index(flat_index, self.shape)] if is_cont_array else continuum
                 f = comp_model.eqw(continuum=idx_cont, method=method, x=x, window=window, num=num)
-                vals.append(f.value)
-                stds.append(f.std)
-                los.append(f.lolim)
-                his.append(f.uplim)
+                if isinstance(f, pd.DataFrame):
+                    vals.append(np.asarray(f['value']))
+                    stds.append(np.asarray(f['std']))
+                    los.append(np.asarray(f['lolim']))
+                    his.append(np.asarray(f['uplim']))
+                else:
+                    vals.append(f.value)
+                    stds.append(f.std)
+                    los.append(f.lolim)
+                    his.append(f.uplim)
             else:
                 vals.append(np.nan)
                 stds.append(np.nan)
                 los.append(np.nan)
                 his.append(np.nan)
         from ..models.lines.base import Metric
+        vals_arr = np.array(vals)
+        target_shape = self.shape + vals_arr.shape[1:]
         return Metric(
-            value=np.array(vals).reshape(self.shape),
-            std=np.array(stds).reshape(self.shape),
-            lolim=np.array(los).reshape(self.shape),
-            uplim=np.array(his).reshape(self.shape)
+            value=vals_arr.reshape(target_shape),
+            std=np.array(stds).reshape(target_shape),
+            lolim=np.array(los).reshape(target_shape),
+            uplim=np.array(his).reshape(target_shape)
         )
 
     # ------------------------------------------------------------------

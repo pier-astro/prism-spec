@@ -56,6 +56,8 @@ class Metric:
 
     def __repr__(self) -> str:
         unit_str = f" {self.unit}" if self.unit is not None else ""
+        if np.asarray(self.value).ndim > 0:
+            return f"<Metric: array of shape {np.asarray(self.value).shape}{unit_str}>"
         if not np.isfinite(self.std):
             return f"{self.value:.4g}{unit_str}"
         return f"{self.value:.4g} \u00b1 {self.std:.4g}{unit_str}  [{self.lolim:.4g}, {self.uplim:.4g}]"

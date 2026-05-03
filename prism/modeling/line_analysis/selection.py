@@ -39,11 +39,19 @@ def _selector_token(value) -> str:
     return str(value).strip().lower()
 
 
-def _selector_position_value(position) -> float | None:
+def _selector_position_value(position, position_unit=None) -> float | None:
+    """Convert position to native model unit.
+    
+    If position_unit is not provided, position is returned as-is (assumed native).
+    If provided, performs unit conversion to the target position_unit.
+    """
     if position is None:
         return None
+    if position_unit is None:
+        return float(position)
     if isinstance(position, u.Quantity):
-        return float(position.to_value(u.AA, equivalencies=u.spectral()))
+        target_unit = u.Unit(position_unit) if not isinstance(position_unit, u.Unit) else position_unit
+        return float(position.to_value(target_unit, equivalencies=u.spectral()))
     return float(position)
 
 
@@ -88,19 +96,20 @@ def _resolve_linegroup_member(model, template_name, position=None):
             f"'{getattr(model, 'name', type(model).__name__)}' has no lines.")
 
     selector_position = _selector_position_value(position)
+    pos_unit = str(model._position_unit) if hasattr(model, '_position_unit') else "native units"
     if selector_position is not None:
         matches = np.flatnonzero(np.isclose(positions, selector_position, rtol=0.0, atol=1e-3))
         if matches.size == 0:
             available = ', '.join(f"{value:.4f}" for value in positions)
             raise ValueError(
-                f"No line at {selector_position:.4f} Å found for template "
+                f"No line at {selector_position:.4f} {pos_unit} found for template "
                 f"'{template_name}' in component '{getattr(model, 'name', type(model).__name__)}'. "
-                f"Available positions: {available} Å")
+                f"Available positions: {available} {pos_unit}")
         if matches.size > 1:
             raise ValueError(
                 f"Template '{template_name}' in component "
                 f"'{getattr(model, 'name', type(model).__name__)}' has multiple "
-                f"lines matching {selector_position:.4f} Å.")
+                f"lines matching {selector_position:.4f} {pos_unit}.")
         member_idx = int(matches[0])
     else:
         anchors = np.flatnonzero(np.isclose(weights, 1.0, rtol=0.0, atol=1e-12))
@@ -111,7 +120,7 @@ def _resolve_linegroup_member(model, template_name, position=None):
             raise ValueError(
                 f"Ambiguous selector '{template_name}' in component "
                 f"'{getattr(model, 'name', type(model).__name__)}': multiple lines "
-                f"have weight=1 ({available} Å). Pass position=... to disambiguate.")
+                f"have weight=1 ({available} {pos_unit}). Pass position=... to disambiguate.")
         elif positions.size == 1:
             member_idx = 0
         else:
@@ -120,7 +129,7 @@ def _resolve_linegroup_member(model, template_name, position=None):
             raise ValueError(
                 f"Ambiguous selector '{template_name}' in component "
                 f"'{getattr(model, 'name', type(model).__name__)}': no unique weight=1 line. "
-                f"Pass position=... to disambiguate. Candidates: {available} Å")
+                f"Pass position=... to disambiguate. Candidates: {available} {pos_unit}")
 
     return idx, resolved, member_idx, float(positions[member_idx]), float(weights[member_idx])
 
@@ -290,6 +299,14 @@ class SelectedLineProfile:
         self.selector = str(selector)
         self.entries = tuple(entries)
         self.additive = bool(additive)
+        # Cache the position unit from the first component to avoid silent assumptions.
+        # All components must have the same domain_family (checked in domain_family property),
+        # so they all share the same position unit.
+        components = get_components(source_model, additive=additive)
+        self._cached_position_unit = None
+        if self.entries:
+            first_component = components[self.entries[0].component_key]
+            self._cached_position_unit = getattr(first_component, '_position_unit', None)
 
     def __repr__(self):
         return (
@@ -319,8 +336,22 @@ class SelectedLineProfile:
         return domains.pop()
 
     @property
+    def position_unit(self):
+        """The spectral unit of the line positions stored in the model.
+        
+        This is the native unit in which positions are parameterized,
+        read directly from the line models' _position_unit attribute.
+        """
+        if self._cached_position_unit is None:
+            raise ValueError(
+                "Cannot determine position unit: no spectral unit found on the "
+                "selected components. This should not happen for valid line models.")
+        return self._cached_position_unit
+
+    @property
     def axis_unit(self):
-        return u.AA if self.domain_family == 'wavelength' else u.eV
+        """Alias for position_unit for backward compatibility."""
+        return self.position_unit
 
     @property
     def output_unit(self):
@@ -368,16 +399,16 @@ class SelectedLineProfile:
         return out[0] if is_scalar else out
 
     def _probe_axis_value(self, component, entry):
+        """Get the probe position in the model's native position unit.
+        
+        For single-line components, position comes from the parameter value.
+        For template groups, position comes from the template entry.
+        Both are already in the model's _position_unit, so no conversion needed.
+        """
         if entry.template_name is None:
             position = float(getattr(component.position, 'value', component.position))
         else:
             position = float(entry.template_position)
-        if self.domain_family == 'linear':
-            # Need to convert wavelength to linear. But wait, probe_axis_value is supposed to return a native axis array.
-            # position is in AA. We just convert it using `convert_linetable_domain` logic? No, u.Quantity.
-            position_q = position * u.AA
-            position = position_q.to_value(u.eV, equivalencies=u.spectral())
-            
         return np.asarray([float(position)], dtype=float)
 
     def _iter_evaluated_entries(self, x):
@@ -413,15 +444,13 @@ class SelectedLineProfile:
             np.isfinite(widths) & (widths > 0.0), widths, min_width)
         if centers.size == 0:
             raise ValueError(
-                "Cannot infer a wavelength window for an empty line selection.")
-        wave_window = np.array([
+                "Cannot infer a spectral window for an empty line selection.")
+        window = np.array([
             float(np.min(centers - padding * widths)),
             float(np.max(centers + padding * widths)),
         ], dtype=float)
-        if self.domain_family == 'wavelength':
-            return float(wave_window[0]), float(wave_window[1])
-        edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
-        return float(np.min(edges)), float(np.max(edges))
+        # Window is already in the model's native position_unit; return as-is.
+        return float(window[0]), float(window[1])
 
     def evaluate(self, x):
         is_scalar = np.ndim(x) == 0
@@ -436,9 +465,15 @@ class SelectedLineProfile:
 
     @property
     def position(self) -> float:
-        """Rest-frame wavelength of the selected line (Å)."""
+        """Rest-frame position of the selected line in the model's native unit.
+        
+        Returns the mean position of all selected components, expressed in
+        position_unit (e.g., Å for wavelength models or eV for energy models).
+        Issues a warning if positions differ significantly (>0.1% spread).
+        """
         components = get_components(self.source_model, additive=self.additive)
         positions, labels = [], []
+        unit_str = str(self.position_unit)
         for entry in self.entries:
             component = components[entry.component_key]
             if entry.template_name is None:
@@ -446,13 +481,13 @@ class SelectedLineProfile:
                 if pos_param is not None:
                     p = float(pos_param.value)
                     positions.append(p)
-                    labels.append(f"{entry.component_name}: {p:.4f} Å")
+                    labels.append(f"{entry.component_name}: {p:.4f} {unit_str}")
             else:
                 p = float(entry.template_position)
                 positions.append(p)
                 labels.append(
                     f"{entry.component_name}/{entry.template_name}: "
-                    f"{p:.4f} Å")
+                    f"{p:.4f} {unit_str}")
 
         if not positions:
             raise ValueError(
@@ -466,7 +501,7 @@ class SelectedLineProfile:
         if spread > tol:
             warnings.warn(
                 f"Rest positions of the '{self.selector}' selected components "
-                f"differ by {spread:.4f} Å (tolerance {tol:.4f} Å):\n"
+                f"differ by {spread:.4f} {unit_str} (tolerance {tol:.4f} {unit_str}):\n"
                 + "\n".join(f"  {lbl}" for lbl in labels),
                 UserWarning, stacklevel=2)
         return mean_pos
@@ -542,11 +577,8 @@ class SelectedLineProfile:
             _wb = window if window is not None else self.infer_window()
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
-            wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
-            if self.domain_family == 'wavelength':
-                x_cont_edges = wave_window
-            else:
-                x_cont_edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
+            # Work in the model's native position unit; no conversion needed.
+            x_cont_edges = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
             x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
             cont_vals = (
                 self._coerce_output_array(self.source_model(x_cont), name='continuum model')
@@ -597,11 +629,8 @@ class SelectedLineProfile:
         if continuum is None:
             sigma_est = (_wb[1] - _wb[0]) / (12.0 * 2.3548)
             centroid = float(self.position)
-            wave_window = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
-            if self.domain_family == 'wavelength':
-                x_cont_edges = wave_window
-            else:
-                x_cont_edges = (wave_window * u.AA).to_value(u.eV, equivalencies=u.spectral())
+            # Work in the model's native position unit; no conversion needed.
+            x_cont_edges = np.array([centroid - sigma_est, centroid + sigma_est], dtype=float)
             x_cont = np.linspace(float(np.min(x_cont_edges)), float(np.max(x_cont_edges)), 17, dtype=float)
             _cvals = (
                 self._coerce_output_array(self.source_model(x_cont), name='continuum model')
@@ -863,9 +892,10 @@ def select_line(model, selector, components=None, additive=True, index=None,
         selected line from the specific 1D model at that spatial index. 
         If None, a batch selection (`SelectedLineCollection`) is returned instead.
     position : float or Quantity, optional
-        Rest-frame wavelength in Å used to disambiguate template groups where
-        multiple physical lines share the same selector. When omitted, grouped
-        selectors default to the unique sub-line with weight=1.
+        Rest-frame position (in the model's native position_unit) used to 
+        disambiguate template groups where multiple physical lines share the 
+        same selector. When omitted, grouped selectors default to the unique 
+        sub-line with weight=1.
 
     Returns
     -------

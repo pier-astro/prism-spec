@@ -1,5 +1,6 @@
 {
     "chat.tools.terminal.autoApprove": {
         "/Users/pierpaolo/SciSoft/git/prism-spec/.venv/bin/python": true
-    }
+    },
+    "python.analysis.autoImportCompletions": true
 }

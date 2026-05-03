@@ -367,7 +367,7 @@ class LineGroupBase(LineModelBase):
             mask = np.asarray(linetable['name'], dtype=str) == tmpl
             table_tmpl = linetable[mask]
             _tmpl_positions.append(
-                table_tmpl['position'].to(u.AA, equivalencies=u.spectral()).value)
+                table_tmpl['position'].to(_resolved_position_unit, equivalencies=u.spectral()).value)
             _tmpl_weights.append(np.asarray(table_tmpl['weight'], dtype=float))
 
         for pname in param_names:
