@@ -2,13 +2,18 @@ import warnings
 
 import astropy.units as u
 import numpy as np
+import pytest
 from astropy.modeling.fitting import TRFLSQFitter as NativeTRFLSQFitter
 from astropy.modeling.powerlaws import ExponentialCutoffPowerLaw1D, PowerLaw1D
 
 from prism.modeling.fitting import ScipyTRF, TRFLSQFitter, tie
 from prism.modeling.models import BSpline, FixedTemplate
 from prism.modeling.models.lines import GaussianLine
-from prism.modeling.operators.instrument import InstrumentResponse, SpectralResponse
+from prism.modeling.operators.instrument import (
+    InstrumentResponse,
+    SpectralResponse,
+    _crop_response_matrix,
+)
 
 
 def _build_tied_double_gaussian(offset=-120.0, fwhm=700.0):
@@ -129,3 +134,128 @@ def test_scipytrf_tied_pipe_warns_and_converges():
 
     _assert_tied_warning(caught)
     assert np.allclose(fitted(x), y, rtol=1e-5, atol=1e-5)
+
+
+def test_crop_response_accepts_same_sampling_with_small_zero_point_offset():
+    matrix_wave = 4700.40576171875 + 1.25 * np.arange(32)
+    matrix = np.eye(len(matrix_wave))
+    target_wave = matrix_wave[8:24] - 0.13232421875
+
+    cropped = _crop_response_matrix(matrix, matrix_wave, target_wave, renormalize=False)
+
+    assert cropped.shape == (len(target_wave), len(target_wave))
+    assert np.allclose(cropped.toarray(), np.eye(len(target_wave)))
+
+
+def test_crop_response_rejects_target_grid_that_collapses_bins():
+    matrix_wave = 4700.40576171875 + 1.25 * np.arange(16)
+    matrix = np.eye(len(matrix_wave))
+    target_wave = matrix_wave[4] + 0.4 * np.arange(8)
+
+    with pytest.raises(ValueError, match="strictly increasing subset"):
+        _crop_response_matrix(matrix, matrix_wave, target_wave, renormalize=False)
+
+
+def test_spectral_response_subset_evaluation_matches_full_grid_result():
+    wave = np.linspace(4990.0, 5020.0, 256)
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
+        wave=wave,
+    )
+    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+
+    full = model(wave)
+    subset_wave = wave[48:192]
+
+    assert np.allclose(model(subset_wave), full[48:192], rtol=1e-10, atol=1e-10)
+
+
+def test_spectral_response_off_grid_evaluation_interpolates_and_zero_pads():
+    wave = np.linspace(4990.0, 5020.0, 256)
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
+        wave=wave,
+    )
+    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+
+    full = model(wave)
+    step = wave[1] - wave[0]
+    plot_wave = np.concatenate(([wave[0] - step], wave[40:216] + 0.37 * step, [wave[-1] + step]))
+    expected = np.interp(plot_wave, wave, full, left=0.0, right=0.0)
+
+    evaluated = model(plot_wave)
+    assert np.allclose(evaluated, expected, rtol=1e-10, atol=1e-10)
+    assert evaluated[0] == 0.0
+    assert evaluated[-1] == 0.0
+
+
+def test_spectral_response_flexible_false_still_rejects_grid_mismatch():
+    wave = np.linspace(4990.0, 5020.0, 128)
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
+        wave=wave,
+        flexible=False,
+    )
+    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+
+    with pytest.raises(ValueError, match="expects 128 samples"):
+        model(wave[16:96])
+
+
+def test_spectral_response_off_grid_evaluation_preserves_quantity_units():
+    wave = np.linspace(4990.0, 5020.0, 256) * u.AA
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave.value, fwhm=2.0),
+        wave=wave.value,
+    )
+    model = GaussianLine(
+        amplitude=3.0 * u.Jy,
+        position=5007.0 * u.AA,
+        fwhm=350.0 * u.km / u.s,
+    ) | rsp
+
+    full = model(wave)
+    plot_wave = wave[40:216] + 0.37 * (wave[1] - wave[0])
+    expected = np.interp(plot_wave.value, wave.value, full.value, left=0.0, right=0.0) * full.unit
+
+    evaluated = model(plot_wave)
+    assert evaluated.unit == full.unit
+    assert np.allclose(evaluated.value, expected.value, rtol=1e-10, atol=1e-10)
+
+
+def test_spectral_response_same_grid_skips_flexible_resampling(monkeypatch):
+    wave = np.linspace(4990.0, 5020.0, 128)
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
+        wave=wave,
+    )
+    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("same-grid evaluation should not enter the flexible resampling path")
+
+    monkeypatch.setattr(rsp, "_get_interp_cache", _fail)
+    values = model(wave)
+
+    assert values.shape == wave.shape
+
+
+@pytest.mark.parametrize("fitter_cls", [TRFLSQFitter, ScipyTRF])
+def test_spectral_response_off_grid_fit_converges(fitter_cls):
+    wave = np.linspace(4990.0, 5020.0, 160)
+    step = wave[1] - wave[0]
+    fit_wave = wave[12:148] + 0.23 * step
+    rsp = SpectralResponse(
+        instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
+        wave=wave,
+    )
+
+    truth = GaussianLine(amplitude=3.0, position=5007.0, fwhm=320.0 * u.km / u.s) | rsp
+    y = truth(fit_wave)
+    model = GaussianLine(amplitude=2.2, position=5006.6, fwhm=420.0 * u.km / u.s) | rsp
+
+    fitted = fitter_cls()(model, fit_wave, y)
+
+    assert np.allclose(fitted(fit_wave), y, rtol=1e-5, atol=1e-5)
+    assert np.isclose(fitted.left.amplitude.value, 3.0, rtol=5e-3)
+    assert np.isclose(fitted.left.fwhm.value, 320.0, rtol=5e-3)

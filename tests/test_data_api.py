@@ -29,6 +29,8 @@ def test_spectrum_generic_axis_workflow():
         xunit='AA',
         yunit='Jy',
     )
+    assert spec.y.dtype == np.float32
+    assert spec.yerr.dtype == np.float32
     assert spec.xtype == 'wavelength'
     assert spec.ytype == 'flux-density-nu'
     assert spec.ytype == 'flux-density-nu'
@@ -37,7 +39,7 @@ def test_spectrum_generic_axis_workflow():
     assert freq.shape == x.shape
     assert np.all(np.isfinite(freq))
 
-    spec.crop(bounds=(5020.0, 5080.0))
+    spec = spec.cutout(min=5020.0, max=5080.0)
     assert spec.x.size < x.size
 
     spec.reset()
@@ -85,6 +87,8 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
     err = np.full_like(values, 0.1)
 
     cube = Cube(values=values, z=z, err=err, zunit='nm', unit='Jy')
+    assert cube.values.dtype == np.float32
+    assert cube.err.dtype == np.float32
     assert cube.ztype == 'wavelength'
     assert cube.ztype == 'wavelength'
     image = cube.get_image(method='sum')
@@ -92,6 +96,35 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
     assert isinstance(image, Image)
     assert image.values.shape == (2, 3)
     np.testing.assert_allclose(image.values, values.sum(axis=0))
+    image_nm = cube.get_image(min=5010 * u.AA, max=5020 * u.AA, method='sum')
+    np.testing.assert_allclose(image_nm.values, values[1:3].sum(axis=0))
+    quicklook = cube.get_image(method='sum', propagate_err=False)
+    np.testing.assert_allclose(quicklook.values, image.values)
+    np.testing.assert_allclose(quicklook.err, 0.0)
+
+    masked_cube = Cube(
+        values=values,
+        z=z,
+        err=err,
+        mask=np.ones_like(values, dtype=bool),
+        zunit='nm',
+        unit='Jy',
+    )
+    masked_cube.mask[1, 0, 0] = False
+    masked_image = masked_cube.get_image(method='sum')
+    assert masked_image.mask[0, 0]
+    np.testing.assert_allclose(masked_image.values[0, 0], values[[0, 2, 3], 0, 0].sum())
+    np.testing.assert_allclose(masked_image.err[0, 0], np.sqrt(3) * 0.1)
+    np.testing.assert_allclose(masked_image.values[0, 1], values[:, 0, 1].sum())
+
+    masked_cube.values[2, 0, 0] = np.nan
+    contaminated_image = masked_cube.get_image(method='sum')
+    assert contaminated_image.mask[0, 0]
+    assert np.isnan(contaminated_image.values[0, 0])
+
+    cube64 = Cube(values=values, z=z, err=err, zunit='nm', unit='Jy', dtype=np.float64)
+    assert cube64.values.dtype == np.float64
+    assert cube64.err.dtype == np.float64
 
     path = tmp_path / 'cube_native_units.fits'
     header = fits.Header()
@@ -122,6 +155,8 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
     ]).writeto(path)
 
     loaded = Cube.from_fits(path)
+    assert loaded.values.dtype == np.float32
+    assert loaded.err.dtype == np.float32
     assert loaded.zunit == u.nm
     assert loaded.ztype == 'wavelength'
     np.testing.assert_allclose(loaded.z, z)
@@ -129,6 +164,18 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
     np.testing.assert_allclose(loaded.frequencies(unit=u.Hz), (z * u.nm).to_value(u.Hz, equivalencies=u.spectral()))
     with pytest.raises(AttributeError):
         _ = loaded.wave
+
+    written = tmp_path / 'cube_written_units.fits'
+    loaded.write(written, overwrite=True)
+    with fits.open(written) as hdul:
+        assert hdul['DATA'].header['CUNIT3'] == 'nm'
+    written_loaded = Cube.from_fits(written)
+    assert written_loaded.zunit == u.nm
+    np.testing.assert_allclose(written_loaded.z, z)
+
+    loaded64 = Cube.from_fits(path, dtype=np.float64)
+    assert loaded64.values.dtype == np.float64
+    assert loaded64.err.dtype == np.float64
 
     cube_nd = cube.to_nddata()
     cube_roundtrip = Cube.from_nddata(cube_nd)
@@ -164,9 +211,11 @@ def test_cube_wavelength_domain_processing():
     assert velocities.shape == z.shape
     assert np.any(np.abs(velocities) > 0.0)
 
-    cropped = cube.crop_spectral(slice(1, 4), inplace=False)
+    cropped = cube.cutout_spectral(z=slice(1, 4), inplace=False)
     np.testing.assert_allclose(cropped.z, z[1:4])
     np.testing.assert_allclose(cube.z, z)
+    cropped_quantity = cube.cutout_spectral(min=5001 * u.AA, max=5008 * u.AA, inplace=False)
+    np.testing.assert_allclose(cropped_quantity.z, z[1:4])
 
 
 def test_cube_and_image_crop_propagate_wcs_and_warn_on_direct_shape_change():
@@ -195,14 +244,28 @@ def test_cube_and_image_crop_propagate_wcs_and_warn_on_direct_shape_change():
         wcs=WCS(cube_header),
         zunit='AA',
     )
-    cropped_cube = cube.crop(zslice=slice(1, 4), yslice=slice(1, 3), xslice=slice(1, 4), inplace=False)
+    cropped_cube = cube.cutout_slices(z=slice(1, 4), y=slice(1, 3), x=slice(1, 4), inplace=False)
     assert cropped_cube.shape == (3, 2, 3)
     assert cropped_cube.wcs is not None
     np.testing.assert_allclose(cropped_cube.z, [1.0, 2.0, 3.0])
     np.testing.assert_allclose(cropped_cube.x, [1.0, 2.0, 3.0])
     np.testing.assert_allclose(cropped_cube.y, [1.0, 2.0])
 
-    with pytest.warns(UserWarning, match=r'Prefer crop\(\)/crop_spectral\(\)'):
+    spatial = np.zeros((3, 4), dtype=bool)
+    spatial[0:3, 1:4] = True
+    spatial[1, 2] = False
+    spectral = np.array([False, True, True, False, True])
+    cutout = cube.cutout(spatial=spatial, spectral=spectral)
+    assert cutout.shape == (4, 3, 3)
+    np.testing.assert_allclose(cutout.z, [1.0, 2.0, 3.0, 4.0])
+    assert not cutout.mask[2].any()
+    assert not cutout.mask[:, 1, 1].any()
+    assert cube.mask.all()
+
+    bbox_only = cube.cutout(spatial=spatial, preserve_mask=False)
+    assert bbox_only.mask[:, 1, 1].all()
+
+    with pytest.warns(UserWarning, match=r'Prefer cutout_slices\(\), cutout\(\), or cutout_spectral\(\)'):
         cube.values = cube.values[:3]
     assert cube.shape == (3, 3, 4)
 
@@ -224,13 +287,24 @@ def test_cube_and_image_crop_propagate_wcs_and_warn_on_direct_shape_change():
         err=np.full((3, 4), 0.1),
         wcs=WCS(image_header),
     )
-    cropped_image = image.crop(yslice=slice(1, 3), xslice=slice(1, 4), inplace=False)
+    cropped_image = image.cutout_slices(y=slice(1, 3), x=slice(1, 4), inplace=False)
     assert cropped_image.shape == (2, 3)
     assert cropped_image.wcs is not None
     np.testing.assert_allclose(cropped_image.x, [1.0, 2.0, 3.0])
     np.testing.assert_allclose(cropped_image.y, [1.0, 2.0])
 
-    with pytest.warns(UserWarning, match=r'Prefer crop\(\)'):
+    image_mask = np.zeros((3, 4), dtype=bool)
+    image_mask[0:3, 1:4] = True
+    image_mask[1, 2] = False
+    image_cutout = image.cutout(mask=image_mask)
+    assert image_cutout.shape == (3, 3)
+    assert not image_cutout.mask[1, 1]
+    assert image.mask.all()
+
+    image_bbox = image.cutout(mask=image_mask, preserve_mask=False)
+    assert image_bbox.mask[1, 1]
+
+    with pytest.warns(UserWarning, match=r'Prefer cutout_slices\(\) or cutout\(\)'):
         image.values = image.values[:2]
     assert image.shape == (2, 4)
 
@@ -284,10 +358,41 @@ def test_cube_binmap_extraction_and_spatial_scales():
 
     extracted = cube.extract_spectrum(np.array([[1.0, 0.5], [0.0, 0.0]]), method='sum')
     assert isinstance(extracted, Spectrum)
+    assert extracted.y.dtype == np.float32
     np.testing.assert_allclose(extracted.x, cube.z)
     np.testing.assert_allclose(extracted.y, values[:, 0, 0] + 0.5 * values[:, 0, 1])
     scales = cube.pixel_scales(unit='arcsec')
     np.testing.assert_allclose(scales.value, [1.0, 2.0], atol=1e-6)
+
+    masked_cube = Cube(
+        values=values,
+        z=np.array([5000.0, 5001.0, 5002.0]),
+        err=err,
+        wcs=WCS(cube_header),
+        zunit='AA',
+        unit='Jy',
+        binmap=binmap,
+        mask=np.ones_like(values, dtype=bool),
+    )
+    masked_cube.mask[1, 0, 0] = False
+    masked_extracted = masked_cube.extract_spectrum(np.array([[1.0, 0.0], [0.0, 0.0]]), method='sum')
+    assert np.isfinite(masked_extracted.y[0])
+    assert np.isnan(masked_extracted.y[1])
+    assert np.isnan(masked_extracted.yerr[1])
+
+    masked_binned = masked_cube.apply_binmap(method='mean', inplace=False)
+    assert masked_binned.mask[0, 0, 0]
+    assert not masked_binned.mask[1, 0, 0]
+    assert np.isnan(masked_binned.values[1, 0, 0])
+    assert np.isnan(masked_binned.err[1, 0, 0])
+
+    materialized = masked_cube.apply_mask(inplace=False)
+    assert materialized.mask[0, 0, 0]
+    assert not materialized.mask[1, 0, 0]
+    assert np.isnan(materialized.values[1, 0, 0])
+    assert np.isnan(materialized.err[1, 0, 0])
+    assert np.isfinite(masked_cube.values[1, 0, 0])
+    assert np.isfinite(masked_cube.err[1, 0, 0])
 
 
 def test_image_binmap_region_measurement_and_spatial_scales():
@@ -313,6 +418,8 @@ def test_image_binmap_region_measurement_and_spatial_scales():
         unit='Jy',
         binmap=np.array([[0, 0], [1, 1]]),
     )
+    assert image.values.dtype == np.float32
+    assert image.err.dtype == np.float32
     binned = image.apply_binmap(method='sum', inplace=False)
     np.testing.assert_allclose(binned.values, [[4.0, 4.0], [12.0, 12.0]])
 
@@ -327,6 +434,21 @@ def test_image_binmap_region_measurement_and_spatial_scales():
 
     with pytest.raises(ValueError, match='Fractional masks are not supported'):
         image.measure_region(np.array([[1.0, 0.5], [0.0, 0.0]]), method='median')
+
+    masked_image = Image(
+        values=np.array([[1.0, 3.0], [5.0, 7.0]]),
+        err=np.full((2, 2), 0.2),
+        mask=np.array([[True, False], [True, True]]),
+        binmap=np.array([[0, 0], [1, 1]]),
+    )
+    invalid_measurement = masked_image.measure_region(np.array([[1.0, 1.0], [0.0, 0.0]]), method='sum')
+    assert np.isnan(invalid_measurement.value)
+    assert np.isnan(invalid_measurement.err)
+
+    invalid_binned = masked_image.apply_binmap(method='sum', inplace=False)
+    assert not invalid_binned.mask[0, 0]
+    assert np.isnan(invalid_binned.values[0, 0])
+    assert invalid_binned.mask[1, 0]
 
 
 def test_nddata_interoperability_from_external_objects():

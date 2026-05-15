@@ -77,12 +77,12 @@ def _as_1d_array(values, *, name):
     return array
 
 
-def parse_err(err, *, shape, name='err', fill_value=1.0):
+def parse_err(err, *, shape, name='err', fill_value=1.0, dtype=float):
     """Return a canonical symmetric standard-deviation array."""
     if err is None:
-        return np.full(shape, fill_value, dtype=float)
+        return np.full(shape, fill_value, dtype=dtype)
 
-    array = np.asarray(err, dtype=float)
+    array = np.asarray(err, dtype=dtype)
     if array.shape != shape:
         raise ValueError(f"{name} must have shape {shape}; got {array.shape}.")
     if np.any(array < 0):
@@ -90,12 +90,12 @@ def parse_err(err, *, shape, name='err', fill_value=1.0):
     return array
 
 
-def parse_axis_err(err, *, size, name='xerr'):
+def parse_axis_err(err, *, size, name='xerr', dtype=float):
     """Validate optional symmetric or asymmetric axis/value uncertainties."""
     if err is None:
         return None
 
-    array = np.asarray(err, dtype=float)
+    array = np.asarray(err, dtype=dtype)
     if array.ndim == 1:
         if array.shape != (size,):
             raise ValueError(f"{name} must have shape ({size},); got {array.shape}.")
@@ -339,21 +339,25 @@ class Data1D:
         ytype=None,
         name='data1d',
         meta=None,
+        dtype=np.float32,
     ):
         self.name = name
         self.meta = {} if meta is None else dict(meta)
+        self.dtype = np.dtype(dtype)
         self.xunit = normalize_unit(xunit)
         self.yunit = normalize_unit(yunit)
         self.xtype = infer_axis_type(xtype, self.xunit)
         self.ytype = infer_value_type(ytype, self.yunit)
 
         self.x = _as_1d_array(x, name='x')
-        self.y = _as_1d_array(y, name='y')
+        self.y = np.asarray(y, dtype=self.dtype)
+        if self.y.ndim != 1:
+            raise ValueError("y must be a 1-D array.")
         if self.x.shape != self.y.shape:
             raise ValueError("x and y must have the same shape.")
 
         self.xerr = parse_axis_err(xerr, size=self.x.size, name='xerr')
-        self.yerr = parse_axis_err(yerr, size=self.y.size, name='yerr')
+        self.yerr = parse_axis_err(yerr, size=self.y.size, name='yerr', dtype=self.dtype)
 
     @property
     def axis(self):
@@ -398,4 +402,5 @@ class Data1D:
             ytype=self.ytype,
             name=self.name,
             meta=self.meta.copy(),
+            dtype=self.dtype,
         )

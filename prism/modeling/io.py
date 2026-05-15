@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from astropy.io import fits
 from astropy.io.misc import yaml as astropy_yaml
 import astropy.units as u
@@ -83,7 +83,7 @@ def _model_hdu(yaml_str: str) -> fits.BinTableHDU:
 def _primary_hdu() -> fits.PrimaryHDU:
     hdr = fits.Header()
     hdr['AUTHOR']  = 'prism-spec'
-    hdr['DATE']    = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+    hdr['DATE']    = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
     hdr['HISTORY'] = 'Created by prism-spec MultiFit I/O'
     return fits.PrimaryHDU(header=hdr)
 

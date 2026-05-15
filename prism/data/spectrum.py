@@ -51,11 +51,14 @@ class Spectrum(Data1D):
         Spectrum label. Default is ``'spectrum'``.
     meta : dict, optional
         Arbitrary metadata copied with the object. Default is ``None``.
+    dtype : numpy dtype, optional
+        Floating-point dtype used for values and value uncertainties. Default is
+        ``numpy.float32``; pass ``numpy.float64`` for higher precision.
 
     Notes
     -----
     ``Spectrum`` keeps both the original arrays and the currently active working
-    arrays. :meth:`crop` updates a boolean mask on the original grid, so
+    arrays. :meth:`cutout` updates a boolean mask on the original grid, so
     :meth:`reset` can restore the initial sampling. :meth:`rebin` instead builds a
     new spectral grid and therefore invalidates ``reset`` because the original
     sampling has been replaced. For wavelength-like logarithmic axes Prism also
@@ -68,7 +71,7 @@ class Spectrum(Data1D):
     ...     redshift=0.043,
     ...     xunit='AA',
     ... )
-    >>> spec.crop(bounds=(4300.0, 7000.0))
+    >>> spec = spec.cutout(min=4300.0, max=7000.0)
     >>> spec.rebin(factor=2)
     """
 
@@ -88,6 +91,7 @@ class Spectrum(Data1D):
         ytype=None,
         name='spectrum',
         meta=None,
+        dtype=np.float32,
     ):
         super().__init__(
             x=x,
@@ -100,6 +104,7 @@ class Spectrum(Data1D):
             ytype=ytype,
             name=name,
             meta=meta,
+            dtype=dtype,
         )
 
         self.ra = parse_celestial_coord(ra)
@@ -109,7 +114,7 @@ class Spectrum(Data1D):
         self._original_x = self.x.copy()
         self._original_y = self.y.copy()
         self._original_xerr = None if self.xerr is None else self.xerr.copy()
-        self._original_yerr = parse_err(self.yerr, shape=self.y.shape, name='yerr')
+        self._original_yerr = parse_err(self.yerr, shape=self.y.shape, name='yerr', dtype=self.dtype)
 
         self._full_x = self._original_x.copy()
         self._full_y = self._original_y.copy()
@@ -198,6 +203,7 @@ class Spectrum(Data1D):
             ytype=self.ytype,
             name=self.name,
             meta=self.meta.copy(),
+            dtype=self.dtype,
         )
         copied._full_x = self._full_x.copy()
         copied._full_y = self._full_y.copy()
@@ -219,47 +225,57 @@ class Spectrum(Data1D):
         if not is_wavelength_like(self.xtype, self.xunit):
             raise ValueError(f"{operation} is only defined for wavelength-like axes.")
 
-    def crop(self, bounds=None, mask=None):
+    def cutout(self, min=None, max=None, mask=None, inplace=False):
         """Restrict the active spectrum to a subset of the original grid.
 
         Parameters
         ----------
-        bounds : tuple of float, optional
-            Open interval ``(xmin, xmax)`` applied to the current working axis.
-            Default is ``None``.
+        min, max : float, optional
+            Inclusive bounds applied to the current working axis. Default is
+            ``None`` for either side.
         mask : array-like of bool, optional
             Boolean mask with the same shape as the current working axis. Default
             is ``None``.
+        inplace : bool, optional
+            Modify the spectrum in place. Default is ``False``.
 
         Returns
         -------
-        None
-            The object is updated in place.
+        Spectrum
+            The cutout spectrum object.
             
         Examples
         --------
-        >>> spec.crop(bounds=(4000.0, 5000.0))
+        >>> sub = spec.cutout(min=4000.0, max=5000.0)
         """
         if self._rebinned:
-            raise RuntimeError('Cannot crop after rebinning.')
+            raise RuntimeError('Cannot cut out after rebinning.')
+        if min is None and max is None and mask is None:
+            raise ValueError('At least one of min, max, or mask must be provided.')
 
-        original_indices = np.flatnonzero(self.mask)
-        new_mask = np.zeros_like(self.mask, dtype=bool)
+        target = self if inplace else self.copy()
+        original_indices = np.flatnonzero(target.mask)
+        current_mask = np.ones_like(target.x, dtype=bool)
 
-        if bounds is not None:
-            xmin, xmax = bounds
-            current_mask = (self.x > xmin) & (self.x < xmax)
-            new_mask[original_indices] = current_mask
-        elif mask is not None:
-            mask = np.asarray(mask, dtype=bool)
-            if mask.shape != self.x.shape:
+        if min is not None:
+            current_mask &= target.x >= min
+        if max is not None:
+            current_mask &= target.x <= max
+
+        if mask is not None:
+            mask = np.asarray(mask)
+            if mask.dtype != bool:
+                raise TypeError('mask must be a boolean mask.')
+            if mask.shape != target.x.shape:
                 raise ValueError('mask must match the current working x shape.')
-            new_mask[original_indices] = mask
-        else:
-            raise ValueError('Either bounds or mask must be provided.')
+            current_mask &= mask
 
-        self.mask &= new_mask
-        self._update_working_arrays()
+        new_mask = np.zeros_like(target.mask, dtype=bool)
+        new_mask[original_indices] = current_mask
+        target.mask &= new_mask
+        target._update_working_arrays()
+
+        return target
 
     def rebin(self, factor=None, new_x=None, fill=np.nan, method='flux-conserving'):
         """Resample the spectrum onto a coarser or explicit spectral grid.
@@ -353,7 +369,7 @@ class Spectrum(Data1D):
             raise RuntimeError('Operation requires the original coordinate grid, but the spectrum has been rebinned.')
 
     @classmethod
-    def from_txt(cls, filename, ra=None, dec=None, redshift=None, xunit=None, yunit=None, name=None, xtype=None, ytype=None):
+    def from_txt(cls, filename, ra=None, dec=None, redshift=None, xunit=None, yunit=None, name=None, xtype=None, ytype=None, dtype=np.float32):
         """Build a spectrum from a whitespace-delimited text file.
 
         Parameters
@@ -399,6 +415,7 @@ class Spectrum(Data1D):
             ytype=ytype,
             name=name,
             meta={'source': filename},
+            dtype=dtype,
         )
 
     @classmethod
@@ -415,6 +432,7 @@ class Spectrum(Data1D):
         name=None,
         xtype=None,
         ytype=None,
+        dtype=np.float32,
     ):
         """Build a spectrum from a binary-table FITS extension.
 
@@ -472,6 +490,7 @@ class Spectrum(Data1D):
             ytype=ytype,
             name=name,
             meta={'source': filename},
+            dtype=dtype,
         )
 
     def wavelengths(self, unit=None):

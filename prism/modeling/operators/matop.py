@@ -114,7 +114,15 @@ class LinearOperatorModel(Fittable1DModel):
         """
         return []
 
-    def _prism_pipe_evaluate(self, leftval, left_inputs, right_params, **kwargs):
+    def _prism_pipe_evaluate(
+        self,
+        leftval,
+        left_inputs,
+        right_params,
+        left_model=None,
+        left_params=None,
+        **kwargs,
+    ):
         """Evaluate a Prism-enhanced pipe expression.
 
         Parameters
@@ -206,7 +214,13 @@ def install_pipe_patch():
             left_inputs = args[: self.left.n_inputs]
             leftval = self.left(*left_inputs, **kw)
             right_params = self._get_right_params_from_args(args)
-            return self.right._prism_pipe_evaluate(leftval, left_inputs, right_params, **kw)
+            return self.right._prism_pipe_evaluate(
+                leftval,
+                left_inputs,
+                right_params,
+                left_model=self.left,
+                **kw,
+            )
         return _ORIGINAL_EVALUATE(self, *args, **kw)
 
     def _patched_static_evaluate(self, *args, **kw):
@@ -216,7 +230,14 @@ def install_pipe_patch():
             left_params = self._get_left_params_from_args(args)
             leftval = self.left.evaluate(*left_inputs, *left_params)
             right_params = self._get_right_params_from_args(args)
-            return self.right._prism_pipe_evaluate(leftval, left_inputs, right_params, **kw)
+            return self.right._prism_pipe_evaluate(
+                leftval,
+                left_inputs,
+                right_params,
+                left_model=self.left,
+                left_params=left_params,
+                **kw,
+            )
         return _ORIGINAL_STATIC_EVALUATE(self, *args, **kw)
 
     @property

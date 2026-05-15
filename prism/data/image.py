@@ -29,20 +29,25 @@ from .core import (
 )
 
 
-def _axis_indices(indexer, size, *, axis_name):
+def _require_slice(indexer, *, axis_name):
     if indexer is None:
-        return slice(None), True
+        return slice(None)
     if isinstance(indexer, slice):
-        return indexer, True
+        return indexer
+    raise TypeError(f'{axis_name} must be a slice or None.')
 
-    array = np.asarray(indexer)
-    if array.dtype == bool:
-        if array.shape != (size,):
-            raise ValueError(f'{axis_name} boolean mask must have shape ({size},); got {array.shape}.')
-        return array, False
-    if array.ndim != 1:
-        raise ValueError(f'{axis_name} indexer must be a slice, 1-D integer array, or boolean mask.')
-    return array.astype(int, copy=False), False
+
+def _mask_bounds(mask, shape, *, mask_name):
+    array = np.asarray(mask)
+    if array.dtype != bool:
+        raise TypeError(f'{mask_name} must be a boolean mask.')
+    if array.shape != tuple(shape):
+        raise ValueError(f'{mask_name} must have shape {tuple(shape)}; got {array.shape}.')
+    if not np.any(array):
+        raise ValueError(f'{mask_name} must select at least one element.')
+
+    axes = np.where(array)
+    return tuple(slice(indices.min(), indices.max() + 1) for indices in axes), array
 
 
 def _trim_axis_values(axis, new_size):
@@ -111,6 +116,9 @@ class Image:
     is_var : bool, optional
         Whether the stored uncertainty should be interpreted as variance when
         round-tripping through ``NDData``. Default is inferred from ``var``.
+    dtype : numpy dtype, optional
+        Floating-point dtype used for values and uncertainties. Default is
+        ``numpy.float32``; pass ``numpy.float64`` for higher precision.
     ra_ref, dec_ref : float, str, or astropy.units.Quantity, optional
         Reference sky position used for relative plotting offsets. Default is
         ``None``.
@@ -146,9 +154,11 @@ class Image:
         is_var=None,
         ra_ref=None,
         dec_ref=None,
+        dtype=np.float32,
     ):
         from .core import parse_celestial_coord
-        values = np.asarray(values, dtype=float)
+        self.dtype = np.dtype(dtype)
+        values = np.asarray(values, dtype=self.dtype)
         if values.ndim not in {1, 2}:
             raise ValueError('values must be 1-D or 2-D.')
 
@@ -158,18 +168,18 @@ class Image:
         if err is not None and var is not None:
             raise ValueError("Cannot provide both 'err' and 'var'.")
         if var is not None:
-            var_array = np.asarray(var, dtype=float)
+            var_array = np.asarray(var, dtype=self.dtype)
             if var_array.shape != self.shape:
                 raise ValueError(f'var must have shape {self.shape}; got {var_array.shape}.')
             if np.any(var_array < 0):
                 raise ValueError('var must be non-negative.')
-            self._err = np.sqrt(var_array)
+            self._err = np.sqrt(var_array).astype(self.dtype, copy=False)
             self.is_var = True if is_var is None else is_var
         else:
-            self._err = parse_err(err, shape=self.shape, name='err', fill_value=0.0)
+            self._err = parse_err(err, shape=self.shape, name='err', fill_value=0.0, dtype=self.dtype)
             self.is_var = False if is_var is None else is_var
 
-        self.mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones_like(self._values, dtype=bool)
+        self.mask = np.asarray(mask, dtype=bool) if mask is not None else (np.isfinite(self._values) & np.isfinite(self._err))
         if self.mask.shape != self.shape:
             raise ValueError(f'mask must have shape {self.shape}; got {self.mask.shape}.')
 
@@ -234,12 +244,12 @@ class Image:
 
     @values.setter
     def values(self, value):
-        array = np.asarray(value, dtype=float)
+        array = np.asarray(value, dtype=self.dtype)
         if array.shape != self.shape:
             old_shape = self.shape
             warnings.warn(
                 'Changing image shape via direct value assignment does not propagate WCS or bin maps. '
-                'Prefer crop() for shape-changing operations.',
+                'Prefer cutout_slices() or cutout() for shape-changing operations.',
                 UserWarning,
             )
             self.shape = array.shape
@@ -248,7 +258,7 @@ class Image:
                 self._err = self._err[slices]
                 self.mask = self.mask[slices]
             else:
-                self._err = np.full(self.shape, 0.0, dtype=float)
+                self._err = np.full(self.shape, 0.0, dtype=self.dtype)
                 self.mask = np.ones(self.shape, dtype=bool)
 
             if array.ndim == 2:
@@ -280,7 +290,7 @@ class Image:
 
     @err.setter
     def err(self, value):
-        self._err = parse_err(value, shape=self.shape, name='err', fill_value=0.0)
+        self._err = parse_err(value, shape=self.shape, name='err', fill_value=0.0, dtype=self.dtype)
         self.is_var = False
 
     @property
@@ -290,12 +300,12 @@ class Image:
 
     @var.setter
     def var(self, value):
-        array = np.asarray(value, dtype=float)
+        array = np.asarray(value, dtype=self.dtype)
         if array.shape != self.shape:
             raise ValueError(f'var must have shape {self.shape}; got {array.shape}.')
         if np.any(array < 0):
             raise ValueError('var must be non-negative.')
-        self._err = np.sqrt(array)
+        self._err = np.sqrt(array).astype(self.dtype, copy=False)
         self.is_var = True
 
     def copy(self):
@@ -323,70 +333,128 @@ class Image:
             ytype=self.ytype,
             valuetype=self.valuetype,
             is_var=self.is_var,
+            dtype=self.dtype,
         )
 
-    def crop(self, yslice=None, xslice=None, inplace=False):
-        """Extract a subregion by applying index slices or boolean masks along the spatial axes.
+    def cutout_slices(self, y=None, x=None, inplace=False):
+        """Extract a rectangular subimage using explicit axis slices.
 
         Parameters
         ----------
-        yslice, xslice : slice, array-like integer indices, or array-like bool, optional
-            Indexing information for the spatial (y, x) axes. 
-            Default is ``None`` for all axes (i.e. no cropping).
+        y, x : slice, optional
+            Slices for the image axes. Default is ``None`` for all axes,
+            equivalent to keeping the full axis.
         inplace : bool, optional
             Modify the image in place. Default is ``False``.
 
         Returns
         -------
         Image
-            The cropped image object. WCS is updated if slices are contiguous.
+            The cutout image object. WCS is propagated through the slices.
+
+        Notes
+        -----
+        Use :meth:`cutout` for image masks.
         """
-        target = self if inplace else self.copy()
-        original_values = target.values
-        original_err = target.err
-        original_mask = target.mask
-
-        if target.values.ndim == 2:
-            yindex, y_is_slice = _axis_indices(yslice, target.shape[0], axis_name='yslice')
-            xindex, x_is_slice = _axis_indices(xslice, target.shape[1], axis_name='xslice')
+        if self.values.ndim == 2:
+            yindex = _require_slice(y, axis_name='y')
+            xindex = _require_slice(x, axis_name='x')
             indexers = (yindex, xindex)
-            can_slice_wcs = y_is_slice and x_is_slice
-            target._values = np.asarray(original_values[indexers], dtype=float)
-            target._err = np.asarray(original_err[indexers], dtype=float)
-            target.mask = np.asarray(original_mask[indexers], dtype=bool)
-            target.shape = target._values.shape
-            target.y = np.asarray(target.y[yindex], dtype=float)
-            target.x = np.asarray(target.x[xindex], dtype=float)
-            if target.binmap is not None:
-                target.binmap = np.asarray(target.binmap[indexers], dtype=int)
         else:
-            if yslice is not None:
-                raise ValueError('yslice is not supported for 1-D images; use xslice only.')
-            xindex, x_is_slice = _axis_indices(xslice, target.shape[0], axis_name='xslice')
+            if y is not None:
+                raise ValueError('y is not supported for 1-D images; use x only.')
+            xindex = _require_slice(x, axis_name='x')
             indexers = (xindex,)
-            can_slice_wcs = x_is_slice
-            target._values = np.asarray(original_values[indexers], dtype=float)
-            target._err = np.asarray(original_err[indexers], dtype=float)
-            target.mask = np.asarray(original_mask[indexers], dtype=bool)
-            target.shape = target._values.shape
-            target.x = np.asarray(target.x[xindex], dtype=float)
-            if target.y is not None:
-                target.y = np.asarray(target.y[xindex], dtype=float)
 
-        if target.wcs is not None:
-            if can_slice_wcs and target.values.ndim == 2:
-                try:
-                    target.wcs = target.wcs.slice(indexers)
-                except Exception as exc:
-                    warnings.warn(f'Failed to propagate WCS through crop: {exc}. Dropping WCS.', UserWarning)
-                    target.wcs = None
-            elif not can_slice_wcs:
-                warnings.warn(
-                    'Irregular image crops do not preserve WCS exactly. Dropping WCS on the cropped result.',
-                    UserWarning,
-                )
-                target.wcs = None
+        header = self.header.copy() if hasattr(self.header, 'copy') else dict(self.header)
+        wcs = self.wcs.deepcopy() if hasattr(self.wcs, 'deepcopy') else self.wcs
+        if wcs is not None and self.values.ndim == 2:
+            try:
+                wcs = wcs.slice(indexers)
+            except Exception as exc:
+                warnings.warn(f'Failed to propagate WCS through cutout_slices: {exc}. Dropping WCS.', UserWarning)
+                wcs = None
 
+        if self.values.ndim == 2:
+            cutout = Image(
+                values=np.array(self.values[indexers], dtype=self.dtype, copy=True),
+                err=np.array(self.err[indexers], dtype=self.dtype, copy=True),
+                x=np.array(self.x[xindex], dtype=float, copy=True),
+                y=np.array(self.y[yindex], dtype=float, copy=True),
+                mask=np.array(self.mask[indexers], dtype=bool, copy=True),
+                wcs=wcs,
+                header=header,
+                unit=self.unit,
+                xunit=self.xunit,
+                yunit=self.yunit,
+                binmap=None if self.binmap is None else np.array(self.binmap[indexers], dtype=int, copy=True),
+                xtype=self.xtype,
+                ytype=self.ytype,
+                valuetype=self.valuetype,
+                is_var=self.is_var,
+                dtype=self.dtype,
+            )
+        else:
+            cutout = Image(
+                values=np.array(self.values[indexers], dtype=self.dtype, copy=True),
+                err=np.array(self.err[indexers], dtype=self.dtype, copy=True),
+                x=np.array(self.x[xindex], dtype=float, copy=True),
+                y=None if self.y is None else np.array(self.y[xindex], dtype=float, copy=True),
+                mask=np.array(self.mask[indexers], dtype=bool, copy=True),
+                wcs=wcs,
+                header=header,
+                unit=self.unit,
+                xunit=self.xunit,
+                yunit=self.yunit,
+                xtype=self.xtype,
+                ytype=self.ytype,
+                valuetype=self.valuetype,
+                is_var=self.is_var,
+                dtype=self.dtype,
+            )
+
+        if inplace:
+            self.__dict__.update(cutout.__dict__)
+            return self
+        return cutout
+
+    def cutout(self, mask=None, preserve_mask=True, inplace=False):
+        """Extract a subimage from a boolean mask.
+
+        Parameters
+        ----------
+        mask : array-like of bool
+            Mask with the same shape as the image.
+        preserve_mask : bool, optional
+            If ``True`` (default), keep the exact masked region by marking
+            pixels outside the selected mask as invalid in the returned image.
+            If ``False``, the mask is used only to define the rectangular
+            bounding box.
+        inplace : bool, optional
+            Modify the image in place. Default is ``False``.
+
+        Returns
+        -------
+        Image
+            The cutout image object.
+
+        Notes
+        -----
+        The returned image is always rectangular. Use :meth:`cutout_slices` for
+        explicit rectangular slicing.
+        """
+        if mask is None:
+            return self if inplace else self.copy()
+
+        bounds, mask = _mask_bounds(mask, self.shape, mask_name='mask')
+        if self.values.ndim == 2:
+            target = self.cutout_slices(y=bounds[0], x=bounds[1], inplace=inplace)
+            if preserve_mask:
+                target.mask &= mask[bounds]
+        else:
+            target = self.cutout_slices(x=bounds[0], inplace=inplace)
+            if preserve_mask:
+                target.mask &= mask[bounds]
         return target
 
     @property
@@ -472,11 +540,11 @@ class Image:
             if count == 0:
                 continue
             if method == 'sum':
-                value = np.sum(pixels)
-                sigma = np.sqrt(np.sum(pixel_err ** 2))
+                value = np.sum(pixels, dtype=target.dtype)
+                sigma = np.sqrt(np.sum(pixel_err ** 2, dtype=target.dtype))
             elif method == 'mean':
-                value = np.mean(pixels)
-                sigma = np.sqrt(np.sum(pixel_err ** 2)) / count
+                value = np.mean(pixels, dtype=target.dtype)
+                sigma = np.sqrt(np.sum(pixel_err ** 2, dtype=target.dtype)) / count
             elif method == 'median':
                 value = np.median(pixels)
                 sigma = np.sqrt(np.sum(pixel_err ** 2)) / count * 1.2533
@@ -484,6 +552,12 @@ class Image:
                 raise ValueError("method must be one of 'sum', 'mean', or 'median'.")
             new_values[mask] = value
             new_err[mask] = sigma
+
+        for _, mask in target.iter_bins():
+            if not np.all(target.mask[mask]):
+                new_values[mask] = np.nan
+                new_err[mask] = np.nan
+                target.mask[mask] = False
 
         target._values = new_values
         target._err = new_err
@@ -554,23 +628,10 @@ class Image:
         binary = weights > 0
         if not np.any(binary):
             raise ValueError('mask selects no pixels.')
-
-        if method == 'sum':
-            value = float(np.sum(self.values * weights))
-            sigma = float(np.sqrt(np.sum((self.err * weights) ** 2)))
-        elif method == 'mean':
-            total_weight = float(np.sum(weights))
-            value = float(np.sum(self.values * weights) / total_weight)
-            sigma = float(np.sqrt(np.sum((self.err * weights) ** 2)) / total_weight)
-        elif method == 'median':
-            if not np.all((weights == 0) | (weights == 1)):
-                raise ValueError('Fractional masks are not supported with method="median".')
-            pixels = self.values[binary]
-            pixel_err = self.err[binary]
-            value = float(np.median(pixels))
-            sigma = float(np.sqrt(np.sum(pixel_err ** 2)) / max(pixels.size, 1) * 1.2533)
-        else:
+        if method not in {'sum', 'mean', 'median'}:
             raise ValueError("method must be one of 'sum', 'mean', or 'median'.")
+        if method == 'median' and not np.all((weights == 0) | (weights == 1)):
+            raise ValueError('Fractional masks are not supported with method="median".')
 
         y_index, x_index = np.indices(self.shape)
         total_weight = float(np.sum(weights[binary]))
@@ -583,6 +644,22 @@ class Image:
             area = self.pixel_area(unit=u.arcsec ** 2) * total_weight
         except Exception:
             area = None
+
+        valid = self.mask[binary]
+        if not np.all(valid):
+            value = np.nan
+            sigma = np.nan
+        elif method == 'sum':
+            value = float(np.sum(self.values * weights, dtype=self.dtype))
+            sigma = float(np.sqrt(np.sum((self.err * weights) ** 2, dtype=self.dtype)))
+        elif method == 'mean':
+            value = float(np.sum(self.values * weights, dtype=self.dtype) / total_weight)
+            sigma = float(np.sqrt(np.sum((self.err * weights) ** 2, dtype=self.dtype)) / total_weight)
+        elif method == 'median':
+            pixels = self.values[binary]
+            pixel_err = self.err[binary]
+            value = float(np.median(pixels))
+            sigma = float(np.sqrt(np.sum(pixel_err ** 2, dtype=self.dtype)) / max(pixels.size, 1) * 1.2533)
 
         return RegionMeasurement(
             value=value,
@@ -651,6 +728,7 @@ class Image:
             ytype=self.ytype,
             valuetype=self.valuetype,
             is_var=False,
+            dtype=self.dtype,
         )
 
     def __add__(self, other):
@@ -701,6 +779,7 @@ class Image:
             ytype=self.ytype,
             valuetype=self.valuetype,
             is_var=False,
+            dtype=self.dtype,
         )
 
     def to_nddata(self):
@@ -745,6 +824,7 @@ class Image:
         ytype=None,
         valuetype=None,
         binmap=None,
+        dtype=np.float32,
     ):
         """Instantiate an Image from an `astropy.nddata.NDData` object.
 
@@ -769,7 +849,7 @@ class Image:
         if not isinstance(nddata, NDData):
             raise TypeError('nddata must implement the Astropy NDData interface.')
 
-        values = np.asarray(nddata.data, dtype=float)
+        values = np.asarray(nddata.data, dtype=dtype)
         err, is_var = err_from_nddata_uncertainty(getattr(nddata, 'uncertainty', None))
         meta = {} if getattr(nddata, 'meta', None) is None else dict(nddata.meta)
 
@@ -789,6 +869,7 @@ class Image:
             ytype=meta.get('prism_ytype', ytype),
             valuetype=meta.get('prism_valuetype', valuetype),
             is_var=is_var,
+            dtype=dtype,
         )
 
     def __radd__(self, other):
@@ -808,7 +889,7 @@ class Image:
         return self._apply_rop(other, np.divide, err_div)
 
     @classmethod
-    def from_fits(cls, filename, ext_values=None, ext_err=None, ext_var=None, ext_mask=None, ext_wcs=None, ext_binmap=None):
+    def from_fits(cls, filename, ext_values=None, ext_err=None, ext_var=None, ext_mask=None, ext_wcs=None, ext_binmap=None, dtype=np.float32):
         """Construct an Image instance by reading a FITS file.
 
         Parameters
@@ -854,7 +935,7 @@ class Image:
                 ext_wcs = ext_values
 
             try:
-                values = np.squeeze(hdul[ext_values].data)
+                values = np.asarray(np.squeeze(hdul[ext_values].data), dtype=dtype)
                 headers['DATA'] = hdul[ext_values].header.copy()
             except KeyError as exc:
                 raise ValueError(f'Could not find data extension {ext_values} in {filename}') from exc
@@ -879,13 +960,13 @@ class Image:
             var = None
             if ext_err is not None:
                 try:
-                    err = np.squeeze(hdul[ext_err].data)
+                    err = np.asarray(np.squeeze(hdul[ext_err].data), dtype=dtype)
                 except Exception as exc:
                     warnings.warn(f'Failed to load error from extension {ext_err}: {exc}')
                     err = None
             elif ext_var is not None:
                 try:
-                    var = np.squeeze(hdul[ext_var].data)
+                    var = np.asarray(np.squeeze(hdul[ext_var].data), dtype=dtype)
                 except Exception as exc:
                     warnings.warn(f'Failed to load variance from extension {ext_var}: {exc}')
                     var = None
@@ -920,7 +1001,7 @@ class Image:
             y = None
             x = np.arange(values.shape[0], dtype=float)
 
-        return cls(values=values, err=err, var=var, x=x, y=y, mask=loaded_mask, wcs=wcs, header=headers, unit=unit, binmap=loaded_binmap)
+        return cls(values=values, err=err, var=var, x=x, y=y, mask=loaded_mask, wcs=wcs, header=headers, unit=unit, binmap=loaded_binmap, dtype=dtype)
 
     def write(self, filename, overwrite=False, err=True, mask=False, cd_matrix=False, is_var=None, binmap=False):
         """Write the image data to a FITS file.

@@ -183,6 +183,9 @@ class BSpline(Fittable1DModel):
     convenient for flexible continua and empirical backgrounds. The analytic
     derivative is computed from SciPy's spline design matrix, so least-squares
     fitters can use an efficient exact Jacobian instead of finite differences.
+    Prism also marks every coefficient as a separable linear parameter, so
+    ``prism.modeling.fitting.SeparableTRF`` can solve them exactly inside its
+    inner linear step.
 
     Examples
     --------
@@ -194,6 +197,7 @@ class BSpline(Fittable1DModel):
     """
     n_inputs = 1
     n_outputs = 1
+    linear = True
 
     def __new__(cls, knots, degree=3, name="BSpline", **kwargs):
         knot_unit = knots.unit if isinstance(knots, u.Quantity) else None
@@ -241,6 +245,8 @@ class BSpline(Fittable1DModel):
             '_parameter_units_for_data_units': _parameter_units_for_data_units,
             'n_inputs': 1,
             'n_outputs': 1,
+            'linear': True,
+            '_separable_linear_params': tuple(params),
             '_knots': knots,
             '_knot_unit': knot_unit,
             '_degree': degree,

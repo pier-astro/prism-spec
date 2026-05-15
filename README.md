@@ -33,7 +33,7 @@ spec = Spectrum.from_txt(
 	redshift=0.043,
 	xunit='AA',
 )
-spec.crop(bounds=(4300.0, 7000.0))
+spec = spec.cutout(min=4300.0, max=7000.0)
 
 model = GaussianLines.from_arrays(
 	names=['Hb4861'],
@@ -104,4 +104,3 @@ Notebook examples live in `examples/` and cover single-spectrum fitting, cube fi
 ## License
 
 Distributed under GPLv3. See `LICENSE`.
-

@@ -22,7 +22,7 @@ MultiFitResult, SpectrumFitResult, MultiFitParameter
 	Structured outputs for batched fits across cubes/maps.
 """
 
-from . import astropyfitters, utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty
+from . import astropyfitters, utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty, separable
 from .astropyfitters import *
 from .utils import *
 from .scipyfit import *
@@ -30,6 +30,7 @@ from .sherpafit import *
 from .lmfit import *
 from .multifit import *
 from .outremoval import *
+from .separable import *
 
 from .extension import enable_astropy_fitting_compatibility_patch
 enable_astropy_fitting_compatibility_patch()
@@ -45,3 +46,4 @@ __all__.extend(scipyfit.__all__)
 __all__.extend(sherpafit.__all__)
 __all__.extend(lmfit.__all__)
 __all__.extend(outremoval.__all__)
+__all__.extend(separable.__all__)

@@ -22,7 +22,7 @@ keywords = ["science", "astronomy", "astrophysics", "AGN", "spectra", "spectrosc
 
 
 dependencies = [
-    "numpy>=2.0",
+    "numpy>=2.0,<2.4",
     "scipy>=1.7",
     "matplotlib>=3.5",
     "PyYAML>=5.0",

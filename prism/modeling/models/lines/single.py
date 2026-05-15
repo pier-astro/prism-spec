@@ -37,6 +37,9 @@ class GaussianLine(LineModelBase):
     broadening is folded into the intrinsic profile before evaluation, so the
     analytic flux and Jacobian remain available for fitting and uncertainty
     propagation.
+    The ``amplitude`` parameter is also marked as a separable linear parameter,
+    so ``prism.modeling.fitting.SeparableTRF`` can solve amplitudes exactly
+    while optimizing only the non-linear shape parameters outside.
 
     Examples
     --------
@@ -50,6 +53,7 @@ class GaussianLine(LineModelBase):
     fwhm = Parameter(default=1000.0, unit=u.km / u.s)
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm')
+    _separable_linear_params = ('amplitude',)
 
     def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         x_native = self._coerce_domain_axis(x)
@@ -118,6 +122,8 @@ class LorentzianLine(LineModelBase):
     With zero instrumental broadening this class evaluates a pure Lorentzian.
     When ``instfwhm`` is non-zero the observed profile becomes Voigt-like because
     the intrinsic Lorentzian is convolved with a Gaussian line-spread function.
+    The ``amplitude`` parameter is treated as a separable linear parameter by
+    ``prism.modeling.fitting.SeparableTRF``.
     """
     amplitude = Parameter(default=1.0)
     position = Parameter(default=5000.0, fixed=True, unit=u.AA)
@@ -125,6 +131,7 @@ class LorentzianLine(LineModelBase):
     fwhm = Parameter(default=1000.0, unit=u.km / u.s)
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm')
+    _separable_linear_params = ('amplitude',)
 
     def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
         x_native = self._coerce_domain_axis(x)
@@ -208,6 +215,8 @@ class VoigtLine(LineModelBase):
     is useful when the astrophysical broadening cannot be approximated by a purely
     Gaussian or purely Lorentzian kernel and when the separate core and wing widths
     need to remain explicit fit parameters.
+    Its ``amplitude`` remains separable and is therefore solved in the inner
+    linear step by ``prism.modeling.fitting.SeparableTRF``.
     """
     amplitude = Parameter(default=1.0)
     position = Parameter(default=5000.0, fixed=True, unit=u.AA)
@@ -216,6 +225,7 @@ class VoigtLine(LineModelBase):
     fwhm_L = Parameter(default=1000.0, unit=u.km / u.s)
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm_G', 'fwhm_L')
+    _separable_linear_params = ('amplitude',)
 
     def evaluate(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
         x_native = self._coerce_domain_axis(x)

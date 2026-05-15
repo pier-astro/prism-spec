@@ -467,6 +467,7 @@ class LineGroupBase(LineModelBase):
             'fit_deriv': fit_deriv,
             'n_inputs': 1,
             'n_outputs': 1,
+            '_separable_linear_params': tuple(param_names),
             '_linetable': linetable,
             '_templates': templates,
             '_n_templates': n_templates,

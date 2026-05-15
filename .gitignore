@@ -186,3 +186,5 @@ examples/results
 # Agents
 *.agent.md
 .vscode/
+.agents/
+AGENTS.md

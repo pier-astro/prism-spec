@@ -48,7 +48,7 @@ import os
 import warnings
 import yaml
 
-from scipy.interpolate import interp1d, RectBivariateSpline
+from scipy.interpolate import interp1d
 from scipy.sparse import csr_matrix, issparse
 from scipy.special import erf
 from astropy.io import fits
@@ -599,19 +599,46 @@ def _crop_response_matrix(
     Returns:
         Cropped (and optionally renormalized) sparse matrix
     """
-    # Find indices matching target wavelengths (with tolerance)
-    indices = []
-    atol = np.abs(np.diff(matrix_wave)).min() * 0.1 if len(matrix_wave) > 1 else 0.01
-    
-    for tw in target_wave:
-        matches = np.where(np.isclose(tw, matrix_wave, atol=atol, rtol=1e-6))[0]
-        if len(matches) == 0:
-            raise ValueError(
-                f"Wavelength {tw:.3f} not found in matrix grid "
-                f"[{matrix_wave.min():.1f}, {matrix_wave.max():.1f}]."
-            )
-        indices.append(matches[0])
-    indices = np.array(indices)
+    matrix_wave = np.asarray(matrix_wave, dtype=float)
+    target_wave = np.asarray(target_wave, dtype=float)
+
+    if matrix_wave.ndim != 1 or target_wave.ndim != 1:
+        raise ValueError("matrix_wave and target_wave must be 1-D arrays.")
+    if len(matrix_wave) == 0 or len(target_wave) == 0:
+        raise ValueError("matrix_wave and target_wave must be non-empty.")
+
+    # Match each target bin to the nearest response bin center.
+    # Allow offsets up to half a response bin so cubes with the same
+    # sampling but slightly different absolute zero-points still crop
+    # cleanly while larger grid mismatches remain an error.
+    if len(matrix_wave) > 1:
+        matrix_step = np.abs(np.diff(matrix_wave))
+        atol = 0.5 * matrix_step.min() + np.finfo(float).eps * max(1.0, np.abs(matrix_wave).max())
+    else:
+        atol = 0.5
+
+    indices = np.searchsorted(matrix_wave, target_wave)
+    indices = np.clip(indices, 1, len(matrix_wave) - 1)
+    left = indices - 1
+    use_left = np.abs(target_wave - matrix_wave[left]) <= np.abs(matrix_wave[indices] - target_wave)
+    indices = np.where(use_left, left, indices)
+
+    deltas = np.abs(matrix_wave[indices] - target_wave)
+    bad = np.where(deltas > atol)[0]
+    if len(bad):
+        j = bad[0]
+        raise ValueError(
+            f"Wavelength {target_wave[j]:.3f} not found within {atol:.3f} Angstrom "
+            f"of the matrix grid [{matrix_wave.min():.1f}, {matrix_wave.max():.1f}]. "
+            f"Nearest grid value is {matrix_wave[indices[j]]:.3f} "
+            f"(offset {matrix_wave[indices[j]] - target_wave[j]:+.3f} Angstrom)."
+        )
+    if np.any(np.diff(indices) <= 0):
+        raise ValueError(
+            "target_wave does not map to a strictly increasing subset of the matrix grid. "
+            "This usually means the target grid is oversampled, unsorted, or otherwise "
+            "incompatible with simple matrix cropping."
+        )
     
     # NOTE: We no longer check step size uniformity.
     # Target wavelengths can have gaps (masked regions) - this is valid.
@@ -656,8 +683,11 @@ class SpectralResponse(LinearOperatorModel):
     renormalize : bool, default True
         Renormalize rows to unity after cropping.
     flexible : bool, default True
-        Retained for API compatibility. The current linear-operator path uses
-        the cropped response matrix directly.
+        If ``True``, evaluation on a different wavelength grid is handled by
+        evaluating the source model on the native response grid and
+        interpolating the convolved spectrum back to the requested grid. This
+        keeps same-grid fitting on the fast matrix path while allowing subset
+        or plotting grids.
     name : str, default ``'rsp'``
         Name of the response operator model.
 
@@ -689,17 +719,17 @@ class SpectralResponse(LinearOperatorModel):
     ):
         self.z = z
         self.flexible = flexible
-        self.interpolator = None
         self._instrument_name = None
+        self._interp_cache = None
         
         if response_matrix is not None:
             # Direct matrix mode - use as-is
             self.response_matrix = response_matrix
-            self.wavelength_grid = np.asarray(wave) if wave is not None else None
+            self.wavelength_grid = np.asarray(wave, dtype=float) if wave is not None else None
             self._mode = "direct"
             
         elif instrument is not None and wave is not None:
-            wave = np.asarray(wave)
+            wave = np.asarray(wave, dtype=float)
             wave_obs = wave * (1 + z) if z != 0 else wave
             
             # Check if instrument is a string (name) or InstrumentResponse instance
@@ -727,9 +757,6 @@ class SpectralResponse(LinearOperatorModel):
             raise ValueError(
                 "Provide either (instrument, wave) or (response_matrix, wave)."
             )
-        
-        if self.flexible and self.wavelength_grid is not None:
-            self._build_interpolator()
 
         super().__init__(
             self.response_matrix,
@@ -738,11 +765,148 @@ class SpectralResponse(LinearOperatorModel):
             name=name,
         )
 
-    def _build_interpolator(self) -> None:
-        """Build 2D interpolator for flexible grid evaluation."""
-        dense = self.response_matrix.toarray() if issparse(self.response_matrix) else self.response_matrix
-        self.interpolator = RectBivariateSpline(
-            self.wavelength_grid, self.wavelength_grid, dense, kx=1, ky=1
+    def _same_grid(self, x) -> bool:
+        if self.wavelength_grid is None:
+            return False
+        x = np.asarray(x, dtype=float).ravel()
+        if x.shape != self.wavelength_grid.shape:
+            return False
+        return np.array_equal(x, self.wavelength_grid) or np.allclose(
+            x,
+            self.wavelength_grid,
+            rtol=0.0,
+            atol=np.finfo(float).eps * max(1.0, np.abs(self.wavelength_grid).max()),
+        )
+
+    def _get_interp_cache(self, x):
+        x = np.asarray(x, dtype=float).ravel()
+        if self.wavelength_grid is None:
+            raise ValueError("Flexible response evaluation requires a wavelength grid.")
+        if self._interp_cache is not None and np.array_equal(x, self._interp_cache["x"]):
+            return self._interp_cache
+
+        native = self.wavelength_grid
+        indices = np.searchsorted(native, x)
+        inside = (x >= native[0]) & (x <= native[-1])
+        left = np.clip(indices - 1, 0, len(native) - 1)
+        right = np.clip(indices, 0, len(native) - 1)
+
+        same = inside & (left == right)
+        frac = np.zeros_like(x, dtype=float)
+
+        span = native[right] - native[left]
+        valid = inside & (~same)
+        frac[valid] = (x[valid] - native[left[valid]]) / span[valid]
+        frac[same] = 0.0
+
+        cache = {
+            "x": x,
+            "inside": inside,
+            "left": left,
+            "right": right,
+            "frac": frac,
+        }
+        self._interp_cache = cache
+        return cache
+
+    def _resample_from_native(self, values, x):
+        unit = values.unit if hasattr(values, "unit") else None
+        arr = values.to_value(unit) if unit is not None else np.asarray(values)
+        arr = np.asarray(arr).ravel()
+
+        if self._same_grid(x):
+            return values
+
+        cache = self._get_interp_cache(x)
+        result = np.zeros(len(cache["x"]), dtype=arr.dtype)
+        inside = cache["inside"]
+        left = cache["left"][inside]
+        right = cache["right"][inside]
+        frac = cache["frac"][inside]
+        result[inside] = (1.0 - frac) * arr[left] + frac * arr[right]
+        return result * unit if unit is not None else result
+
+    def _native_response(self, values):
+        unit = values.unit if hasattr(values, "unit") else None
+        arr = values.to_value(unit) if unit is not None else np.asarray(values)
+        arr = np.asarray(arr).ravel()
+        result = np.asarray(self.response_matrix.dot(arr)).ravel()
+        return result * unit if unit is not None else result
+
+    def _prism_pipe_evaluate(
+        self,
+        leftval,
+        left_inputs,
+        right_params,
+        left_model=None,
+        left_params=None,
+        **kwargs,
+    ):
+        x = np.asarray(left_inputs[0], dtype=float).ravel()
+        if self.wavelength_grid is None or self._same_grid(x):
+            return super()._prism_pipe_evaluate(
+                leftval,
+                left_inputs,
+                right_params,
+                left_model=left_model,
+                left_params=left_params,
+                **kwargs,
+            )
+        if not self.flexible:
+            raise ValueError(
+                f"LinearOperatorModel expects {self.response_matrix.shape[0]} samples, got {len(x)}."
+            )
+        if left_model is None:
+            raise ValueError("Flexible response evaluation requires access to the source model.")
+
+        native_x = self.wavelength_grid
+        if hasattr(left_inputs[0], "unit"):
+            native_x = native_x * left_inputs[0].unit
+        if left_params is None:
+            native_flux = left_model(native_x, **kwargs)
+        else:
+            native_flux = left_model.evaluate(native_x, *left_params)
+        native_result = self._native_response(native_flux)
+        return self._resample_from_native(native_result, x)
+
+    def _prism_pipe_fit_deriv(
+        self,
+        left_deriv,
+        left_inputs,
+        left_params,
+        right_params,
+        left_model,
+    ):
+        x = np.asarray(left_inputs[0], dtype=float).ravel()
+        if self.wavelength_grid is None or self._same_grid(x):
+            return super()._prism_pipe_fit_deriv(
+                left_deriv,
+                left_inputs,
+                left_params,
+                right_params,
+                left_model,
+            )
+        if not self.flexible:
+            raise ValueError(
+                f"LinearOperatorModel expects {self.response_matrix.shape[0]} samples, got {len(x)}."
+            )
+
+        native_x = self.wavelength_grid
+        if hasattr(left_inputs[0], "unit"):
+            native_x = native_x * left_inputs[0].unit
+        native_deriv = left_model.fit_deriv(native_x, *left_params)
+        if native_deriv is None:
+            return None
+        derivs = np.asanyarray(native_deriv)
+        if not left_model.col_fit_deriv:
+            derivs = np.moveaxis(derivs, -1, 0)
+        derivs = derivs.reshape((derivs.shape[0], -1))
+
+        return np.asarray(
+            [
+                np.asarray(self._resample_from_native(self._native_response(dparam), x)).ravel()
+                for dparam in derivs
+            ]
         )
 
     def _build_recipe(self):

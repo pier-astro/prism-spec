@@ -35,8 +35,84 @@ __all__ = [
 _MULTIFIT_WORKER_STATE = {}
 
 
+def _combine_validity_masks(base, extra):
+    """Combine Prism-style validity masks where True means usable."""
+    if extra is None:
+        return base
+    extra = np.asarray(extra, dtype=bool)
+    if base is None:
+        return extra
+    return np.asarray(base, dtype=bool) & extra
+
+
+def _extract_multifit_inputs(y, yerr=None, weights=None, mask=None):
+    """Normalize multidimensional inputs and infer optional validity masks."""
+    inferred_mask = None
+
+    if hasattr(y, 'values') and hasattr(y, 'mask'):
+        if mask is None:
+            mask = y.mask
+        if yerr is None and hasattr(y, 'err'):
+            yerr = y.err
+        y = y.values
+
+    if np.ma.isMaskedArray(y):
+        inferred_mask = _combine_validity_masks(inferred_mask, ~np.ma.getmaskarray(y))
+        y = np.ma.getdata(y)
+    if np.ma.isMaskedArray(yerr):
+        inferred_mask = _combine_validity_masks(inferred_mask, ~np.ma.getmaskarray(yerr))
+        yerr = np.ma.getdata(yerr)
+    if np.ma.isMaskedArray(weights):
+        inferred_mask = _combine_validity_masks(inferred_mask, ~np.ma.getmaskarray(weights))
+        weights = np.ma.getdata(weights)
+
+    mask = _combine_validity_masks(inferred_mask, mask)
+    return y, yerr, weights, mask
+
+
+def _prepare_masked_spectrum(x, y_1d, yerr_1d, weights_1d, mask_1d, *, skip_invalid):
+    """Apply a 1-D validity mask before fitting one spectrum."""
+    if mask_1d is None:
+        return np.asarray(x), y_1d, yerr_1d, weights_1d
+
+    valid = np.asarray(mask_1d, dtype=bool)
+    if valid.ndim != 1:
+        raise ValueError('Per-spectrum mask must be 1-D.')
+    if valid.shape != np.shape(y_1d):
+        raise ValueError(
+            f'Per-spectrum mask must have shape {np.shape(y_1d)}; got {valid.shape}.'
+        )
+    if not np.any(valid):
+        if skip_invalid:
+            return None, None, None, None
+        raise ValueError('No valid spectral samples remain after masking.')
+
+    x = np.asarray(x)[valid]
+    y_1d = np.asarray(y_1d)[valid]
+    if yerr_1d is not None:
+        yerr_1d = np.asarray(yerr_1d)[valid]
+    if weights_1d is not None:
+        weights_1d = np.asarray(weights_1d)[valid]
+    return x, y_1d, yerr_1d, weights_1d
+
+
+def _nan_multifit_payload(model, message):
+    """Return the standard NaN-filled multifit payload for one failed target."""
+    return (
+        np.full(len(model.parameters), np.nan),
+        None,
+        {
+            'success': False,
+            'nfev': 0,
+            'message': message,
+            **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
+        },
+        None,
+    )
+
+
 def _multifit_worker_initializer(fitter=None, template_model=None, x=None,
-                                 statistic=None, kwargs=None):
+                                 statistic=None, kwargs=None, skip_invalid=True):
     """Configure worker runtime and preload shared multifit state."""
     os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
     os.environ.setdefault('MKL_NUM_THREADS', '1')
@@ -50,42 +126,44 @@ def _multifit_worker_initializer(fitter=None, template_model=None, x=None,
             'x': x,
             'statistic': statistic,
             'kwargs': {} if kwargs is None else kwargs,
+            'skip_invalid': bool(skip_invalid),
         }
 
 
 def _multifit_worker_task(args):
     """Run one multifit target using preloaded worker state."""
-    idx, y_1d, yerr_1d, weights_1d, initpars_1d, bounds_1d = args
+    idx, y_1d, yerr_1d, weights_1d, mask_1d, initpars_1d, bounds_1d = args
     state = _MULTIFIT_WORKER_STATE
     fitter = state['fitter']
     model = state['template_model']
     x = state['x']
     statistic = state['statistic']
     kwargs = state['kwargs']
+    skip_invalid = state.get('skip_invalid', True)
 
     try:
         local_model = model.copy()
         fitter._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
+        fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
+            x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
+        )
+        if fit_x is None:
+            payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
+            return (idx, payload[0], payload[1], payload[2], payload[3])
         fitted = fitter(
-            model=local_model, x=x, y=y_1d, yerr=yerr_1d,
-            statistic=statistic, weights=weights_1d,
+            model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
+            statistic=statistic, weights=fit_weights,
             inplace=True, **kwargs
         )
         return (idx, fitted.parameters, fitter.stdevs,
                 fitter._multifit_entry_from_fit_info(), fitter.covariance)
     except Exception as e:
+        if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
+            raise
         if getattr(fitter, 'verbose', False):
             print(f"Worker {idx} failed: {e}")
-        return (
-            idx,
-            np.full(len(model.parameters), np.nan),
-            None,
-            {
-                'success': False, 'nfev': 0, 'message': str(e),
-                **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
-            },
-            None,
-        )
+        payload = _nan_multifit_payload(model, str(e))
+        return (idx, payload[0], payload[1], payload[2], payload[3])
 
 
 # =============================================================================
@@ -1167,6 +1245,10 @@ class MultiFitMixin(abc.ABC):
     def _apply_scalar_multifit_overrides(self, model, initpars=None, bounds=None):
         if initpars:
             for name, value in initpars.items():
+                if value is None:
+                    continue
+                if np.isscalar(value) and not np.isfinite(value):
+                    continue
                 getattr(model, name).value = value
         if bounds:
             for name, pair in bounds.items():
@@ -1295,58 +1377,58 @@ class MultiFitMixin(abc.ABC):
 
     def _fit_single_target(self, args):
         """Worker function for multiprocess mapping (one 1-D fit per call)."""
-        idx, model, x, y_1d, yerr_1d, statistic, weights_1d, initpars_1d, bounds_1d, kwargs = args
+        idx, model, x, y_1d, yerr_1d, statistic, weights_1d, mask_1d, skip_invalid, initpars_1d, bounds_1d, kwargs = args
         try:
             local_model = model.copy()
             self._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
+            fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
+                x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
+            )
+            if fit_x is None:
+                payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
+                return (idx, payload[0], payload[1], payload[2], payload[3])
             fitted = self(
-                model=local_model, x=x, y=y_1d, yerr=yerr_1d,
-                statistic=statistic, weights=weights_1d,
+                model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
+                statistic=statistic, weights=fit_weights,
                 inplace=True, **kwargs
             )
             return (idx, fitted.parameters, self.stdevs,
                     self._multifit_entry_from_fit_info(), self.covariance)
         except Exception as e:
+            if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
+                raise
             if getattr(self, 'verbose', False):
                 print(f"Worker {idx} failed: {e}")
-            return (
-                idx,
-                np.full(len(model.parameters), np.nan),
-                None,
-                {
-                    'success': False, 'nfev': 0, 'message': str(e),
-                    **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
-                },
-                None,
-            )
+            payload = _nan_multifit_payload(model, str(e))
+            return (idx, payload[0], payload[1], payload[2], payload[3])
 
     def _fit_single_direct(self, idx, model, x, y_1d, yerr_1d,
-                           statistic, weights_1d, initpars_1d, bounds_1d,
+                           statistic, weights_1d, mask_1d, skip_invalid, initpars_1d, bounds_1d,
                            kwargs):
         """Direct in-process single-target fit used by the serial multifit path."""
         try:
             local_model = model.copy()
             self._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
+            fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
+                x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
+            )
+            if fit_x is None:
+                payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
+                return (idx, payload[0], payload[1], payload[2], payload[3])
             fitted = self(
-                model=local_model, x=x, y=y_1d, yerr=yerr_1d,
-                statistic=statistic, weights=weights_1d,
+                model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
+                statistic=statistic, weights=fit_weights,
                 inplace=True, **kwargs
             )
             return (idx, fitted.parameters, self.stdevs,
                     self._multifit_entry_from_fit_info(), self.covariance)
         except Exception as e:
+            if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
+                raise
             if getattr(self, 'verbose', False):
                 print(f"Worker {idx} failed: {e}")
-            return (
-                idx,
-                np.full(len(model.parameters), np.nan),
-                None,
-                {
-                    'success': False, 'nfev': 0, 'message': str(e),
-                    **{k: np.nan for k in _MULTIFIT_STAT_KEYS},
-                },
-                None,
-            )
+            payload = _nan_multifit_payload(model, str(e))
+            return (idx, payload[0], payload[1], payload[2], payload[3])
 
     def _multifit_spawn_fitter(self):
         """Build a lightweight fitter clone for spawn workers."""
@@ -1406,11 +1488,13 @@ class MultiFitMixin(abc.ABC):
     # ------------------------------------------------------------------
 
     def _fit_multi(self, model, x, y, yerr=None, statistic='chi2', weights=None,
+                   mask=None, skip_invalid=True,
                    nproc=1, spectral_axis=None, progress=True, batch=False,
                    binmap=None,
                    initpars=None, bounds=None, fixed=None, tied=None,
                    **kwargs):
         """Internal: run fits over all spaxels and accumulate a MultiFitResult."""
+        y, yerr, weights, mask = _extract_multifit_inputs(y, yerr=yerr, weights=weights, mask=mask)
         y = np.asarray(y)
         if y.ndim < 2:
             raise ValueError("Multi-spectrum fitting requires y.ndim >= 2.")
@@ -1419,12 +1503,15 @@ class MultiFitMixin(abc.ABC):
                 "Asymmetric yerr is not supported by direct multifit calls. "
                 "Use symmetric yerr or bootstrap(..., noise_dist='uniform') for asymmetric resampling."
             )
+        if mask is not None and np.asarray(mask).shape != y.shape:
+            raise ValueError(f"mask must have shape {y.shape}; got {np.asarray(mask).shape}.")
 
         wave_len = len(x)
         resolved_axis = self._resolve_spectral_axis(y, wave_len, spectral_axis=spectral_axis)
         y = np.moveaxis(y, resolved_axis, -1)
         mapped_yerr    = np.moveaxis(np.asarray(yerr), resolved_axis, -1)    if yerr    is not None else None
         mapped_weights = np.moveaxis(np.asarray(weights), resolved_axis, -1) if weights is not None else None
+        mapped_mask    = np.moveaxis(np.asarray(mask, dtype=bool), resolved_axis, -1) if mask is not None else None
         spatial_shape  = y.shape[:-1]
 
         config = self._prepare_multifit_configuration(
@@ -1437,6 +1524,7 @@ class MultiFitMixin(abc.ABC):
         y_flat       = y.reshape((n_spaxels, wave_len))
         yerr_flat    = mapped_yerr.reshape((n_spaxels, wave_len))    if mapped_yerr    is not None else [None] * n_spaxels
         weights_flat = mapped_weights.reshape((n_spaxels, wave_len)) if mapped_weights is not None else [None] * n_spaxels
+        mask_flat    = mapped_mask.reshape((n_spaxels, wave_len))    if mapped_mask    is not None else [None] * n_spaxels
 
         if binmap is not None:
             validated_binmap = parse_binmap(binmap, spatial_shape=spatial_shape, name='binmap')
@@ -1473,7 +1561,8 @@ class MultiFitMixin(abc.ABC):
             for idx in fit_flat_indices:
                 ip, bo = self._multifit_task_overrides(idx, config)
                 yield (idx, template_model, x, y_flat[idx],
-                       yerr_flat[idx], statistic, weights_flat[idx], ip, bo, kwargs)
+                       yerr_flat[idx], statistic, weights_flat[idx], mask_flat[idx],
+                       skip_invalid, ip, bo, kwargs)
 
         if progress is None:
             progress = True
@@ -1502,6 +1591,8 @@ class MultiFitMixin(abc.ABC):
                     yerr_1d=yerr_flat[idx],
                     statistic=statistic,
                     weights_1d=weights_flat[idx],
+                    mask_1d=mask_flat[idx],
+                    skip_invalid=skip_invalid,
                     initpars_1d=ip,
                     bounds_1d=bo,
                     kwargs=kwargs,
@@ -1514,12 +1605,12 @@ class MultiFitMixin(abc.ABC):
             with ctx.Pool(
                 nproc,
                 initializer=_multifit_worker_initializer,
-                initargs=(worker_fitter, template_model, x, statistic, kwargs),
+                initargs=(worker_fitter, template_model, x, statistic, kwargs, skip_invalid),
             ) as pool:
                 def worker_task_generator():
                     for idx in fit_flat_indices:
                         ip, bo = self._multifit_task_overrides(idx, config)
-                        yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], ip, bo)
+                        yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], mask_flat[idx], ip, bo)
 
                 chunksize = self._multifit_chunksize(len(fit_flat_indices), nproc) if batch else 1
                 it = pool.imap_unordered(_multifit_worker_task, worker_task_generator(),
@@ -1547,6 +1638,7 @@ class MultiFitMixin(abc.ABC):
     # ------------------------------------------------------------------
 
     def multifit(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
+                 mask=None, skip_invalid=True,
                  inplace=False, nproc=1, spectral_axis=None, progress=True, batch=False,
                  binmap=None,
                  initpars=None, bounds=None, fixed=None, tied=None,
@@ -1571,10 +1663,19 @@ class MultiFitMixin(abc.ABC):
             Placeholder for future 2-D model support.
         yerr : array_like, optional
             Uncertainty cube (same shape as ``y``).
+        mask : array_like of bool, optional
+            Prism-style validity mask with the same shape as ``y`` where
+            ``True`` marks usable samples and ``False`` excludes them from the
+            fit. If ``y`` is a Prism cube and ``mask`` is omitted, the cube mask
+            is used automatically.
         statistic : {'chi2', 'poisson'}
             Statistic used to convert ``yerr`` to weights.
         weights : array_like, optional
             Explicit weight cube (overrides ``yerr``).
+        skip_invalid : bool, optional
+            If ``True`` (default), spectra with no valid samples after masking
+            are skipped silently and stored as ``NaN`` in the result. If
+            ``False``, such spectra raise an error.
         inplace : bool
             Kept for API symmetry, but ignored in multifit mode. Each spectrum
             is always fit using its own model copy. Passing ``inplace=True``
@@ -1618,6 +1719,7 @@ class MultiFitMixin(abc.ABC):
             )
         return self._fit_multi(
             model, x, y, yerr=yerr, statistic=statistic, weights=weights,
+            mask=mask, skip_invalid=skip_invalid,
             nproc=nproc, spectral_axis=spectral_axis, progress=progress, batch=batch,
             binmap=binmap,
             initpars=initpars, bounds=bounds, fixed=fixed, tied=tied,
