@@ -253,6 +253,7 @@ def test_separable_trf_solves_gaussian_amplitude_inside_outer_nonlinear_fit():
 
     assert fitter.fit_info['n_linear'] == 1
     assert fitter.fit_info['n_nonlinear'] == 2
+    assert fitter.fit_info['outer_jacobian'] == 'analytic'
     assert np.isclose(fitted.amplitude.value, truth.amplitude.value, rtol=0.05)
     assert np.isclose(fitted.offset.value, truth.offset.value, atol=10.0)
     assert np.isclose(fitted.fwhm.value, truth.fwhm.value, atol=40.0)
@@ -282,6 +283,7 @@ def test_separable_trf_respects_linear_parameter_bounds():
     fitter = prism_fitting.SeparableTRF()
     fitted = fitter(init, x, y, yerr=yerr, inplace=False)
 
+    assert fitter.fit_info['outer_jacobian'] == '2-point'
     assert np.isclose(fitted.amplitude.value, 1.5, atol=1e-8)
 
 
@@ -310,6 +312,35 @@ def test_separable_trf_supports_tied_linear_amplitudes():
     assert fitter.fit_info['n_linear'] == 1
     assert np.isclose(fitted.amplitude_0.value, 3.0, atol=1e-6)
     assert np.isclose(fitted.amplitude_1.value, 1.5, atol=1e-6)
+
+
+def test_separable_trf_uses_projected_analytic_jacobian_with_smooth_ties():
+    x = np.linspace(4990.0, 5025.0, 220)
+    left = GaussianLine(amplitude=4.0, position=5000.0, offset=0.0, fwhm=170.0, name='left')
+    right = GaussianLine(amplitude=2.0, position=5010.0, offset=0.0, fwhm=170.0, name='right')
+    truth = left + right
+    truth.amplitude_1.tied = lambda m: 0.5 * m.amplitude_0
+    truth.fwhm_1.tied = lambda m: m.fwhm_0
+
+    yerr = np.full_like(x, 0.04)
+    y = truth(x)
+
+    init_left = GaussianLine(amplitude=0.8, position=5000.0, offset=0.0, fwhm=320.0, name='left')
+    init_right = GaussianLine(amplitude=0.1, position=5010.0, offset=0.0, fwhm=120.0, name='right')
+    model = init_left + init_right
+    model.offset_0.fixed = True
+    model.offset_1.fixed = True
+    model.amplitude_1.tied = lambda m: 0.5 * m.amplitude_0
+    model.fwhm_1.tied = lambda m: m.fwhm_0
+
+    fitter = prism_fitting.SeparableTRF()
+    fitted = fitter(model, x, y, yerr=yerr, inplace=False)
+
+    assert fitter.fit_info['outer_jacobian'] == 'analytic'
+    assert np.isclose(fitted.amplitude_0.value, 4.0, atol=1e-4)
+    assert np.isclose(fitted.amplitude_1.value, 2.0, atol=1e-4)
+    assert np.isclose(fitted.fwhm_0.value, 170.0, atol=1e-2)
+    assert np.isclose(fitted.fwhm_1.value, 170.0, atol=1e-2)
 
 
 def test_separable_trf_rejects_nonlinear_ties_inside_linear_block():

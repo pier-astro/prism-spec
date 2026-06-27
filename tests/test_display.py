@@ -18,6 +18,7 @@ from prism.modeling.models.display import (
     get_model_expression,
 )
 from prism.modeling.fitting import MultiFitResult
+from prism.modeling.operators import LinearOperatorModel
 
 
 def _build_multifit_cube():
@@ -109,6 +110,24 @@ def test_model_components_accessor():
     assert comps[0] is comps['g1']
     assert comps[1] is comps['g2']
     assert comps[2] is comps['c0']
+
+
+def test_model_components_split_nested_additive_pipe():
+    x = np.linspace(-5.0, 5.0, 121)
+    lsf = LinearOperatorModel(np.eye(x.size), x=x, name='lsf')
+    rsp = LinearOperatorModel(np.eye(x.size), x=x, name='rsp')
+    broadened = (
+        models.Gaussian1D(1.0, -1.0, 0.5, name='core')
+        + models.Gaussian1D(0.8, 1.2, 0.9, name='wing')
+    ) | lsf
+    model = models.Const1D(0.1, name='cont') + broadened
+
+    comps = get_components(model, additive=True)
+    deconvolved = get_components(model | rsp, additive=True, deconvolve=True)
+
+    assert comps.names == ['cont', 'core|lsf', 'wing|lsf']
+    assert deconvolved.names == ['cont', 'core|lsf', 'wing|lsf']
+    np.testing.assert_allclose(sum(component(x) for component in comps), model(x))
 
 
 def test_multifit_component_accessors():

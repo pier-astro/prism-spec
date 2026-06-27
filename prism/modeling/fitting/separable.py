@@ -22,7 +22,12 @@ from .extension import (
     validate_symmetric_yerr,
 )
 from .multifit import MultiFitMixin, _MULTIFIT_STAT_KEYS
-from .utils import _apply_tied_fast, _get_tied_info
+from .utils import (
+    _apply_tied_fast,
+    _get_tied_info,
+    _prime_tied_analytic_jacobian_warning,
+    _reduce_tied_analytic_jacobian,
+)
 
 __all__ = ['SeparableTRF', 'inspect_separable']
 
@@ -91,6 +96,26 @@ def _compute_numeric_jacobian(residual_func, p0):
         trial[idx] = value + step
         jac[:, idx] = (np.asarray(residual_func(trial), dtype=float) - r0) / step
     return jac
+
+
+def _analytic_weighted_jacobian(model, x, weights, row_indices):
+    full = model.fit_deriv(x, *model.parameters)
+    reduced = _reduce_tied_analytic_jacobian(
+        model,
+        full,
+        warn=True,
+        stacklevel=4,
+    )
+    rows = np.asarray(reduced, dtype=float)[np.asarray(row_indices, dtype=int)]
+    weighted = rows if weights is None else rows * np.asarray(weights, dtype=float)
+    return weighted.T
+
+
+def _project_from_linear_span(weighted_design, weighted_jacobian):
+    if weighted_design.size == 0:
+        return weighted_jacobian
+    q, _ = np.linalg.qr(weighted_design, mode='reduced')
+    return weighted_jacobian - q @ (q.T @ weighted_jacobian)
 
 
 def inspect_separable(model, linear_params='auto'):
@@ -238,6 +263,11 @@ class SeparableTRF(MultiFitMixin, Fitter):
 
     The inner linear solve respects parameter bounds via
     ``scipy.optimize.lsq_linear`` when any linear bound is finite.
+
+    When the inner linear block is unconstrained and the model exposes
+    analytic derivatives, ``SeparableTRF`` automatically uses a projected
+    analytic outer Jacobian. Bounded linear blocks fall back to numeric outer
+    derivatives.
 
     A tied parameter remains safe inside the linear block only if the tie is
     affine in the free linear parameters. For example:
@@ -434,40 +464,83 @@ class SeparableTRF(MultiFitMixin, Fitter):
             params = fit_model.parameters.copy()
             params[linear_indices] = coeffs
             self._set_parameters(fit_model, params, tied_info)
-            return coeffs, residual, success, message
+            return {
+                'coeffs': coeffs,
+                'residual': residual,
+                'success': success,
+                'message': message,
+                'base': base,
+                'design': design,
+                'lower': lower,
+                'upper': upper,
+            }
 
         cache = {}
 
-        def residual_nonlinear(values):
+        def cached_state(values):
             values = np.asarray(values, dtype=float)
-            apply_nonlinear(values)
-            coeffs, residual, success, message = solve_current_linear()
-            cache['x'] = values.copy()
-            cache['linear_coeffs'] = coeffs.copy()
-            cache['residual'] = residual.copy()
-            cache['linear_success'] = success
-            cache['linear_message'] = message
-            return residual
+            cached = cache.get('x')
+            if cached is None or cached.shape != values.shape or not np.array_equal(cached, values):
+                apply_nonlinear(values)
+                state = solve_current_linear()
+                cache['x'] = values.copy()
+                cache['state'] = state
+            return cache['state']
+
+        def residual_nonlinear(values):
+            state = cached_state(values)
+            return state['residual']
 
         merged_kwargs = self.fit_kwargs.copy()
         merged_kwargs.update(kwargs)
-        requested_jac = merged_kwargs.pop('jac', '2-point')
-        if callable(requested_jac) or requested_jac not in {'2-point', '3-point', 'cs'}:
+        requested_jac = merged_kwargs.pop('jac', 'auto')
+        if callable(requested_jac) or requested_jac not in {'auto', 'analytic', '2-point', '3-point', 'cs'}:
             raise ValueError(
-                "SeparableTRF currently supports only numeric outer Jacobians: "
-                "'2-point', '3-point', or 'cs'."
+                "SeparableTRF currently supports jac='auto', jac='analytic', "
+                "or the numeric outer Jacobians '2-point', '3-point', and 'cs'."
             )
         outer_kwargs = {k: v for k, v in merged_kwargs.items() if k not in ['inplace', 'yerr', 'linear_params']}
-        outer_kwargs.update({'method': 'trf', 'jac': requested_jac})
         if max_nfev is not None:
             outer_kwargs['max_nfev'] = max_nfev
 
+        linear_bounds_finite = bool(np.isfinite([_parameter_bounds(fit_model, name) for name in linear_free_names]).any())
+        analytic_available = callable(getattr(fit_model, 'fit_deriv', None))
+        use_analytic_outer = (
+            nonlinear_indices.size > 0
+            and analytic_available
+            and not linear_bounds_finite
+            and requested_jac in {'auto', 'analytic'}
+        )
+        if requested_jac == 'analytic' and not use_analytic_outer:
+            raise ValueError(
+                "jac='analytic' requires analytic model derivatives and an unconstrained linear block."
+            )
+
+        if use_analytic_outer:
+            _prime_tied_analytic_jacobian_warning(fit_model)
+
+            def jac_nonlinear(values):
+                state = cached_state(values)
+                weighted_design = state['design'] if weights is None else state['design'] * weights[:, np.newaxis]
+                weighted_nonlinear = _analytic_weighted_jacobian(
+                    fit_model, x, weights, nonlinear_indices
+                )
+                return _project_from_linear_span(weighted_design, weighted_nonlinear)
+
+            outer_jac = jac_nonlinear
+            outer_jac_label = 'analytic'
+        else:
+            outer_jac = '2-point' if requested_jac == 'auto' else requested_jac
+            outer_jac_label = str(outer_jac)
+
+        outer_kwargs.update({'method': 'trf', 'jac': outer_jac})
+
         if nonlinear_indices.size == 0:
             apply_nonlinear(np.empty(0, dtype=float))
-            coeffs, residual, linear_success, linear_message = solve_current_linear()
-            cost = 0.5 * float(np.dot(residual, residual))
-            result_success = bool(linear_success)
-            result_message = linear_message
+            state = solve_current_linear()
+            cost = 0.5 * float(np.dot(state['residual'], state['residual']))
+            result_success = bool(state['success'])
+            result_message = state['message']
             result_nfev = 0
             result_status = 0
             result_optimality = 0.0
@@ -483,10 +556,10 @@ class SeparableTRF(MultiFitMixin, Fitter):
                 raise RuntimeError(f"SeparableTRF failed: {exc}") from exc
 
             apply_nonlinear(result.x)
-            coeffs, residual, linear_success, linear_message = solve_current_linear()
+            state = solve_current_linear()
             cost = float(result.cost)
-            result_success = bool(result.success and linear_success)
-            result_message = getattr(result, 'message', linear_message)
+            result_success = bool(result.success and state['success'])
+            result_message = getattr(result, 'message', state['message'])
             result_nfev = int(result.nfev)
             result_status = int(getattr(result, 'status', 0))
             result_optimality = float(getattr(result, 'optimality', np.nan))
@@ -549,6 +622,7 @@ class SeparableTRF(MultiFitMixin, Fitter):
             'status': result_status,
             'n_linear': len(linear_free_names),
             'n_nonlinear': len(nonlinear_free_names),
+            'outer_jacobian': 'none' if nonlinear_indices.size == 0 else outer_jac_label,
         }
 
         if param_cov is not None:

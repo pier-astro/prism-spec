@@ -73,7 +73,8 @@ class ModelComponents(dict):
         Only meaningful when ``additive=True`` and the top-level model is
         a linear-operator pipe. If ``True``, strip only that first operator
         layer and return the additive decomposition of the left-hand source.
-        Nested pipe nodes are left untouched. Default ``False``.
+        Nested pipe nodes are still expanded across additive source terms, but
+        are not themselves stripped. Default ``False``.
 
     Notes
     -----
@@ -88,9 +89,9 @@ class ModelComponents(dict):
 
         The deconvolution logic is intentionally shallow: it removes only a
         top-level linear operator. For ``(gauss | linop1) | linop2``,
-        ``deconvolve=True`` removes ``linop2`` only. For
-        ``(gauss | linop) + other``, ``deconvolve=True`` has no effect because
-        the top-level node is not itself a linear-operator pipe.
+        ``deconvolve=True`` removes ``linop2`` only. Nested pipe nodes are
+        still distributed across additive source terms, so
+        ``(A + B) | linop`` becomes ``A|linop, B|linop``.
 
     Examples
     --------
@@ -245,7 +246,8 @@ class ModelComponents(dict):
             return [model]
 
         if is_linear_operator_pipe(model):
-            return [model]
+            source_components = self._expand_additive(model.left)
+            return [_wrap_component(component, model) for component in source_components]
         
         left = self._expand_additive(model.left)
         right = self._expand_additive(model.right)

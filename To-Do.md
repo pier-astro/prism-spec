@@ -27,7 +27,7 @@ ADD UNIT AS COLUMN TO DISPLAY in the display module. Remeber the display module 
 - (DONE!) Make everyting less WAVELENGHT specific. Our routines are quite general! Just some aspects like the line models might strongly rely on the wavelength. In that case we might add a "domain" attribute to the line models to specify the domain of application (e.g. wavelength, frequency, energy) and then handle the specificities in the line models. Outise this domain simply raise a warning/error or NotImplementedError. This will make the package more general and potentially useful for other applications beyond spectroscopy.
 
 
-
+- EW has the condition on the peak > 0 in groups.py why? It will give None for absorption features! Check that all the methods agree with the sign. Nic says the different methods give different signs but same about absolute values
 
 - Make the module isntallable without the resources files. Let's keep only the line tables as default resources. If the user wants the additional data (about 50MB) we should provide a recipe in pip that is not the default but that the user can explicitly call to get the additional data.
 
