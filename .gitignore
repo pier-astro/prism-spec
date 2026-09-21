@@ -185,7 +185,12 @@ examples/results
 
 # Agents
 *.agent.md
-.vscode/
 .agents/
 AGENTS.md
 .serena/
+
+# Others
+To-Do.md
+.vscode
+.vscode/
+*.code-workspace

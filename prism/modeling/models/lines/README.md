@@ -32,7 +32,9 @@ through a thin spectral-domain transform. The internal physical reference remain
 - `profiles.py`
   Pure profile functions, flux formulae, Jacobians, and domain conversion helpers.
 - `base.py`
-  Shared line-model base class, line-table normalisation, flux and EW handling, and the `Metric` container.
+  Shared line-model base class plus flux and EW handling.
+- `tables.py`
+  Line-table normalisation, spectral-domain conversion, local-resource setup, and wavelength trimming.
 - `single.py`
   Single-line Astropy model subclasses.
 - `groups.py`

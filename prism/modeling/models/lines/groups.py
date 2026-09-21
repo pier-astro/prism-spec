@@ -11,10 +11,11 @@ import pandas as pd
 import astropy.units as u
 from astropy.modeling import Parameter
 
+from ...metrics import Metric
 from . import profiles
-from . import base as _base
-from .base import (
-    LineModelBase, Metric,
+from . import tables as _tables
+from .base import LineModelBase
+from .tables import (
     _clean_name, _make_unique,
     _has_param_std, _get_param_limits,
     c_kms,
@@ -123,14 +124,14 @@ class LineGroupBase(LineModelBase):
         if not isinstance(csv_files, (list, tuple)):
             csv_files = [csv_files]
         if dirpath is None:
-            dirpath = _base.linetable_path
+            dirpath = _tables.linetable_path
 
         tables = []
         for f in csv_files:
             path = f if os.path.isabs(f) else os.path.join(dirpath, f)
-            tables.append(_base.read_linetable(path, position_unit=position_unit))
+            tables.append(_tables.read_linetable(path, position_unit=position_unit))
 
-        linetable = _base.stack_linetables(tables, position_unit=position_unit)
+        linetable = _tables.stack_linetables(tables, position_unit=position_unit)
         return cls.from_templates(
             linetable, name=name, bounds=bounds, amplitude=amplitude,
             instfwhm=instfwhm,
@@ -237,7 +238,7 @@ class LineGroupBase(LineModelBase):
 
         # If pos is a Quantity honour its own unit; position_unit is then ignored.
         _norm_unit = None if isinstance(pos, u.Quantity) else position_unit
-        linetable = _base.normalize_linetable(
+        linetable = _tables.normalize_linetable(
             {'name': names, 'position': pos, 'weight': weights},
             position_unit=_norm_unit,
         )
@@ -337,7 +338,7 @@ class LineGroupBase(LineModelBase):
         >>> model.domain_family
         'linear'
         """
-        linetable = _base.normalize_linetable(
+        linetable = _tables.normalize_linetable(
             linetable,
             position_unit=position_unit,
         )
@@ -346,8 +347,8 @@ class LineGroupBase(LineModelBase):
         position = linetable['position']
         # Express the global wavelength bounds in the position's native unit so
         # the comparison stays in that unit without an intermediate AA conversion.
-        bound1 = (_base._wmin * u.AA).to(_resolved_position_unit, equivalencies=u.spectral())
-        bound2 = (_base._wmax * u.AA).to(_resolved_position_unit, equivalencies=u.spectral())
+        bound1 = (_tables._wmin * u.AA).to(_resolved_position_unit, equivalencies=u.spectral())
+        bound2 = (_tables._wmax * u.AA).to(_resolved_position_unit, equivalencies=u.spectral())
         lo, hi = (min(bound1, bound2), max(bound1, bound2))
         linetable = linetable[(position >= lo) & (position <= hi)]
         if len(linetable) == 0:

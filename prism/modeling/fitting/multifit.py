@@ -714,7 +714,7 @@ class MultiFitResult:
                 stds.append(np.nan)
                 los.append(np.nan)
                 his.append(np.nan)
-        from ..models.lines.base import Metric
+        from ..metrics import Metric
         vals_arr = np.array(vals)
         target_shape = self.shape + vals_arr.shape[1:]
         
@@ -751,7 +751,7 @@ class MultiFitResult:
                 stds.append(np.nan)
                 los.append(np.nan)
                 his.append(np.nan)
-        from ..models.lines.base import Metric
+        from ..metrics import Metric
         vals_arr = np.array(vals)
         target_shape = self.shape + vals_arr.shape[1:]
         return Metric(

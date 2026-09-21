@@ -13,11 +13,11 @@ import pandas as pd
 import astropy.units as u
 
 from ..models.components import get_components
+from ..metrics import Metric
 from ..models.lines import (
     GaussianLine, GaussianLines,
     LineGroupBase,
     LorentzianLine, LorentzianLines,
-    Metric,
     VoigtLine, VoigtLines,
     sigma2fwhm,
 )
@@ -677,7 +677,7 @@ class SelectedLineProfile:
                 for j, spec in enumerate(cont_specs):
                     lo, up = spec.lolim, spec.uplim
                     has_lim = (np.isfinite(lo) and np.isfinite(up) and up > lo)
-                    has_std = np.isfinite(spec.std) and spec.std > 0.0
+                    has_std = spec.std is not None and np.isfinite(spec.std) and spec.std > 0.0
                     if has_lim:
                         cont_draws[:, j] = _cont_rng.uniform(
                             lo, up, size=int(n_samples))

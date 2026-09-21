@@ -4,7 +4,7 @@ import astropy.units as u
 from astropy.table import QTable
 
 from prism.modeling.models.lines import GaussianLine, GaussianLines, profiles, setup_local_lines, trim_line_lists
-from prism.modeling.models.lines import base as lines_base
+from prism.modeling.models.lines import tables as line_tables
 from prism.utils.tools import air_to_vac
 
 
@@ -28,7 +28,7 @@ def test_setup_local_lines_accepts_quantity_bounds_and_writes_ecsv_in_angstrom(t
     output_dir = tmp_path / 'local'
     _write_ecsv(source_dir / 'demo.ecsv', [5000.0, 6000.0, 7000.0])
 
-    monkeypatch.setattr(lines_base, 'resource_path', str(source_dir))
+    monkeypatch.setattr(line_tables, 'resource_path', str(source_dir))
 
     min_nu = (6500.0 * u.AA).to(u.Hz, equivalencies=u.spectral())
     max_nu = (5500.0 * u.AA).to(u.Hz, equivalencies=u.spectral())
@@ -41,8 +41,8 @@ def test_setup_local_lines_accepts_quantity_bounds_and_writes_ecsv_in_angstrom(t
     text = (output_dir / 'demo.ecsv').read_text()
     assert '# meta:' in text
     assert '__serialized_columns__' not in text
-    assert lines_base._wmin == 5500.0
-    assert lines_base._wmax == 6500.0
+    assert line_tables._wmin == 5500.0
+    assert line_tables._wmax == 6500.0
 
 
 def test_setup_local_lines_accepts_scalar_bounds_with_explicit_unit(tmp_path, monkeypatch):
@@ -51,7 +51,7 @@ def test_setup_local_lines_accepts_scalar_bounds_with_explicit_unit(tmp_path, mo
     output_dir = tmp_path / 'local'
     _write_ecsv(source_dir / 'demo.ecsv', [5000.0, 6000.0, 7000.0])
 
-    monkeypatch.setattr(lines_base, 'resource_path', str(source_dir))
+    monkeypatch.setattr(line_tables, 'resource_path', str(source_dir))
 
     setup_local_lines(min=550.0, max=650.0, unit=u.nm, dirpath=str(output_dir), overwrite=True)
 
@@ -100,7 +100,7 @@ def test_plain_csv_requires_explicit_position_unit(tmp_path):
 
 def test_from_arrays_requires_explicit_position_unit_for_plain_arrays():
     """Bare float arrays must always come with an explicit position_unit."""
-    lines_base.set_wavelength_range(wmin=0.0, wmax=1.0e9)
+    line_tables.set_wavelength_range(wmin=0.0, wmax=1.0e9)
     model = GaussianLines.from_arrays(
         names=['HeII1640'],
         pos=[1640.42],
@@ -131,14 +131,14 @@ def test_convert_medium_csv(tmp_path):
     _write_ecsv(output_path, [5000.0, 6000.0, 7000.0], medium='air')
     
     # 1. Convert to vacuum
-    lines_base.convert_medium_csv(str(output_path), 'vacuum', overwrite=True)
+    line_tables.convert_medium_csv(str(output_path), 'vacuum', overwrite=True)
     table_vac = QTable.read(output_path, format='ascii.ecsv')
     expected_vac = air_to_vac(np.array([5000.0, 6000.0, 7000.0]))
     np.testing.assert_allclose(table_vac['position'].to_value(u.AA), expected_vac)
     assert table_vac.meta['medium'] == 'vacuum'
     
     # 2. Convert back to air using directory processing
-    lines_base.convert_medium_csv(str(source_dir), 'air', overwrite=True)
+    line_tables.convert_medium_csv(str(source_dir), 'air', overwrite=True)
     table_air = QTable.read(output_path, format='ascii.ecsv')
     np.testing.assert_allclose(table_air['position'].to_value(u.AA), [5000.0, 6000.0, 7000.0])
     assert table_air.meta['medium'] == 'air'
@@ -146,7 +146,7 @@ def test_convert_medium_csv(tmp_path):
     # 3. Blind conversion (no medium in meta) - CSV requires explicit input_unit
     csv_path = source_dir / 'blind.csv'
     _write_csv(csv_path, [('A', 5000.0, 1.0)])
-    lines_base.convert_medium_csv(str(csv_path), 'vacuum', input_unit=u.AA, overwrite=False)
+    line_tables.convert_medium_csv(str(csv_path), 'vacuum', input_unit=u.AA, overwrite=False)
     
     blind_ecsv_path = source_dir / 'blind.ecsv'
     table_blind = QTable.read(blind_ecsv_path, format='ascii.ecsv')
@@ -158,7 +158,7 @@ def test_convert_medium_csv(tmp_path):
     csv_no_unit = source_dir / 'no_unit.csv'
     _write_csv(csv_no_unit, [('B', 6000.0, 1.0)])
     with pytest.raises(ValueError, match="input_unit"):
-        lines_base.convert_medium_csv(str(csv_no_unit), 'vacuum', overwrite=True)
+        line_tables.convert_medium_csv(str(csv_no_unit), 'vacuum', overwrite=True)
 
 
 def test_native_kinematics_linear_vs_wavelength_domain():

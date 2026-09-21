@@ -1,9 +1,10 @@
 """
 prism.modeling.models.lines — emission-line spectral models.
 """
-from .base import (
-    Metric, LineModelBase,
-    set_wavelength_range, 
+from ...metrics import Metric
+from .base import LineModelBase
+from .tables import (
+    set_wavelength_range,
     convert_linetable_domain, convert_linetable_medium,
     convert_domain_csv, convert_medium_csv,
     setup_local_lines, trim_line_lists,

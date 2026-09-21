@@ -10,7 +10,7 @@ import astropy.units as u
 from astropy.modeling.fitting import model_to_fit_params
 
 from ..models.components import get_components
-from ..models.lines import Metric
+from ..metrics import Metric
 from ..fitting.uncertainty.resample import extract_limits
 
 from .selection import (
@@ -90,15 +90,23 @@ def _as_metric(value, unit=None) -> Metric:
     if isinstance(value, Metric):
         if value.unit is None or unit is None or value.unit == unit:
             return Metric(
-                value=float(value.value), std=float(value.std),
-                lolim=float(value.lolim), uplim=float(value.uplim),
+                value=float(value.value),
+                std=None if value.std is None else float(value.std),
+                lolim=None if value.lolim is None else float(value.lolim),
+                uplim=None if value.uplim is None else float(value.uplim),
                 unit=value.unit if unit is None else unit)
         scale = (1.0 * value.unit).to_value(unit)
         return Metric(
             value=float(value.value) * scale,
-            std=float(value.std) * scale if np.isfinite(value.std) else float('nan'),
-            lolim=float(value.lolim) * scale if np.isfinite(value.lolim) else float('nan'),
-            uplim=float(value.uplim) * scale if np.isfinite(value.uplim) else float('nan'),
+            std=None if value.std is None else (
+                float(value.std) * scale if np.isfinite(value.std) else float('nan')
+            ),
+            lolim=None if value.lolim is None else (
+                float(value.lolim) * scale if np.isfinite(value.lolim) else float('nan')
+            ),
+            uplim=None if value.uplim is None else (
+                float(value.uplim) * scale if np.isfinite(value.uplim) else float('nan')
+            ),
             unit=unit,
         )
     if isinstance(value, u.Quantity):
@@ -702,7 +710,7 @@ def _draw_selection_samples(selection, n_samples, method='auto',
     for j, spec in enumerate(enriched):
         lo, up = spec.lolim, spec.uplim
         has_limits = np.isfinite(lo) and np.isfinite(up) and up > lo
-        has_std = np.isfinite(spec.std) and spec.std > 0.0
+        has_std = spec.std is not None and np.isfinite(spec.std) and spec.std > 0.0
 
         _sqrt3 = np.sqrt(3.0)
         drawn = False

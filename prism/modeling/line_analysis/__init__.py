@@ -28,7 +28,7 @@ from .measurement import (
     _selection_parameter_specs,
     _draw_selection_samples,
 )
-from ..models.lines import Metric
+from ..metrics import Metric
 __all__ = [
     'LineResult',
     'Metric',
