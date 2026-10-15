@@ -101,6 +101,9 @@ result.save('results/cubemodel.fits', overwrite=True, std=True)
 
 Notebook examples live in `examples/` and cover single-spectrum fitting, cube fitting, empirical subtraction, and blended-line analysis.
 
+- [Chromatic PSF](examples/Chromatic%20PSF.ipynb): build and inspect a wavelength-dependent PSF from a field star.
+- [Aperture Correction](examples/Aperture%20Correction.ipynb): compare a point-source aperture correction, PSF-plus-constant extraction, and a constant correction.
+
 ## License
 
 Distributed under GPLv3. See `LICENSE`.

@@ -30,3 +30,15 @@ Prism enables enhanced model display at import time so that models print cleanly
 This is a convenience patch, not a structural compatibility patch. It can be disabled when needed, but it is enabled by default because inspecting fitted models is a central Prism workflow.
 
 The underlying model objects remain Astropy-compatible models.
+
+## Spatial PSF models
+
+`MoffatPSF` and `EllipticalMoffatPSF` in `spatial.py` are ordinary Astropy
+`Fittable2DModel` subclasses. They expose FWHM directly and use `beta` for the
+wing exponent. `amplitude` is peak brightness. The elliptical model has
+`fwhm_x`, `fwhm_y` along its rotated principal axes and `theta` in radians.
+It remains centrosymmetric; axis labels do not impose major/minor ordering.
+
+Native Astropy Gaussian2D remains supported (its `x_fwhm` and `y_fwhm`
+properties already expose the derived FWHM). The chromatic workflow and
+compact model persistence are documented under `prism.modeling.psf`.

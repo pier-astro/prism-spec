@@ -1,5 +1,5 @@
 """
-prism.modeling.models — Astropy-compliant spectral models.
+prism.modeling.models — Astropy-compliant spectral and spatial models.
 
 Single-line models
 ------------------
@@ -33,6 +33,11 @@ Empirical models
 ``BSpline``
     Dynamic B-spline where the coefficients are exposed as fit parameters.
 
+Spatial models
+--------------
+``MoffatPSF``, ``EllipticalMoffatPSF``
+    Circular and elliptical Astropy profiles with fitted FWHM and beta.
+
 AGN factory functions
 ---------------------
 ``nlr()``, ``blr()``, ``fe()``, ``fe_uv()``, ``balmer()``
@@ -53,6 +58,7 @@ from .components import get_components, ModelComponents
 
 from .agn import *
 from .empirical import *
+from .spatial import *
 
 from ..operators import instrument                               # models.instrument.*
 from ..operators.instrument import InstrumentResponse, SpectralResponse

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prism-spec"
 dynamic = ["version"]
-description = "AGN spectral handling tools"
+description = "Imaging and spectral handling tools"
 authors = [
     { name = "Pierpaolo", email = "pierpaolo.condo@gmail.com" }
     ]
