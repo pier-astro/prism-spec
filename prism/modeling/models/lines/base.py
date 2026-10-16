@@ -1,22 +1,15 @@
 """Shared base class for analytic line models."""
 import numpy as np
-import pandas as pd
 from scipy.interpolate import CubicSpline
 
 import astropy.units as u
 from astropy.modeling import Fittable1DModel, Parameter
 
-from ...metrics import Metric
 from . import profiles
 
-from .tables import (
-    c_kms,
-    _get_param_limits,
-    _has_param_std,
-)
 
 class LineModelBase(Fittable1DModel):
-    """Line-model base with velocity conversion and flux/EW propagation.
+    """Common Astropy adapter for spectral units, instrumental widths and profiles.
 
     ``velocity_unit`` defaults to km/s and sets the numeric unit of ``offset``,
     ``fwhm``, ``fwhm_G``, and ``fwhm_L``, including their bounds and uncertainties.
@@ -32,6 +25,7 @@ class LineModelBase(Fittable1DModel):
 
     input_units_allow_dimensionless = {'x': True}
     input_units_equivalencies = {'x': u.spectral()}
+    _profile_width = staticmethod(profiles._profile_fwhm)
 
     @staticmethod
     def _normalize_instfwhm(instfwhm):
@@ -43,6 +37,8 @@ class LineModelBase(Fittable1DModel):
             instfwhm = float(instfwhm.to_value(u.km/u.s))
         if np.isscalar(instfwhm):
             value = float(instfwhm)
+            if not np.isfinite(value) or value < 0:
+                raise ValueError('Instrumental FWHM must be finite and non-negative.')
             return value, 'constant', value, None
 
         arr = np.asarray(instfwhm, dtype=float)
@@ -55,14 +51,15 @@ class LineModelBase(Fittable1DModel):
             raise ValueError(
                 "instfwhm must be a scalar or a 2-column [wavelength, fwhm] array.")
 
+        if len(arr) == 0 or not np.isfinite(arr).all() or np.any(arr[:, 1] < 0):
+            raise ValueError('Instrumental table must contain finite positions and non-negative FWHM values.')
+
         if arr.shape[0] == 1:
             return arr.copy(), 'constant', float(arr[0, 1]), None
 
         order = np.argsort(arr[:, 0])
         arr = arr[order]
         wl, fwhm = arr[:, 0], arr[:, 1]
-        if np.any(~np.isfinite(wl)) or np.any(~np.isfinite(fwhm)):
-            raise ValueError("instfwhm wavelength/FWHM values must be finite.")
         if np.any(np.diff(wl) <= 0):
             raise ValueError("instfwhm wavelengths must be strictly increasing.")
 
@@ -257,47 +254,28 @@ class LineModelBase(Fittable1DModel):
         return None
 
     @staticmethod
-    def _output_unit_from_amplitude(amplitude):
-        return amplitude.unit if isinstance(amplitude, u.Quantity) else None
-
-    def _common_output_unit(self, amplitudes):
-        output_unit = None
-        for amplitude in amplitudes:
-            unit = self._output_unit_from_amplitude(amplitude)
-            if unit is None:
-                continue
-            if output_unit is None:
-                output_unit = unit
-                continue
-            try:
-                (1.0 * unit).to(output_unit)
-            except Exception as exc:
-                raise ValueError(
-                    "All quantity amplitudes in a line group must share compatible output units.") from exc
-        return output_unit
-
-    @staticmethod
     def _parameter_payload(param):
         return param.quantity if getattr(param, 'unit', None) is not None else param.value
 
     def _coerce_domain_axis(self, x):
+        if isinstance(x, u.Quantity):
+            x = x.to_value(self._position_unit, equivalencies=u.spectral())
         return np.asarray(x, dtype=float)
 
     def _default_domain_grid(self, center_x, fwhm_x, window=None, num=4096):
         if window is None:
+            if not np.isfinite(fwhm_x) or fwhm_x <= 0:
+                raise ValueError('A zero-width profile requires an explicit integration grid or window.')
             hw = 6.0 * fwhm_x
             low, high = center_x - hw, center_x + hw
         else:
             low, high = window
-            low = float(low.value) if isinstance(low, u.Quantity) else float(low)
-            high = float(high.value) if isinstance(high, u.Quantity) else float(high)
+            if isinstance(low, u.Quantity):
+                low = low.to_value(self._position_unit, equivalencies=u.spectral())
+            if isinstance(high, u.Quantity):
+                high = high.to_value(self._position_unit, equivalencies=u.spectral())
+            low, high = float(low), float(high)
         return np.linspace(low, high, int(num), dtype=float)
-
-    @staticmethod
-    def _metric_frame(rows, index):
-        frame = pd.DataFrame(rows, index=list(index), columns=['value', 'std', 'lolim', 'uplim', 'unit'])
-        frame['unit'] = [None if unit in (None, '') else u.Unit(unit) for unit in frame['unit']]
-        return frame
 
     def instfwhm_val(self, center):
         if self._instfwhm_mode == 'constant':
@@ -309,173 +287,41 @@ class LineModelBase(Fittable1DModel):
             return np.asarray(center, dtype=float) * 0.0
         return self._instfwhm_spline_deriv(center)
 
-    _flux_governing_params = ('amplitude',)
+    def _shared_values(self, values=None):
+        """Return scalar shared parameters, converting only velocities to km/s.
 
-    @property
-    def flux(self) -> Metric:
-        """Return a Metric with flux value, uncertainty, and confidence limits."""
-        flux_val = self._calc_flux()
-        flux_std = self._propagate_flux_std(flux_val)
-        flux_lo, flux_hi = self._propagate_flux_limits()
-        return Metric(
-            value=float(flux_val),
-            std=float(flux_std) if flux_std is not None else float('nan'),
-            lolim=float(flux_lo) if flux_lo is not None else float('nan'),
-            uplim=float(flux_hi) if flux_hi is not None else float('nan'),
-        )
-
-    def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096) -> Metric:
-        """Compute the equivalent width of the line.
-
-        Parameters
-        ----------
-        continuum : float, callable, or None
-            Local continuum level.
-        method : {'constant-continuum', 'integration'}
-        x : array-like, optional
-        window : (float, float), optional
-        num : int
-
-        Returns
-        -------
-        Metric
+        ``values`` follows ``_shared_params`` order. When omitted, read the
+        current model parameters; this path is also used by post-fit routines.
         """
-        if continuum is None:
-            center, _ = self._infer_center_fwhm_x()
-            continuum = self(center)
+        if values is None:
+            values = (getattr(self, name).value for name in self._shared_params)
+        return [self._as_kms(value) if name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L')
+                else self._as_value(value)
+                for name, value in zip(self._shared_params, values)]
 
-        if method == 'constant-continuum':
-            continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
-            if not np.isfinite(continuum_val) or continuum_val == 0.0:
-                result = Metric(value=float('nan'))
-                self.ew = result
-                return result
-            f = self.flux
-            ew_val = f.value / continuum_val
-            ew_std = None if f.std is None else (
-                float(f.std / abs(continuum_val)) if np.isfinite(f.std) else float('nan')
-            )
-            ew_lo = None if f.lolim is None else (
-                float(f.lolim / continuum_val) if np.isfinite(f.lolim) else float('nan')
-            )
-            ew_hi = None if f.uplim is None else (
-                float(f.uplim / continuum_val) if np.isfinite(f.uplim) else float('nan')
-            )
-            result = Metric(
-                value=ew_val,
-                std=ew_std,
-                lolim=ew_lo,
-                uplim=ew_hi,
-            )
-
-        elif method == 'integration':
-            if x is None:
-                center, fwhm_x = self._infer_center_fwhm_x()
-                x_arr = self._default_domain_grid(center, fwhm_x, window=window, num=num)
-            else:
-                x_arr = self._coerce_domain_axis(x)
-            y_line = np.asarray(self(x_arr), dtype=float)
-            if callable(continuum):
-                y_cont = np.asarray(continuum(x_arr), dtype=float)
-            else:
-                continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
-                y_cont = np.full_like(x_arr, continuum_val, dtype=float)
-            safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
-            try:
-                ew_val = float(np.trapezoid(y_line / safe, x_arr))
-            except AttributeError:
-                ew_val = float(np.trapz(y_line / safe, x_arr))
-            result = Metric(value=ew_val)
-
-        else:
-            raise ValueError("method must be 'constant-continuum' or 'integration'.")
-
-        self.ew = result
-        return result
-
-    def _infer_center_fwhm_x(self):
+    def _single_profile_args(self, pos, amp, weight, *shared):
+        """Map native position and km/s kinematics to peak, center and widths."""
         center = profiles.observed_center(
-            self.position.value, self._as_kms(self.offset.value), self.redshift.value, domain_family=self.domain_family)
-        if hasattr(self, 'fwhm'):
-            fwhm_x = self._as_kms(self.fwhm.value) / c_kms * center
-        elif hasattr(self, 'fwhm_G'):
-            fwhm_x = self._as_kms(self.fwhm_G.value) / c_kms * center
-        else:
-            fwhm_x = 10.0
-        return center, max(fwhm_x, 0.1)
+            pos, shared[0], shared[-1], domain_family=self.domain_family)
+        values = self._profile_params(
+            center, amp, weight, *shared[1:], self.instfwhm_val(center))
+        return (values[0], center, *values[1:])
 
-    def _flux_jacobian(self, flux_val):
-        from astropy.modeling.fitting import model_to_fit_params
-        _, fit_indices, _ = model_to_fit_params(self)
-        eps = 1e-6
-        jac = np.zeros(len(fit_indices))
-        all_params = self.parameters
-        for j, idx in enumerate(fit_indices):
-            orig = float(all_params[idx])
-            delta = abs(orig) * eps if orig != 0 else eps
-            if orig == 0 and self.param_names[idx] in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                delta /= self._to_kms
-            all_params[idx] = orig + delta
-            self.parameters = all_params
-            jac[j] = (self._calc_flux() - flux_val) / delta
-            all_params[idx] = orig
-        self.parameters = all_params
-        return jac, fit_indices
+    def _profile_derivatives(self, x, pos, amp, weight, *shared):
+        """Return value and derivatives in amplitude, position, shared order."""
+        center = profiles.observed_center(
+            pos, shared[0], shared[-1], domain_family=self.domain_family)
+        return self._profile_deriv(
+            x, pos, amp, weight, *shared,
+            self.instfwhm_val(center), self.instfwhm_deriv(center),
+            domain_family=self.domain_family)
 
-    def _propagate_flux_std(self, flux_val) -> float | None:
-        cov = getattr(self, '_param_cov', None)
-        if cov is not None:
-            jac, _ = self._flux_jacobian(flux_val)
-            var = float(jac @ cov @ jac)
-            return np.sqrt(var) if var > 0 else None
+    def _single_profile_deriv(self, x, pos, amp, weight, *shared):
+        result = self._profile_derivatives(x, pos, amp, weight, *shared)
+        return result[0], result[1], *result[3:]  # rest positions are tabulated
 
-        eps = 1e-6
-        var_flux = 0.0
-        has_any = False
-        for pname in self.param_names:
-            param = getattr(self, pname)
-            if not _has_param_std(param):
-                continue
-            has_any = True
-            orig = param.value
-            delta = abs(orig) * eps if orig != 0 else eps
-            if orig == 0 and pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                delta /= self._to_kms
-            param.value = orig + delta
-            df = (self._calc_flux() - flux_val) / delta
-            param.value = orig
-            var_flux += (df * param.std) ** 2
-        return np.sqrt(var_flux) if has_any and var_flux > 0 else None
-
-    def _propagate_flux_limits(self):
-        governing = list(self._flux_governing_params)
-        amp_pname = governing[0]
-        amp_param = getattr(self, amp_pname)
-        _, _, amp_has_lo, amp_has_hi = _get_param_limits(amp_param)
-        if not amp_has_lo and not amp_has_hi:
-            return None, None
-
-        def _eval_at(overrides):
-            orig = {}
-            for p, v in overrides.items():
-                orig[p] = getattr(self, p).value
-                getattr(self, p).value = v
-            f = self._calc_flux()
-            for p, v in orig.items():
-                getattr(self, p).value = v
-            return f
-
-        def _compute(use_lo):
-            has_amp = amp_has_lo if use_lo else amp_has_hi
-            if not has_amp:
-                return None
-            overrides = {amp_pname: amp_param.lolim if use_lo else amp_param.uplim}
-            for p in governing[1:]:
-                _, _, has_lo, has_hi = _get_param_limits(getattr(self, p))
-                if use_lo and has_lo:
-                    overrides[p] = getattr(self, p).lolim
-                elif not use_lo and has_hi:
-                    overrides[p] = getattr(self, p).uplim
-            return _eval_at(overrides)
-
-        return _compute(True), _compute(False)
+    def _profile_integral(self, pos, amp, weight, *shared):
+        """Full-profile integral in amplitude times native spectral units."""
+        args = self._single_profile_args(pos, amp, weight, *shared)
+        value = self._profile_flux(args[0], *args[2:])
+        return value*self._position_unit if isinstance(value, u.Quantity) else value

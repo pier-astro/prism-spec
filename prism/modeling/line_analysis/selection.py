@@ -19,7 +19,6 @@ from ..models.lines import (
     LineGroupBase,
     LorentzianLine, LorentzianLines,
     VoigtLine, VoigtLines,
-    sigma2fwhm,
 )
 from ..models.lines import profiles
 
@@ -55,24 +54,8 @@ def _selector_position_value(position, position_unit=None) -> float | None:
     return float(position)
 
 
-def _approx_voigt_fwhm(fwhm_g, fwhm_l):
-    fwhm_g = np.asarray(fwhm_g, dtype=float)
-    fwhm_l = np.asarray(fwhm_l, dtype=float)
-    return 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l ** 2 + fwhm_g ** 2)
-
-
 def _profile_width_from_args(model, args):
-    if isinstance(model, (GaussianLine, GaussianLines)):
-        return float(args[2] * sigma2fwhm)
-    if isinstance(model, (LorentzianLine, LorentzianLines)):
-        fwhm_g = float(args[2] * sigma2fwhm)
-        fwhm_l = float(2.0 * args[3])
-        return float(_approx_voigt_fwhm(fwhm_g, fwhm_l))
-    if isinstance(model, (VoigtLine, VoigtLines)):
-        fwhm_g = float(args[2] * sigma2fwhm)
-        fwhm_l = float(2.0 * args[3])
-        return float(_approx_voigt_fwhm(fwhm_g, fwhm_l))
-    raise TypeError(f"Unsupported line model type: {type(model).__name__}")
+    return float(model._profile_width(*args[2:]))
 
 
 def _linegroup_template_index(model, template_name):
@@ -139,7 +122,7 @@ def _evaluate_linegroup_template(model, template_name, x, position=None):
     idx, resolved, member_idx, member_pos, member_weight = _resolve_linegroup_member(
         model, template_name, position=position)
     amplitude_param = getattr(model, model._param_names_list[idx])
-    amplitude = model._parameter_payload(amplitude_param)
+    amplitude = amplitude_param.value
     amplitude_unit = getattr(amplitude_param, 'unit', None)
     shared_values = model._shared_values()
 
@@ -157,26 +140,19 @@ def _evaluate_linegroup_template(model, template_name, x, position=None):
     widths.append(_profile_width_from_args(model, args))
 
     values = total[0] if is_scalar else total
+    if amplitude_unit is not None:
+        values = values*amplitude_unit
     return (values, np.asarray(centers, dtype=float),
             np.asarray(widths, dtype=float), resolved)
 
 
 def _evaluate_single_line(model, x):
     values = model(x)
-    center = profiles.observed_center(
-        model.position.value, model._as_kms(model.offset.value), model.redshift.value,
-        domain_family=model.domain_family)
-
-    if isinstance(model, (GaussianLine, LorentzianLine)):
-        fwhm = model._as_kms(model.fwhm.value) / profiles.C_KMS * center
-    elif isinstance(model, VoigtLine):
-        fwhm_g = model._as_kms(model.fwhm_G.value) / profiles.C_KMS * center
-        fwhm_l = model._as_kms(model.fwhm_L.value) / profiles.C_KMS * center
-        fwhm = float(_approx_voigt_fwhm(fwhm_g, fwhm_l))
-    else:
-        raise TypeError(f"Unsupported line model type: {type(model).__name__}")
-
-    return values, np.asarray([center], dtype=float), np.asarray([fwhm], dtype=float)
+    args = model._single_profile_args(
+        model.position.value, 1.0, 1.0, *model._shared_values())
+    center = args[1]
+    width = _profile_width_from_args(model, args)
+    return values, np.asarray([center], dtype=float), np.asarray([width], dtype=float)
 
 
 def _evaluate_component_profile(model, x):
@@ -188,7 +164,7 @@ def _evaluate_component_profile(model, x):
         shared_values = model._shared_values()
         for idx in range(model._n_templates):
             amplitude_param = getattr(model, model._param_names_list[idx])
-            amplitude = model._parameter_payload(amplitude_param)
+            amplitude = amplitude_param.value
             amplitude_unit = getattr(amplitude_param, 'unit', None)
             for pos, weight in zip(model._tmpl_positions[idx],
                                    model._tmpl_weights[idx]):

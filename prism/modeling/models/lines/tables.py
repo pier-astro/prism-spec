@@ -144,6 +144,8 @@ def normalize_linetable(data, position_unit=None):
     table['name'] = np.asarray(table['name'], dtype=str)
     table['position'] = _position_quantity(table['position'], position_unit=position_unit)
     table['weight'] = np.asarray(table['weight'], dtype=float)
+    if not np.isfinite(table['position'].value).all() or not np.isfinite(table['weight']).all():
+        raise ValueError('Line positions and weights must be finite.')
     return table
 
 
@@ -567,19 +569,3 @@ def _make_unique(names):
             suffix = '_' + string.ascii_lowercase[counts[name]]
             result.append(name + suffix)
     return result
-
-
-def _has_param_std(param) -> bool:
-    return hasattr(param, 'std') and param.std is not None and np.isfinite(param.std)
-
-
-def _get_param_limits(param):
-    has_lo = hasattr(param, 'lolim') and param.lolim is not None and np.isfinite(param.lolim)
-    has_hi = hasattr(param, 'uplim') and param.uplim is not None and np.isfinite(param.uplim)
-    lo = param.lolim if has_lo else param.value
-    hi = param.uplim if has_hi else param.value
-    return lo, hi, has_lo, has_hi
-
-# ---------------------------------------------------------------------------
-# LineModelBase
-# ---------------------------------------------------------------------------

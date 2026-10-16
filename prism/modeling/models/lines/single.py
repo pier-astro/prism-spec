@@ -9,9 +9,76 @@ from astropy.modeling import Parameter
 
 from . import profiles
 from .base import LineModelBase
+from ...metrics import Metric
+from . import _measurements
 
 
-class GaussianLine(LineModelBase):
+class _SingleLineBase(LineModelBase):
+    """Astropy adapter for one free-position line and its analytic measures."""
+
+    def evaluate(self, x, amplitude, position, *shared):
+        """Evaluate one profile after normalizing coordinates and kinematics."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        args = self._single_profile_args(
+            self._as_value(position), self._as_value(amplitude), 1.0,
+            *self._shared_values(shared))
+        values = self._profile_func(x_native, *args)
+        return values[0] if np.ndim(x) == 0 else values
+
+    def fit_deriv(self, x, amplitude, position, *shared):
+        """Return the parameter-major Jacobian in the model parameter units."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        result = self._profile_derivatives(
+            x_native, self._as_value(position), self._as_value(amplitude), 1.0,
+            *self._shared_values(shared))
+        derivatives = list(result[1:])
+        if self._to_kms != 1.0:
+            for i, name in enumerate(self.param_names):
+                if name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                    derivatives[i] = derivatives[i] * self._to_kms
+        return derivatives
+
+    def _calc_flux(self):
+        return self._profile_integral(
+            self.position.value, self._parameter_payload(self.amplitude), 1.0,
+            *self._shared_values())
+
+    @property
+    def flux(self) -> Metric:
+        """Analytic integrated flux with local covariance or independent errors."""
+        return _measurements._flux(
+            self, self._calc_flux, self.param_names, self._flux_governing_params)
+
+    def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096):
+        """Equivalent width using a fixed continuum or finite-grid integration.
+
+        An omitted continuum uses the model value at its shifted center.
+        Continuum uncertainty is not propagated. Integration has no error
+        estimate and uses the explicit grid, or a window of six effective FWHM.
+        """
+        if method not in ('constant-continuum', 'integration'):
+            raise ValueError("method must be 'constant-continuum' or 'integration'.")
+        if continuum is None:
+            center, _ = self._infer_center_fwhm_x()
+            continuum = self(center)
+        if method == 'constant-continuum':
+            result = _measurements._constant_eqw(self.flux, continuum, self._position_unit)
+        else:
+            center, width = self._infer_center_fwhm_x()
+            grid = self._default_domain_grid(center, width, window, num) if x is None else self._coerce_domain_axis(x)
+            line = self(grid)
+            line = line.value if isinstance(line, u.Quantity) else line
+            result = _measurements._integrated_eqw(
+                grid, line, continuum, self._position_unit, self.amplitude.unit)
+        self.ew = result
+        return result
+
+    def _infer_center_fwhm_x(self):
+        args = self._single_profile_args(self.position.value, 1.0, 1.0, *self._shared_values())
+        return args[1], float(self._profile_width(*args[2:]))
+
+
+class GaussianLine(_SingleLineBase):
     """Single Gaussian emission or absorption line.
 
     Parameters
@@ -19,7 +86,7 @@ class GaussianLine(LineModelBase):
     amplitude : float or astropy.units.Quantity, optional
         Peak amplitude in the chosen output domain. Default is ``1.0``.
     position : float or astropy.units.Quantity, optional
-        Rest wavelength of the transition. Default is ``5000 AA`` and is fixed by
+        Rest spectral position of the transition. Default is ``5000 AA`` and is fixed by
         default.
     offset : float or astropy.units.Quantity, optional
         Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
@@ -33,7 +100,7 @@ class GaussianLine(LineModelBase):
     Notes
     -----
     Prism parameterises line centroids and widths in velocity space while keeping
-    the physical transition anchored at a rest wavelength. Instrumental Gaussian
+    the physical transition anchored at a rest spectral position. Instrumental Gaussian
     broadening is folded into the intrinsic profile before evaluation, so the
     analytic flux and Jacobian remain available for fitting and uncertainty
     propagation.
@@ -54,53 +121,14 @@ class GaussianLine(LineModelBase):
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm')
     _separable_linear_params = ('amplitude',)
-
-    def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
-        x_native = self._coerce_domain_axis(x)
-        is_scalar = np.ndim(x) == 0
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_kms(offset)
-        fwhm = self._as_kms(fwhm)
-        redshift = self._as_value(redshift)
-        
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
-        amplitude = self._as_value(amplitude)
-        
-        amp_eff, sigma_eff = profiles.gaussian_profile_params(
-            center, amplitude, 1.0, fwhm, redshift, self.instfwhm_val(center))
-        values = profiles.gaussian(x_native, amp_eff, center, sigma_eff)
-        return values[0] if is_scalar else values
-
-    def fit_deriv(self, x, amplitude, position, offset, fwhm, redshift):
-        x_native = self._coerce_domain_axis(x)
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_kms(offset)
-        fwhm = self._as_kms(fwhm)
-        redshift = self._as_value(redshift)
-        
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
-        amplitude = self._as_value(amplitude)
-        
-        _, d_amp, d_pos, d_off, d_fwhm, d_z = profiles.gaussian_velocity_deriv(
-            x_native, position, amplitude, 1.0, offset, fwhm, redshift,
-            self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return [d_amp, d_pos, d_off * self._to_kms, d_fwhm * self._to_kms, d_z]
-
-    def _calc_flux(self):
-        center = profiles.observed_center(
-            self.position.value, self._as_kms(self.offset.value), self.redshift.value, domain_family=self.domain_family)
-        amplitude = self._parameter_payload(self.amplitude)
-        amp_eff, sigma_eff = profiles.gaussian_profile_params(
-            center, amplitude, 1.0, self._as_kms(self.fwhm.value),
-            self.redshift.value, self.instfwhm_val(center))
-        return profiles.gaussian_flux(amp_eff, sigma_eff)
+    _profile_func = staticmethod(profiles.gaussian)
+    _profile_params = staticmethod(profiles.gaussian_profile_params)
+    _profile_deriv = staticmethod(profiles.gaussian_velocity_deriv)
+    _profile_flux = staticmethod(profiles.gaussian_flux)
+    _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
 
 
-class LorentzianLine(LineModelBase):
+class LorentzianLine(_SingleLineBase):
     """Single Lorentzian line with optional instrumental Gaussian broadening.
 
     Parameters
@@ -108,7 +136,7 @@ class LorentzianLine(LineModelBase):
     amplitude : float or astropy.units.Quantity, optional
         Peak amplitude in the chosen output domain. Default is ``1.0``.
     position : float or astropy.units.Quantity, optional
-        Rest wavelength of the transition. Default is ``5000 AA``.
+        Rest spectral position of the transition. Default is ``5000 AA``.
     offset : float or astropy.units.Quantity, optional
         Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
     fwhm : float or astropy.units.Quantity, optional
@@ -132,65 +160,14 @@ class LorentzianLine(LineModelBase):
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm')
     _separable_linear_params = ('amplitude',)
-
-    def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
-        x_native = self._coerce_domain_axis(x)
-        is_scalar = np.ndim(x) == 0
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_kms(offset)
-        fwhm = self._as_kms(fwhm)
-        redshift = self._as_value(redshift)
-        
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
-        amplitude = self._as_value(amplitude)
-        
-        amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
-            center, amplitude, 1.0, fwhm, redshift, self.instfwhm_val(center))
-        if sigma_inst == 0.0:
-            values = profiles.lorentzian(x_native, amp_eff, center, gamma)
-        else:
-            values = profiles.voigt(x_native, amp_eff, center, sigma_inst, gamma)
-        return values[0] if is_scalar else values
-
-    def fit_deriv(self, x, amplitude, position, offset, fwhm, redshift):
-        x_native = self._coerce_domain_axis(x)
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_value(offset, self.velocity_unit)
-        fwhm = self._as_value(fwhm, self.velocity_unit)
-        redshift = self._as_value(redshift)
-        
-        amplitude = self._as_value(amplitude)
-        
-        params = [amplitude, position, offset, fwhm, redshift]
-        base = np.asarray(self.evaluate(x_native, *params), dtype=float)
-        derivs = []
-        eps = 1e-6
-        for i, pval in enumerate(params):
-            delta = abs(pval) * eps if pval != 0 else eps
-            if pval == 0 and i in (2, 3):  # offset and FWHM use the selected unit
-                delta /= self._to_kms
-            shifted = list(params)
-            shifted[i] = pval + delta
-            derivs.append((np.asarray(self.evaluate(x_native, *shifted), dtype=float) - base) / delta)
-        return derivs
-
-    def _calc_flux(self):
-        center = profiles.observed_center(
-            self.position.value, self._as_kms(self.offset.value), self.redshift.value, domain_family=self.domain_family)
-        amplitude = self._parameter_payload(self.amplitude)
-        amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
-            center, amplitude, 1.0, self._as_kms(self.fwhm.value),
-            self.redshift.value, self.instfwhm_val(center))
-        if sigma_inst == 0.0:
-            return profiles.lorentzian_flux(amp_eff, gamma)
-        return profiles.voigt_flux(amp_eff, sigma_inst, gamma)
+    _profile_func = staticmethod(profiles.voigt)
+    _profile_params = staticmethod(profiles.lorentzian_profile_params)
+    _profile_deriv = staticmethod(profiles._lorentzian_velocity_deriv)
+    _profile_flux = staticmethod(profiles.voigt_flux)
+    _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
 
 
-class VoigtLine(LineModelBase):
+class VoigtLine(_SingleLineBase):
     """Single Voigt line with independent Gaussian and Lorentzian widths.
 
     Parameters
@@ -198,7 +175,7 @@ class VoigtLine(LineModelBase):
     amplitude : float or astropy.units.Quantity, optional
         Peak amplitude in the chosen output domain. Default is ``1.0``.
     position : float or astropy.units.Quantity, optional
-        Rest wavelength of the transition. Default is ``5000 AA``.
+        Rest spectral position of the transition. Default is ``5000 AA``.
     offset : float or astropy.units.Quantity, optional
         Velocity shift relative to the rest wavelength. Default is ``0 km / s``.
     fwhm_G : float or astropy.units.Quantity, optional
@@ -227,51 +204,8 @@ class VoigtLine(LineModelBase):
     redshift = Parameter(default=0.0, fixed=True)
     _flux_governing_params = ('amplitude', 'fwhm_G', 'fwhm_L')
     _separable_linear_params = ('amplitude',)
-
-    def evaluate(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
-        x_native = self._coerce_domain_axis(x)
-        is_scalar = np.ndim(x) == 0
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_kms(offset)
-        fwhm_G = self._as_kms(fwhm_G)
-        fwhm_L = self._as_kms(fwhm_L)
-        redshift = self._as_value(redshift)
-        
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
-        amplitude = self._as_value(amplitude)
-        
-        amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
-            center, amplitude, 1.0, fwhm_G, fwhm_L, redshift,
-            self.instfwhm_val(center))
-        values = profiles.voigt(x_native, amp_eff, center, sigma_eff, gamma)
-        return values[0] if is_scalar else values
-
-    def fit_deriv(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
-        x_native = self._coerce_domain_axis(x)
-        x_native = np.atleast_1d(x_native)
-        
-        position = self._as_value(position)
-        offset = self._as_kms(offset)
-        fwhm_G = self._as_kms(fwhm_G)
-        fwhm_L = self._as_kms(fwhm_L)
-        redshift = self._as_value(redshift)
-        
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
-        amplitude = self._as_value(amplitude)
-        
-        _, d_amp, d_pos, d_off, d_fG, d_fL, d_z = profiles.voigt_velocity_deriv(
-            x_native, position, amplitude, 1.0, offset, fwhm_G, fwhm_L, redshift,
-            self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return [d_amp, d_pos, d_off * self._to_kms,
-                d_fG * self._to_kms, d_fL * self._to_kms, d_z]
-
-    def _calc_flux(self):
-        center = profiles.observed_center(
-            self.position.value, self._as_kms(self.offset.value), self.redshift.value, domain_family=self.domain_family)
-        amplitude = self._parameter_payload(self.amplitude)
-        amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
-            center, amplitude, 1.0, self._as_kms(self.fwhm_G.value),
-            self._as_kms(self.fwhm_L.value), self.redshift.value, self.instfwhm_val(center))
-        return profiles.voigt_flux(amp_eff, sigma_eff, gamma)
+    _profile_func = staticmethod(profiles.voigt)
+    _profile_params = staticmethod(profiles.voigt_profile_params)
+    _profile_deriv = staticmethod(profiles.voigt_velocity_deriv)
+    _profile_flux = staticmethod(profiles.voigt_flux)
+    _shared_params = {'offset': 0.0, 'fwhm_G': 1000.0, 'fwhm_L': 1000.0, 'redshift': 0.0}

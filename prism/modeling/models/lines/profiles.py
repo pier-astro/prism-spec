@@ -20,6 +20,20 @@ C_AA_S = 2.99792458e18  # speed of light in Angstrom / s
 HC_AA_EV = 12398.419843320027  # h * c in Angstrom * eV
 DOMAIN_FAMILIES = ('wavelength', 'linear')
 
+
+def _profile_fwhm(sigma, gamma=0.0):
+    """Width estimate for grid preparation, using the existing Voigt approximation.
+
+    Gaussian and Lorentzian limits are exact. Actual measured FWHM remains a
+    crossing measurement in line_analysis, rather than this grid heuristic.
+    """
+    gaussian_width = np.asarray(sigma)*SIGMA2FWHM
+    lorentzian_width = 2.0*np.asarray(gamma)
+    if np.all(lorentzian_width == 0):
+        return gaussian_width
+    estimate = .5346*lorentzian_width+np.sqrt(.2166*lorentzian_width**2+gaussian_width**2)
+    return np.where(gaussian_width == 0, lorentzian_width, estimate)
+
 # ---------------------------------------------------------------------------
 # Pure profile functions
 # ---------------------------------------------------------------------------
@@ -97,10 +111,6 @@ def voigt_deriv(x, amplitude, center, sigma, gamma):
     if sigma == 0:
         val, d_amp, d_center, d_gamma = lorentzian_deriv(x, amplitude, center, gamma)
         return val, d_amp, d_center, np.zeros_like(val), d_gamma
-    if gamma == 0:
-        val, d_amp, d_center, d_sigma = gaussian_deriv(x, amplitude, center, sigma)
-        return val, d_amp, d_center, d_sigma, np.zeros_like(val)
-
     sqrt2 = np.sqrt(2)
     z = (x - center + 1j * gamma) / (sigma * sqrt2)
     w = wofz(z)
@@ -325,3 +335,17 @@ def voigt_velocity_deriv(x, pos, amplitude, weight, offset, fwhm_G, fwhm_L,
            + d_sigma_eff * dse_dz + d_gamma * dg_dz)
 
     return val, d_amp, d_pos, d_off, d_fwhm_G, d_fwhm_L, d_z
+
+
+def _lorentzian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift,
+                               instfwhm_val, instfwhm_deriv_val,
+                               domain_family='wavelength'):
+    """Lorentzian plus Gaussian instrument: Voigt with zero intrinsic sigma.
+
+    Returns value and derivatives in amplitude, position, offset, FWHM and
+    redshift order, matching ``gaussian_velocity_deriv``. Velocities are km/s.
+    """
+    value, d_amp, d_pos, d_off, _, d_width, d_z = voigt_velocity_deriv(
+        x, pos, amplitude, weight, offset, 0.0, fwhm, redshift,
+        instfwhm_val, instfwhm_deriv_val, domain_family=domain_family)
+    return value, d_amp, d_pos, d_off, d_width, d_z

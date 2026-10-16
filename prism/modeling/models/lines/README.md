@@ -1,383 +1,128 @@
-# prism.modeling.models.lines
+# Spectral lines
 
-Emission-line models for Prism, implemented as Astropy `Fittable1DModel` subclasses.
+`GaussianLine`, `LorentzianLine` and `VoigtLine` describe individual lines.
+`GaussianLines`, `LorentzianLines` and `VoigtLines` describe templates whose
+members share kinematics and an amplitude scaled by tabulated weights.
+The six models remain Astropy models; their numerical profile functions are
+independent of Astropy parameter objects.
 
-This module provides two closely related layers:
+## Coordinates, amplitudes and widths
 
-- analytic single-line models: `GaussianLine`, `LorentzianLine`, `VoigtLine`
-- analytic line-group models: `GaussianLines`, `LorentzianLines`, `VoigtLines`
+Positions and evaluation retain the native spectral unit. Length uses
+`position * (1 + redshift) * exp(offset / c)` for the center; energy and
+frequency use the inverse factor. The domain is inferred from the position
+unit, not selected with a `domain` constructor argument.
 
-The goal is to keep the public API simple while preserving physically meaningful parameterisation and native Astropy behaviour.
+Amplitudes are peak parameters: a template member has effective peak
+`amplitude * weight / (1 + redshift)`. Weights therefore specify relative
+peaks, not necessarily equal integrated-flux ratios. Coordinate-unit conversion
+on evaluation does not redefine the model's spectral-density convention.
+Explicit table-domain conversion utilities handle the associated weight changes.
 
-## Concept
+Intrinsic widths are FWHM in velocity units. `VoigtLine(s)` keeps separate
+Gaussian and Lorentzian FWHM parameters. The numerical Gaussian sigma and
+Lorentzian half-width are derived from those parameters and each shifted center.
+`instfwhm` adds a Gaussian instrumental width; a Lorentzian with nonzero
+instrumental width is evaluated as a Voigt profile. General matrix responses
+remain in `prism.modeling.operators`, separate from this Gaussian prescription.
 
-These models are built for spectral lines described by:
+## Units
 
-- a rest-frame transition position
-- a velocity offset relative to that rest position
-- a velocity width
-- an optional redshift
-- an optional instrumental broadening term
-
-The line shape is evaluated internally in wavelength space in Angstrom, and can then be exposed in:
-
-- wavelength
-- frequency
-- energy
-
-through a thin spectral-domain transform. The internal physical reference remains the rest wavelength of the transition.
-
-## Structure
-
-- `profiles.py`
-  Pure profile functions, flux formulae, Jacobians, and domain conversion helpers.
-- `base.py`
-  Shared line-model base class plus flux and EW handling.
-- `tables.py`
-  Line-table normalisation, spectral-domain conversion, local-resource setup, and wavelength trimming.
-- `single.py`
-  Single-line Astropy model subclasses.
-- `groups.py`
-  Multi-line models built from line templates. The dynamic factory prepares
-  Astropy parameter descriptors and template metadata; group evaluation and
-  derivatives are shared methods, outside the factory. The same shared-parameter
-  conversion is used by evaluation, flux/EW calculations and line selection.
-- `__init__.py`
-  Public entry points.
-
-## Physical Overview
-
-### Rest Positions
-
-All line templates are stored internally as rest wavelengths in Angstrom.
-
-For the built-in resources under `resources/lines`, this means:
-
-- positions are stored explicitly in Angstrom inside ECSV files
-- the line table metadata records `medium='air'`
-
-For user-provided inputs, Prism normalises everything into the same internal wavelength representation.
-
-### Velocity Parameters
-
-Offsets and widths are parameterised in velocity units, typically `km / s`.
-
-`velocity_unit` selects the unit of the numeric intrinsic velocity parameters
-(`offset`, `fwhm`, `fwhm_G`, `fwhm_L`). The default is `u.km / u.s`.
-Bare numbers use the selected unit; velocity `Quantity` inputs are converted
-to it during construction. Omitted parameters retain their physical defaults:
-choosing m/s does not make an otherwise default line a thousand times narrower.
-Bounds, fitted values, standard deviations and covariance entries refer to
-these parameter units. Quantity bounds supplied at construction are converted
-as well; numeric bounds use the selected unit.
-
-Line selections and their automatically inferred windows respect this velocity
-unit too. Geometric measurements such as the measured FWHM remain in the native
-spectral-axis unit; choosing m/s for a model parameter does not change that axis.
+`velocity_unit` selects the unit of `offset`, `fwhm`, `fwhm_G`, and `fwhm_L`.
+It defaults to km/s. Numbers use the selected unit; Quantity inputs and
+Quantity bounds are converted at construction. Omitted parameters retain
+their physical defaults. Values, numeric bounds and attached errors use the
+selected unit; covariance entries use the corresponding products of units.
 
 ```python
-line = GaussianLine(position=5007 * u.AA, fwhm=300 * u.km/u.s,
+import astropy.units as u
+from prism.modeling.models.lines import GaussianLine, GaussianLines
+
+line = GaussianLine(position=5007*u.AA, fwhm=300*u.km/u.s,
                     velocity_unit=u.m/u.s)
-assert line.fwhm.quantity == 300_000 * u.m/u.s
+assert line.fwhm.quantity == 300_000*u.m/u.s
 ```
 
-The numerical profiles use km/s; the conversion factor is prepared once and
-included in velocity derivatives. Construct a new model when changing
-`velocity_unit`. When updating parameter values later, use the selected unit;
-directly replacing a parameter's unit or changing `velocity_unit` does not
-rescale its bounds, covariance or attached uncertainties. Model serialization
-preserves the selected unit; old definitions without it retain km/s behavior.
+The profile calculation uses km/s with a prepared conversion factor.
+Construct a new model to change `velocity_unit`: replacing unit attributes
+does not convert attached bounds, errors or covariance. Links between components
+using different numeric units must express the conversion explicitly.
 
-Numeric `instfwhm` inputs remain in km/s independently of `velocity_unit`,
-including column two of instrumental tables. Column one uses the native
-spectral unit. A scalar velocity `Quantity` is converted to km/s. This avoids
-reinterpreting an existing instrumental table when the parameter unit changes.
+Numeric `instfwhm` is always in km/s, independently of `velocity_unit`.
+A scalar velocity Quantity is accepted. A numeric two-column table contains
+native spectral positions and FWHM in km/s. Instrumental inputs must be finite
+and widths non-negative; an instrumental table must have distinct positions.
 
-This keeps the parameterisation stable across different lines and observational setups:
+## Constructing templates
 
-- `offset` shifts the observed centre relative to the rest transition
-- `fwhm`, `fwhm_G`, and `fwhm_L` describe the intrinsic line width in velocity space
-- `instfwhm` adds instrumental broadening in the same velocity convention
-
-### Spectral Domains
-
-The model `domain` controls the x-axis on which the model is evaluated:
-
-- `domain='wavelength'` returns spectral density per Angstrom
-- `domain='frequency'` returns spectral density per Hz
-- `domain='energy'` returns spectral density per eV
-
-If the amplitude is a quantity, the returned profile, flux, and EW follow that domain consistently.
-
-### Line Lists and Media
-
-Line-group models are built from line tables with columns:
-
-- `name`
-- `position`
-- optional `weight`
-
-Internally Prism stores them as `QTable` with:
-
-- `position` in Angstrom
-- `weight` as a numeric scaling factor
-- `meta['medium']` set to `air` or `vacuum`
-
-Medium resolution follows a strict precedence rule:
-
-- an explicit `medium=...` passed to the line model constructor wins
-- otherwise, if an input ECSV line table declares `meta['medium']`, that file header wins
-- otherwise Prism falls back to the current session default medium
-- the session default medium is `air` unless changed with `set_medium(...)`
-
-If a file declares one medium and the line model is constructed with another, Prism converts the tabulated line positions accordingly before building the model.
-
-If the input line positions are supplied in frequency or energy units, Prism converts them to wavelength immediately and assigns `medium='vacuum'`, because those spectral conversions are vacuum definitions.
-
-For arrays or other inputs that do not carry medium metadata, Prism assumes the values are already expressed in the requested medium. If no medium is requested, the session default applies.
-
-## Units and Astropy Conventions
-
-Prism follows Astropy-style parameter unit conventions:
-
-- parameters with declared units accept either plain floats or `Quantity`
-- plain floats are interpreted in the declared parameter unit
-- amplitudes are unitless by default unless the user passes a `Quantity`
-- unit strings such as `'km / s'` or `'Jy'` are normalised with `astropy.units.Unit`
-
-That means all of the following are valid:
+`from_arrays`, `from_csv`, and `from_templates` converge on the same table
+preparation and parameter factory. A table contains `name`, `position`, and
+optional `weight` columns. Repeated names with explicit weights form one
+template; without weights, names are made unique and amplitudes independent.
+The first appearance of each name determines parameter order.
 
 ```python
-from prism.modeling.models import GaussianLine
-
-line = GaussianLine(amplitude=5.0, position=5007.0, offset=0.0, fwhm=500.0)
-line_q = GaussianLine(amplitude=3.0, position=5007.0, fwhm=500.0)
-```
-
-and, with explicit quantities:
-
-```python
-import astropy.units as u
-from prism.modeling.models import GaussianLine
-
-line = GaussianLine(
-    amplitude=3.0 * u.Jy,
-    position=5007.0 * u.AA,
-    offset=0.0 * u.km / u.s,
-    fwhm=500.0 * u.km / u.s,
-)
-```
-
-## Main Attributes and Properties
-
-Single-line models expose Astropy parameters such as:
-
-- `amplitude`
-- `position`
-- `offset`
-- `fwhm` or `fwhm_G` and `fwhm_L`
-- `redshift`
-
-Shared convenience properties include:
-
-- `domain`
-- `medium`
-- `flux`
-- `ew`
-
-`flux` and `ew` return `Metric` objects with:
-
-- `value`
-- `std`
-- `lolim`
-- `uplim`
-- `unit`
-- `quantity`
-
-Line-group models additionally expose:
-
-- `lines`
-  The normalised `QTable` of transitions used by the model.
-- `_templates`
-  The template names used to build one amplitude parameter per tied group.
-- `_param_names_list`
-  The generated amplitude parameter names.
-
-Group `flux` and `eqw(...)` return `DataFrame` objects with columns:
-
-- `value`
-- `std`
-- `lolim`
-- `uplim`
-- `unit`
-
-## Complete Examples
-
-### 1. Single Gaussian Line
-
-```python
-import numpy as np
-from prism.modeling.models import GaussianLine
-
-line = GaussianLine(
-    amplitude=5.0,
-    position=5007.0,
-    offset=0.0,
-    fwhm=500.0,
-    name='oiii',
-)
-
-x = np.linspace(4980.0, 5035.0, 2000)
-y = line(x)
-
-print(line.flux)
-print(line.eqw(100.0))
-```
-
-### 2. Quantity Amplitude in Frequency Space
-
-```python
-import astropy.units as u
-from prism.modeling.models import GaussianLine
-from prism.modeling.models.lines import profiles
-
-line = GaussianLine(
-    amplitude=3.0 * u.Jy,
-    position=5007.0 * u.AA,
-    fwhm=500.0 * u.km / u.s,
-    domain='frequency',
-)
-
-nu0 = (profiles.C_AA_S / 5007.0) * u.Hz
-
-print(line(nu0))
-print(line.flux.quantity)
-print(line.eqw(1.5 * u.Jy).quantity)
-```
-
-### 3. Line Group from Built-in ECSV Files
-
-```python
-from prism.modeling import models
-
-hhe_nlr = models.GaussianLines.from_csv(
-    name='hhe_nlr',
-  csv_files=['hydrogen.ecsv', 'helium.ecsv'],
-    amplitude=1,
-    offset=0,
-    fwhm=500,
-    instfwhm=120,
-    bounds={
-        'amplitude': (0, 100),
-        'offset': (-300, 300),
-        'fwhm': (0, 800),
-    },
-)
-
-print(hhe_nlr.lines)
-print(hhe_nlr.flux)
-```
-
-This remains valid. In this example:
-
-- `amplitude=1` stays unitless
-- `offset=0` is interpreted as `0 km / s`
-- `fwhm=500` is interpreted as `500 km / s`
-
-### 4. Custom ECSV with Energy Positions
-
-If an ECSV stores transition positions in energy or frequency units, the unit lives in the file itself.
-
-Example ECSV payload:
-
-```yaml
-# %ECSV 1.0
-# ---
-# datatype:
-# - {name: name, datatype: string}
-# - {name: position, datatype: float64, unit: eV}
-# - {name: weight, datatype: float64}
-# meta: !!omap
-# - {medium: vacuum}
-# schema: astropy-2.0
-name position weight
-Ha 1.8891391061 1.0
-NII 1.8833990031 1.0
-```
-
-Usage:
-
-```python
-from prism.modeling.models import GaussianLines
-from prism.modeling.models.lines import set_medium
-
-set_medium('vacuum')
-
-custom = GaussianLines.from_csv(
-  csv_files=['energy_lines.ecsv'],
-    amplitude=5.0,
-    fwhm=300.0,
-)
-
-print(custom.lines['position'])
-print(custom.lines.meta['medium'])
-```
-
-The table is converted internally to Angstrom and marked as vacuum.
-
-### 5. Plain CSV with Explicit Position Unit
-
-If a user keeps a plain CSV, Prism requires an explicit `position_unit`.
-
-```text
-name,position,weight
-Ha,1.8891391061,1.0
-NII,1.8833990031,1.0
-```
-
-```python
-custom = GaussianLines.from_csv(
-  csv_files=['energy_lines.csv'],
-  amplitude=5.0,
-  fwhm=300.0,
-  position_unit='eV',
-)
-```
-
-### 6. Header Medium vs Explicit Model Medium
-
-If a file declares `medium: air` but the model is constructed with `medium='vacuum'`, Prism converts the stored wavelengths before creating the line model.
-
-```python
-air_lines = GaussianLines.from_csv(csv_files=['hydrogen.ecsv'])
-vac_lines = GaussianLines.from_csv(csv_files=['hydrogen.ecsv'], medium='vacuum')
-
-print(air_lines.lines.meta['medium'])
-print(vac_lines.lines.meta['medium'])
-print(air_lines.lines['position'][0], vac_lines.lines['position'][0])
-```
-
-### 7. Array Input with Quantities
-
-```python
-import astropy.units as u
-from prism.modeling.models import GaussianLines
-
 group = GaussianLines.from_arrays(
-    names=['Ha', 'NII'],
-    pos=[1.8891391061, 1.8833990031] * u.eV,
-    amplitude=5.0,
-    fwhm=300.0,
+    names=['doublet', 'doublet'], pos=[4959., 5007.]*u.AA,
+    weights=[0.33, 1.0], amplitude=2., fwhm=300.,
+    bounds={'amplitude': (0, None), 'fwhm': (30, 1000)},
 )
-
-print(group.lines)
 ```
 
-In this path the spectral unit is inferred automatically from the quantity array.
+`from_templates` accepts Astropy tables, DataFrames and mappings. Plain
+positions require `position_unit`; Quantity columns retain their native unit.
+ECSV files carry units; plain CSV requires an explicit `position_unit`.
+Positions and weights must be finite. Supplied air/vacuum conventions are not
+silently inferred or changed; explicit conversion utilities remain in `tables`.
+The current global wavelength selection is applied during group construction.
 
-## Notes
+The class names and parameter names remain available to the existing fitters,
+link/freeze/bounds operations and serialization. `velocity_unit` is saved with
+the model; old definitions lacking this field retain km/s behavior.
 
-- The current internal reference for transition lists is always wavelength in Angstrom.
-- The built-in resource files remain air-wavelength line lists.
-- User inputs are not limited to Angstrom as long as the spectral unit is explicitly declared or inferable from a `Quantity`.
-- This file is intended as a compact addendum. The fuller design rationale and extended usage notes should move into the main documentation later.
+## Analytic measurements
+
+`line.flux` returns a `Metric`; `group.flux` returns a DataFrame indexed by
+template with `value`, `std`, `lolim`, `uplim`, and `unit`. Flux is integrated
+analytically over the whole profile. Quantity amplitudes produce the amplitude
+unit times the native spectral unit. Plain amplitudes retain numeric results.
+
+Uncertainty propagation uses the local free-parameter covariance in Astropy
+order. Without it, attached parameter errors are treated as independent.
+Missing uncertainty is NaN; a known zero error remains zero. Temporary parameter
+changes are restored even if a measurement fails. Stored amplitude/width limits
+produce parameter envelopes, not joint confidence intervals. Cross-component
+uncertainties and measurements of selected sums belong to `line_analysis`.
+
+`eqw(continuum=..., method='constant-continuum')` divides analytic flux by a
+fixed continuum. Continuum uncertainty is not propagated. With
+`method='integration'`, it integrates line/continuum on an explicit grid or
+an automatically inferred finite window and does not estimate errors. Automatic
+group windows contain all members and include instrumental broadening. Voigt
+width estimates prepare the grid; they do not replace measured FWHM crossings.
+Zero-width profiles require an explicit integration grid or window.
+
+An omitted continuum preserves the legacy self-profile normalization, using
+the profile at the center (mean transition position for a template). This is
+an effective width of that profile, not an independently measured continuum EW.
+For physical EWs, supply the continuum explicitly. Finite-window profile
+moments and grouped kinematics remain separate from analytic infinite-profile flux.
+
+## Implementation boundaries
+
+- `profiles.py`: numerical profiles, parameter conversion, analytic Jacobians,
+  flux formulas and width estimates. Lorentzian derivatives reuse the Voigt
+  Jacobian with zero intrinsic Gaussian width, including the Gaussian boundary.
+- `base.py`: common Astropy unit/instrument adapter and shared profile calls.
+- `single.py`: individual-line descriptors and a common single-line adapter.
+- `groups.py`: table constructors, parameter factory and explicit template sums.
+- `_measurements.py`: one analytic flux/error/EW implementation used by both
+  adapters; no dataset-specific pipeline or inference algorithm.
+- `tables.py`: table validation, conversions and resource utilities.
+
+A profile definition supplies evaluation, native-parameter conversion, analytic
+derivatives, an integral and a width estimate for automatic grids. The built-in
+width estimate covers Gaussian/Voigt parameters; other profiles override it.
+Single and grouped models bind the same functions;
+adding one does not require another uncertainty or EW implementation. Astropy
+parameter descriptor generation remains confined to the group constructor.

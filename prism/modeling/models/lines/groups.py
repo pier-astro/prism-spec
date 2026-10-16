@@ -12,13 +12,11 @@ import astropy.units as u
 from astropy.modeling import Parameter
 
 from ...metrics import Metric
-from . import profiles
+from . import profiles, _measurements
 from . import tables as _tables
 from .base import LineModelBase
 from .tables import (
     _clean_name, _make_unique,
-    _has_param_std, _get_param_limits,
-    c_kms,
 )
 
 
@@ -258,7 +256,7 @@ class LineGroupBase(LineModelBase):
 
         Parameters
         ----------
-        linetable : `~astropy.table.QTable` or dict
+        linetable : Astropy table, pandas.DataFrame, or dict
             Table with at minimum ``'name'``, ``'position'``, and
             ``'weight'`` columns.  The ``'position'`` column must be an
             Astropy `~astropy.units.Quantity` (with a spectral unit) or
@@ -410,18 +408,6 @@ class LineGroupBase(LineModelBase):
             instfwhm=instfwhm,
             **init_kwargs)
 
-    def _shared_values(self, values=None):
-        """Return scalar shared parameters, converting only velocities to km/s.
-
-        ``values`` follows ``_shared_params`` order. When omitted, read the
-        current model parameters; this path is also used by post-fit routines.
-        """
-        if values is None:
-            values = (getattr(self, name).value for name in self._shared_params)
-        return [self._as_kms(value) if name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L')
-                else self._as_value(value)
-                for name, value in zip(self._shared_params, values)]
-
     def evaluate(self, x, *args):
         """Sum the prepared template members on the native spectral grid."""
         x_native = self._coerce_domain_axis(x)
@@ -482,258 +468,100 @@ class LineGroupBase(LineModelBase):
     # Properties
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _metric_frame(rows, index):
+        frame = pd.DataFrame(rows, index=list(index), columns=['value', 'std', 'lolim', 'uplim', 'unit'])
+        frame['unit'] = [None if unit in (None, '') else u.Unit(unit) for unit in frame['unit']]
+        return frame
+
+    def _calc_flux(self, pos, amp, *shared):
+        return self._profile_integral(pos, amp, 1.0, *shared)
+
     @property
     def lines(self):
         """QTable containing the physical lines in this model group."""
         return self._linetable
 
+    def _template_flux(self, amp_pname, positions, weights):
+        amplitude = self._parameter_payload(getattr(self, amp_pname))
+        shared = self._shared_values()
+        return sum(self._calc_flux(pos, amplitude*weight, *shared)
+                   for pos, weight in zip(positions, weights))
+
     @property
     def flux(self) -> pd.DataFrame:
-        """Theoretical fluxes for all templates with uncertainties."""
-        shared_values = self._shared_values()
+        """Analytic template fluxes with local covariance or independent errors."""
         rows = []
-        for tmpl, pname in zip(self._templates, self._param_names_list):
-            amp = getattr(self, pname)
-            idx = self._param_names_list.index(pname)
-            positions = self._tmpl_positions[idx]
-            weights = self._tmpl_weights[idx]
-            amp_payload = self._parameter_payload(amp)
-
-            total_flux = sum(
-                self._calc_flux(pos, amp_payload * wt, *shared_values)
-                for pos, wt in zip(positions, weights))
-
-            flux_std = self._propagate_template_flux_std(
-                pname, total_flux, positions, weights)
-            flux_lo, flux_hi = self._propagate_template_flux_limits(
-                pname, positions, weights)
-
-            rows.append({
-                'value': total_flux,
-                'std': float(flux_std) if flux_std is not None else float('nan'),
-                'lolim': float(flux_lo) if flux_lo is not None else float('nan'),
-                'uplim': float(flux_hi) if flux_hi is not None else float('nan'),
-                'unit': None,
-            })
+        for name, positions, weights in zip(
+                self._param_names_list, self._tmpl_positions, self._tmpl_weights):
+            def evaluate():
+                return self._template_flux(name, positions, weights)
+            governing = [name]+[p for p in self._shared_params if p not in ('offset', 'redshift')]
+            result = _measurements._flux(
+                self, evaluate, [name]+list(self._shared_params), governing)
+            rows.append(vars(result))
         return self._metric_frame(rows, self._templates)
 
-    # ------------------------------------------------------------------
-    # Equivalent width
-    # ------------------------------------------------------------------
+    def eqw(self, continuum=None, method='constant-continuum', x=None, window=None, num=4096):
+        """Template EWs from a fixed continuum or finite-grid integration.
 
-    def eqw(self, continuum=None, method='constant-continuum', x=None,
-            window=None, num=4096) -> 'pd.DataFrame':
-        """Compute and store the equivalent width for all templates."""
-        try:
-            _trap = np.trapezoid
-        except AttributeError:
-            _trap = np.trapz
-
-        if continuum is None:
-            shared_values = self._shared_values()
-            redshift = shared_values[-1]
-            flux_df = self.flux
-            rows = []
-            for idx, (tmpl, pname) in enumerate(
-                    zip(self._templates, self._param_names_list)):
-                positions = self._tmpl_positions[idx]
-                weights = self._tmpl_weights[idx]
-                amplitude_param = getattr(self, pname)
-                amplitude = self._parameter_payload(amplitude_param)
-                center_rest = float(np.mean(positions))
-                center_obs = profiles.observed_center(center_rest, shared_values[0], redshift, domain_family=self.domain_family)
-                peak = 0.0
-                for pos, weight in zip(positions, weights):
-                    args = self._single_profile_args(
-                        pos, amplitude, weight, *shared_values)
-                    peak += float(self._profile_func(np.array([center_obs]), *args).ravel()[0])
-                if np.isfinite(peak) and peak > 0.0:
-                    f_row = flux_df.loc[tmpl]
-                    rows.append({
-                        'value': float(f_row['value']) / peak,
-                        'std': float(f_row['std']) / peak
-                              if np.isfinite(f_row['std']) else float('nan'),
-                        'lolim': float(f_row['lolim']) / peak
-                                if np.isfinite(f_row['lolim']) else float('nan'),
-                        'uplim': float(f_row['uplim']) / peak
-                                if np.isfinite(f_row['uplim']) else float('nan'),
-                    })
-                else:
-                    rows.append({'value': float('nan'), 'std': float('nan'),
-                                 'lolim': float('nan'), 'uplim': float('nan')})
-            result = self._metric_frame(rows, self._templates)
-            self.ew = result
-            return result
-
-        if method == 'constant-continuum':
-            flux_df = self.flux
-            rows = []
-            for tmpl, pname in zip(self._templates, self._param_names_list):
-                amp = getattr(self, pname)
-                continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
-                if not np.isfinite(continuum_val) or continuum_val == 0.0:
-                    rows.append({'value': float('nan'), 'std': float('nan'),
-                                 'lolim': float('nan'), 'uplim': float('nan')})
-                    continue
-                f_row = flux_df.loc[tmpl]
-                rows.append({
-                    'value': float(f_row['value']) / continuum_val,
-                    'std': float(f_row['std']) / abs(continuum_val)
-                           if np.isfinite(f_row['std']) else float('nan'),
-                    'lolim': float(f_row['lolim']) / continuum_val
-                             if np.isfinite(f_row['lolim']) else float('nan'),
-                    'uplim': float(f_row['uplim']) / continuum_val
-                             if np.isfinite(f_row['uplim']) else float('nan'),
-                })
-            result = self._metric_frame(rows, self._templates)
-            self.ew = result
-            return result
-
-        elif method == 'integration':
-            shared_values = self._shared_values()
-            rows = []
-            for idx, (tmpl, pname) in enumerate(
-                    zip(self._templates, self._param_names_list)):
-                positions = self._tmpl_positions[idx]
-                weights = self._tmpl_weights[idx]
-                amplitude_param = getattr(self, pname)
-                amplitude = self._parameter_payload(amplitude_param)
-
-                if x is None:
-                    centers = [profiles.observed_center(pos, shared_values[0], shared_values[-1], domain_family=self.domain_family)
-                               for pos in positions]
-                    mean_c = float(np.mean(centers))
-                    if window is None:
-                        sp = self._shared_params
-                        fwhm_key = 'fwhm' if 'fwhm' in sp else list(sp.keys())[0]
-                        shared_fwhm = shared_values[
-                            list(sp.keys()).index(fwhm_key)] if sp else 10.0
-                        fwhm_x = (shared_fwhm / c_kms * mean_c) if sp else 10.0
-                        hw = 6.0 * max(fwhm_x, 0.1)
-                        _window = (mean_c - hw, mean_c + hw)
-                    else:
-                        _window = window
-                    x_arr = self._default_domain_grid(mean_c, max(fwhm_x, 0.1), window=_window, num=num)
-                else:
-                    x_arr = self._coerce_domain_axis(x)
-
-                y_line = np.zeros_like(x_arr, dtype=float)
-                for pos, weight in zip(positions, weights):
-                    args = self._single_profile_args(
-                        pos, amplitude, weight, *shared_values)
-                    y_line += self._profile_func(x_arr, *args)
-
-                if callable(continuum):
-                    y_cont = np.asarray(continuum(x_arr), dtype=float)
-                else:
-                    continuum_val = float(continuum.value) if isinstance(continuum, u.Quantity) else float(continuum)
-                    y_cont = np.full_like(x_arr, continuum_val, dtype=float)
-                safe = np.where(np.abs(y_cont) > 0.0, y_cont, np.nan)
-                ew_val = float(_trap(y_line / safe, x_arr))
-                rows.append({'value': ew_val, 'std': float('nan'),
-                             'lolim': float('nan'), 'uplim': float('nan')})
-
-            result = self._metric_frame(rows, self._templates)
-            self.ew = result
-            return result
-
-        else:
-            raise ValueError(
-                "method must be 'constant-continuum' or 'integration'.")
-
-    # ------------------------------------------------------------------
-    # Flux propagation helpers
-    # ------------------------------------------------------------------
-
-    def _template_flux(self, amp_pname, positions, weights):
+        An omitted continuum uses each template's own profile at the mean
+        rest position shifted by the shared kinematics. A fixed continuum is
+        treated as exact; integration does not estimate errors. Results are in
+        the native spectral unit when amplitudes carry units.
+        """
+        if method not in ('constant-continuum', 'integration'):
+            raise ValueError("method must be 'constant-continuum' or 'integration'.")
         shared = self._shared_values()
-        param = getattr(self, amp_pname)
-        amp = self._parameter_payload(param)
-        return sum(
-            self._calc_flux(pos, amp * wt, *shared)
-            for pos, wt in zip(positions, weights))
+        flux = self.flux if continuum is None or method == 'constant-continuum' else None
+        rows = []
+        for i, name in enumerate(self._param_names_list):
+            positions, weights = self._tmpl_positions[i], self._tmpl_weights[i]
+            amplitude = getattr(self, name)
+            centers = [profiles.observed_center(pos, shared[0], shared[-1],
+                       domain_family=self.domain_family) for pos in positions]
+            center = float(np.mean(centers))
+            local_continuum = continuum
+            if local_continuum is None:
+                local_continuum = self._template_profile(name, positions, weights, np.array([center]))[0]
+                # Preserve the established self-profile normalization for positive peaks.
+                if not np.isfinite(local_continuum) or local_continuum <= 0:
+                    local_continuum = np.nan
+            if continuum is None or method == 'constant-continuum':
+                result = _measurements._constant_eqw(
+                    Metric(**flux.iloc[i].to_dict()), local_continuum, self._position_unit)
+            else:
+                if x is None:
+                    widths = []
+                    for pos in positions:
+                        args = self._single_profile_args(pos, 1.0, 1.0, *shared)
+                        widths.append(float(self._profile_width(*args[2:])))
+                    bounds = window
+                    if bounds is None:
+                        if not any(width > 0 for width in widths):
+                            raise ValueError('A zero-width template requires an explicit integration grid or window.')
+                        bounds = (min(c-6*w for c, w in zip(centers, widths)),
+                                  max(c+6*w for c, w in zip(centers, widths)))
+                    grid = self._default_domain_grid(center, max(widths), bounds, num)
+                else:
+                    grid = self._coerce_domain_axis(x)
+                line = self._template_profile(name, positions, weights, grid)
+                result = _measurements._integrated_eqw(
+                    grid, line, continuum, self._position_unit, amplitude.unit)
+            rows.append(vars(result))
+        result = self._metric_frame(rows, self._templates)
+        self.ew = result
+        return result
 
-    def _propagate_template_flux_std(self, amp_pname, flux_val,
-                                     positions, weights):
-        cov = getattr(self, '_param_cov', None)
-        if cov is not None:
-            return self._propagate_template_flux_std_cov(
-                amp_pname, flux_val, positions, weights, cov)
-
-        eps = 1e-6
-        var_flux = 0.0
-        has_any = False
-        relevant = [amp_pname] + list(self._shared_params.keys())
-        for p_name in relevant:
-            param = getattr(self, p_name)
-            if not _has_param_std(param):
-                continue
-            has_any = True
-            orig = param.value
-            delta = abs(orig) * eps if orig != 0 else eps
-            if orig == 0 and p_name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                delta /= self._to_kms
-            param.value = orig + delta
-            df = (self._template_flux(amp_pname, positions, weights)
-                  - flux_val) / delta
-            param.value = orig
-            var_flux += (df * param.std) ** 2
-        return np.sqrt(var_flux) if has_any and var_flux > 0 else None
-
-    def _propagate_template_flux_std_cov(self, amp_pname, flux_val,
-                                         positions, weights, cov):
-        from astropy.modeling.fitting import model_to_fit_params
-        _, fit_indices, _ = model_to_fit_params(self)
-        eps = 1e-6
-        jac = np.zeros(len(fit_indices))
-        all_params = self.parameters
-        for j, idx in enumerate(fit_indices):
-            orig = float(all_params[idx])
-            delta = abs(orig) * eps if orig != 0 else eps
-            if orig == 0 and self.param_names[idx] in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                delta /= self._to_kms
-            all_params[idx] = orig + delta
-            self.parameters = all_params
-            jac[j] = (self._template_flux(
-                amp_pname, positions, weights) - flux_val) / delta
-            all_params[idx] = orig
-        self.parameters = all_params
-        var = float(jac @ cov @ jac)
-        return np.sqrt(var) if var > 0 else None
-
-    def _propagate_template_flux_limits(self, amp_pname, positions, weights):
-        width_params = [sp for sp in self._shared_params
-                        if sp not in ('offset', 'redshift')]
-        amp_param = getattr(self, amp_pname)
-        _, _, amp_has_lo, amp_has_hi = _get_param_limits(amp_param)
-        if not amp_has_lo and not amp_has_hi:
-            return None, None
-
-        def _eval_at(overrides):
-            orig = {}
-            for p, v in overrides.items():
-                orig[p] = getattr(self, p).value
-                getattr(self, p).value = v
-            f = self._template_flux(amp_pname, positions, weights)
-            for p, v in orig.items():
-                getattr(self, p).value = v
-            return f
-
-        def _compute(use_lo):
-            has_amp = amp_has_lo if use_lo else amp_has_hi
-            if not has_amp:
-                return None
-            overrides = {
-                amp_pname: amp_param.lolim if use_lo else amp_param.uplim}
-            for p in width_params:
-                _, _, has_lo, has_hi = _get_param_limits(getattr(self, p))
-                if use_lo and has_lo:
-                    overrides[p] = getattr(self, p).lolim
-                elif not use_lo and has_hi:
-                    overrides[p] = getattr(self, p).uplim
-            return _eval_at(overrides)
-
-        return _compute(True), _compute(False)
+    def _template_profile(self, name, positions, weights, x):
+        """Numeric template profile in the amplitude parameter's unit."""
+        amplitude = getattr(self, name).value
+        shared = self._shared_values()
+        result = np.zeros_like(x, dtype=float)
+        for pos, weight in zip(positions, weights):
+            args = self._single_profile_args(pos, amplitude, weight, *shared)
+            result += self._profile_func(x, *args)
+        return result
 
 
 # ======================================================================
@@ -759,7 +587,7 @@ class GaussianLines(LineGroupBase):
     --------
     >>> group = GaussianLines.from_arrays(
     ...     names=['Hb4861', '[OIII]5007'],
-    ...     pos=[4861.333, 5006.803],
+    ...     pos=[4861.333, 5006.803] * u.AA,
     ...     amplitude=1.0,
     ...     fwhm=300.0,
     ... )
@@ -767,25 +595,9 @@ class GaussianLines(LineGroupBase):
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.gaussian)
-
-    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_eff = profiles.gaussian_profile_params(
-            center, amp, weight, fwhm, redshift, self.instfwhm_val(center))
-        return (amp_eff, center, sigma_eff)
-
-    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        val, d_amp, _, d_off, d_fwhm, d_z = profiles.gaussian_velocity_deriv(
-            x, pos, amp, weight, offset, fwhm, redshift,
-            self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return val, d_amp, d_off, d_fwhm, d_z
-
-    def _calc_flux(self, pos, amp, offset, fwhm, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_eff = profiles.gaussian_profile_params(
-            center, amp, 1.0, fwhm, redshift, self.instfwhm_val(center))
-        return profiles.gaussian_flux(amp_eff, sigma_eff)
+    _profile_params = staticmethod(profiles.gaussian_profile_params)
+    _profile_deriv = staticmethod(profiles.gaussian_velocity_deriv)
+    _profile_flux = staticmethod(profiles.gaussian_flux)
 
 
 class LorentzianLines(LineGroupBase):
@@ -796,52 +608,15 @@ class LorentzianLines(LineGroupBase):
     The intrinsic line core is Lorentzian for every member of the group. If an
     instrumental Gaussian broadening term is present, each member is evaluated as
     a Voigt profile after combining the intrinsic Lorentzian with the line-spread
-    function. Profile derivatives currently use forward differences; amplitude
-    derivatives retain each member's relative weight in its template.
+    function. Profile derivatives use the analytic Voigt Jacobian with zero intrinsic
+    Gaussian width; each member retains its relative template weight.
     """
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
-
-    def _single_profile_args(self, pos, amp, weight, offset, fwhm, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
-            center, amp, weight, fwhm, redshift, self.instfwhm_val(center))
-        return (amp_eff, center, sigma_inst, gamma)
-
-    def _single_profile_deriv(self, x, pos, amp, weight, offset, fwhm, redshift):
-        eps = 1e-6
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-
-        def _eval(a, o, f, z):
-            args = self._single_profile_args(pos, a, weight, o, f, z)
-            return self._profile_func(x, *args)
-
-        val = _eval(amp, offset, fwhm, redshift)
-        d_amp_step = abs(amp) * eps if amp != 0 else eps
-        d_off_step = abs(offset) * eps if offset != 0 else eps
-        d_fwhm_step = abs(fwhm) * eps if fwhm != 0 else eps
-        d_z_step = abs(redshift) * eps if redshift != 0 else eps
-
-        # _eval already includes the member's relative weight.
-        d_amp = (_eval(amp + d_amp_step, offset, fwhm, redshift)
-                 - val) / d_amp_step
-        d_offset = (_eval(amp, offset + d_off_step, fwhm, redshift)
-                    - val) / d_off_step
-        d_fwhm = (_eval(amp, offset, fwhm + d_fwhm_step, redshift)
-                  - val) / d_fwhm_step
-        d_redshift = (_eval(amp, offset, fwhm, redshift + d_z_step)
-                      - val) / d_z_step
-
-        return val, d_amp, d_offset, d_fwhm, d_redshift
-
-    def _calc_flux(self, pos, amp, offset, fwhm, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
-            center, amp, 1.0, fwhm, redshift, self.instfwhm_val(center))
-        if sigma_inst == 0.0:
-            return profiles.lorentzian_flux(amp_eff, gamma)
-        return profiles.voigt_flux(amp_eff, sigma_inst, gamma)
+    _profile_params = staticmethod(profiles.lorentzian_profile_params)
+    _profile_deriv = staticmethod(profiles._lorentzian_velocity_deriv)
+    _profile_flux = staticmethod(profiles.voigt_flux)
 
 
 class VoigtLines(LineGroupBase):
@@ -859,26 +634,6 @@ class VoigtLines(LineGroupBase):
     _shared_units = {'offset': u.km / u.s, 'fwhm_G': u.km / u.s,
                      'fwhm_L': u.km / u.s, 'redshift': None}
     _profile_func = staticmethod(profiles.voigt)
-
-    def _single_profile_args(self, pos, amp, weight, offset,
-                             fwhm_G, fwhm_L, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
-            center, amp, weight, fwhm_G, fwhm_L, redshift,
-            self.instfwhm_val(center))
-        return (amp_eff, center, sigma_eff, gamma)
-
-    def _single_profile_deriv(self, x, pos, amp, weight, offset,
-                              fwhm_G, fwhm_L, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        val, d_amp, _, d_off, d_fG, d_fL, d_z = profiles.voigt_velocity_deriv(
-            x, pos, amp, weight, offset, fwhm_G, fwhm_L, redshift,
-            self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return val, d_amp, d_off, d_fG, d_fL, d_z
-
-    def _calc_flux(self, pos, amp, offset, fwhm_G, fwhm_L, redshift):
-        center = profiles.observed_center(pos, offset, redshift, domain_family=self.domain_family)
-        amp_eff, sigma_eff, gamma = profiles.voigt_profile_params(
-            center, amp, 1.0, fwhm_G, fwhm_L, redshift,
-            self.instfwhm_val(center))
-        return profiles.voigt_flux(amp_eff, sigma_eff, gamma)
+    _profile_params = staticmethod(profiles.voigt_profile_params)
+    _profile_deriv = staticmethod(profiles.voigt_velocity_deriv)
+    _profile_flux = staticmethod(profiles.voigt_flux)
