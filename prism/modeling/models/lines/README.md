@@ -38,7 +38,10 @@ through a thin spectral-domain transform. The internal physical reference remain
 - `single.py`
   Single-line Astropy model subclasses.
 - `groups.py`
-  Dynamic multi-line models built from line templates.
+  Multi-line models built from line templates. The dynamic factory prepares
+  Astropy parameter descriptors and template metadata; group evaluation and
+  derivatives are shared methods, outside the factory. The same shared-parameter
+  conversion is used by evaluation, flux/EW calculations and line selection.
 - `__init__.py`
   Public entry points.
 
@@ -58,6 +61,37 @@ For user-provided inputs, Prism normalises everything into the same internal wav
 ### Velocity Parameters
 
 Offsets and widths are parameterised in velocity units, typically `km / s`.
+
+`velocity_unit` selects the unit of the numeric intrinsic velocity parameters
+(`offset`, `fwhm`, `fwhm_G`, `fwhm_L`). The default is `u.km / u.s`.
+Bare numbers use the selected unit; velocity `Quantity` inputs are converted
+to it during construction. Omitted parameters retain their physical defaults:
+choosing m/s does not make an otherwise default line a thousand times narrower.
+Bounds, fitted values, standard deviations and covariance entries refer to
+these parameter units. Quantity bounds supplied at construction are converted
+as well; numeric bounds use the selected unit.
+
+Line selections and their automatically inferred windows respect this velocity
+unit too. Geometric measurements such as the measured FWHM remain in the native
+spectral-axis unit; choosing m/s for a model parameter does not change that axis.
+
+```python
+line = GaussianLine(position=5007 * u.AA, fwhm=300 * u.km/u.s,
+                    velocity_unit=u.m/u.s)
+assert line.fwhm.quantity == 300_000 * u.m/u.s
+```
+
+The numerical profiles use km/s; the conversion factor is prepared once and
+included in velocity derivatives. Construct a new model when changing
+`velocity_unit`. When updating parameter values later, use the selected unit;
+directly replacing a parameter's unit or changing `velocity_unit` does not
+rescale its bounds, covariance or attached uncertainties. Model serialization
+preserves the selected unit; old definitions without it retain km/s behavior.
+
+Numeric `instfwhm` inputs remain in km/s independently of `velocity_unit`,
+including column two of instrumental tables. Column one uses the native
+spectral unit. A scalar velocity `Quantity` is converted to km/s. This avoids
+reinterpreting an existing instrumental table when the parameter unit changes.
 
 This keeps the parameterisation stable across different lines and observational setups:
 

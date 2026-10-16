@@ -104,6 +104,7 @@ def _restore_param(model, name, state):
 
 def _linemodel_representer(dumper, obj):
     state = {pn: _param_state(getattr(obj, pn)) for pn in obj.param_names}
+    state['_velocity_unit'] = obj.velocity_unit.to_string()
     instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
     if isinstance(instfwhm_raw, np.ndarray):
         instfwhm_raw = instfwhm_raw.tolist()
@@ -116,7 +117,8 @@ def _linemodel_constructor(loader, node, cls):
     mapping = loader.construct_mapping(node, deep=True)
     instfwhm = mapping.pop('_instfwhm', 0.0)
     mdl_name = mapping.pop('_name', None)
-    obj = cls(instfwhm=instfwhm, name=mdl_name)
+    velocity_unit = mapping.pop('_velocity_unit', 'km/s')
+    obj = cls(instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit)
     for pn, state in mapping.items():
         if hasattr(obj, pn):
             _restore_param(obj, pn, state)
@@ -141,6 +143,7 @@ def _linegroup_representer(dumper, obj):
 
     state = {
         '_base': base_name,
+        '_velocity_unit': obj.velocity_unit.to_string(),
         '_position_unit': pos_unit_str,
         '_linetable': [
             {
@@ -171,6 +174,7 @@ def _linegroup_constructor(loader, node):
     records = mapping.pop('_linetable')
     instfwhm = mapping.pop('_instfwhm', 0.0)
     mdl_name = mapping.pop('_name', None)
+    velocity_unit = mapping.pop('_velocity_unit', 'km/s')
 
     # Restore the native spectral unit (defaults to AA for old files).
     pos_unit_str = mapping.pop('_position_unit', 'Angstrom')
@@ -182,7 +186,7 @@ def _linegroup_constructor(loader, node):
     linetable['position'] = [record['position'] for record in records] * pos_unit
     linetable['weight'] = [record['weight'] for record in records]
     obj = base_cls.from_templates(
-        linetable, instfwhm=instfwhm, name=mdl_name)
+        linetable, instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit)
 
     for pn, state in mapping.items():
         if hasattr(obj, pn):

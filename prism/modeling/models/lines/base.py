@@ -16,13 +16,31 @@ from .tables import (
 )
 
 class LineModelBase(Fittable1DModel):
-    """Base class for line models providing instfwhm handling and flux/EW/propagation."""
+    """Line-model base with velocity conversion and flux/EW propagation.
+
+    ``velocity_unit`` defaults to km/s and sets the numeric unit of ``offset``,
+    ``fwhm``, ``fwhm_G``, and ``fwhm_L``, including their bounds and uncertainties.
+    Quantity inputs are converted to that unit at construction. Omitted velocity
+    parameters retain their physical class defaults. Construct a new model to
+    change ``velocity_unit``; it is not a unit-conversion setter.
+
+    Numeric ``instfwhm`` values are always in km/s, independently of
+    ``velocity_unit``. A scalar velocity Quantity is also accepted. In a
+    two-column instrumental table, column one uses the native spectral unit
+    and column two uses km/s.
+    """
 
     input_units_allow_dimensionless = {'x': True}
     input_units_equivalencies = {'x': u.spectral()}
 
     @staticmethod
     def _normalize_instfwhm(instfwhm):
+        if isinstance(instfwhm, u.Quantity):
+            if not instfwhm.isscalar:
+                raise ValueError(
+                    "instfwhm Quantity must be a scalar velocity; use a numeric "
+                    "two-column table for native spectral positions and km/s widths.")
+            instfwhm = float(instfwhm.to_value(u.km/u.s))
         if np.isscalar(instfwhm):
             value = float(instfwhm)
             return value, 'constant', value, None
@@ -72,8 +90,21 @@ class LineModelBase(Fittable1DModel):
             self._instfwhm_spline_deriv = deriv
         self.instfwhm = raw
 
-        # Coerce plain scalar inputs to Quantities for parameters that define a default unit
+        # Keep physical defaults when only the selected velocity unit changes.
         param_names = type(self).param_names
+        for pname in param_names[len(args):]:
+            param = getattr(type(self), pname)
+            if param.unit is not None and param.unit.is_equivalent(u.km/u.s):
+                kwargs.setdefault(pname, param.default * param.unit)
+        if 'bounds' in kwargs:
+            kwargs['bounds'] = dict(kwargs['bounds'])
+            for pname, limits in kwargs['bounds'].items():
+                if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                    kwargs['bounds'][pname] = tuple(
+                        limit.to_value(vel_unit) if isinstance(limit, u.Quantity) else limit
+                        for limit in limits)
+
+        # Normalize velocity quantities once, before repeated numerical calls.
         coerced_args = [
             self._coerce_init_parameter(pname, val) for pname, val in zip(param_names, args)
         ]
@@ -98,10 +129,9 @@ class LineModelBase(Fittable1DModel):
     def domain_family(self):
         """Kinematic family inferred from the physical type of the position unit.
 
-        For single-line models the unit comes from the ``position`` parameter.
-        For group models (which have no ``position`` parameter) the unit is
-        read from the ``_linetable`` position column, which always carries the
-        unit the table was built with.
+        The reference unit is recorded from the ``position`` parameter for a
+        single line, or from the position column when a group is built. The
+        inferred family is reused until that reference unit changes.
 
         Returns
         -------
@@ -117,6 +147,9 @@ class LineModelBase(Fittable1DModel):
         # Both single-line and group models cache the resolved spectral unit as
         # _position_unit — set in __init__ (single) or from_templates (group).
         pos_unit = self._position_unit
+        cached = self.__dict__.get('_domain_cache')
+        if cached is not None and cached[0] is pos_unit:
+            return cached[1]
 
         if pos_unit is None or pos_unit == u.dimensionless_unscaled:
             raise ValueError(
@@ -126,14 +159,18 @@ class LineModelBase(Fittable1DModel):
             )
         ptype = pos_unit.physical_type
         if ptype == 'length':
-            return 'wavelength'
-        if ptype in ('frequency', 'energy', 'temperature'):
-            return 'linear'
-        raise ValueError(
-            f"Cannot infer domain_family from position unit '{pos_unit}' "
-            f"(physical_type='{ptype}'). Use a spectral unit such as u.AA, u.nm, "
-            "u.Hz, u.eV, or u.K."
-        )
+            family = 'wavelength'
+        elif ptype in ('frequency', 'energy', 'temperature'):
+            family = 'linear'
+        else:
+            raise ValueError(
+                f"Cannot infer domain_family from position unit '{pos_unit}' "
+                f"(physical_type='{ptype}'). Use a spectral unit such as u.AA, u.nm, "
+                "u.Hz, u.eV, or u.K."
+            )
+        # Astropy units are immutable; a different reference invalidates the cache.
+        self._domain_cache = (pos_unit, family)
+        return family
 
     @property
     def input_units(self):
@@ -171,16 +208,24 @@ class LineModelBase(Fittable1DModel):
         
     def _as_kms(self, velocity_value):
         """Converts the flexible velocity input into km/s for internal math."""
-        if isinstance(velocity_value, u.Quantity):
-            return velocity_value.to_value(u.km/u.s)
-        return velocity_value * self._to_kms
+        if (isinstance(velocity_value, u.Quantity)
+                and velocity_value.unit is not self.velocity_unit):
+            return self._as_value(velocity_value, u.km/u.s)
+        return self._as_value(velocity_value) * self._to_kms
 
-    @classmethod
-    def _coerce_init_parameter(cls, name, value):
-        """Wrap plain numeric inputs in the parameter's default unit (if defined)."""
-        param = getattr(cls, name, None)
+    def _coerce_init_parameter(self, name, value):
+        """Normalize velocities; wrap other numbers in their declared unit."""
+        param = getattr(type(self), name, None)
         unit = getattr(param, 'unit', None)
-        if unit is None or isinstance(value, (u.Quantity, Parameter)):
+        if unit is None:
+            return value
+        if unit.is_equivalent(u.km/u.s):
+            unit = self.velocity_unit
+            if isinstance(value, Parameter):
+                value = self._parameter_payload(value)
+            if isinstance(value, u.Quantity):
+                return value.to(unit)
+        if isinstance(value, (u.Quantity, Parameter)):
             return value
         return value * unit
 
@@ -368,6 +413,8 @@ class LineModelBase(Fittable1DModel):
         for j, idx in enumerate(fit_indices):
             orig = float(all_params[idx])
             delta = abs(orig) * eps if orig != 0 else eps
+            if orig == 0 and self.param_names[idx] in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                delta /= self._to_kms
             all_params[idx] = orig + delta
             self.parameters = all_params
             jac[j] = (self._calc_flux() - flux_val) / delta
@@ -392,6 +439,8 @@ class LineModelBase(Fittable1DModel):
             has_any = True
             orig = param.value
             delta = abs(orig) * eps if orig != 0 else eps
+            if orig == 0 and pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                delta /= self._to_kms
             param.value = orig + delta
             df = (self._calc_flux() - flux_val) / delta
             param.value = orig

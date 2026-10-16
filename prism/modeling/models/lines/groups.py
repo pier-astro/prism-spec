@@ -238,16 +238,12 @@ class LineGroupBase(LineModelBase):
 
         # If pos is a Quantity honour its own unit; position_unit is then ignored.
         _norm_unit = None if isinstance(pos, u.Quantity) else position_unit
-        linetable = _tables.normalize_linetable(
-            {'name': names, 'position': pos, 'weight': weights},
-            position_unit=_norm_unit,
-        )
-        # Pass position_unit=None so from_templates trusts the already-normalised
-        # linetable unit rather than re-coercing it.
+        # Normalize once at the shared constructor boundary.
         return cls.from_templates(
-            linetable, name=name, bounds=bounds, amplitude=amplitude,
+            {'name': names, 'position': pos, 'weight': weights},
+            name=name, bounds=bounds, amplitude=amplitude,
             instfwhm=instfwhm,
-            position_unit=None, **init_kwargs)
+            position_unit=_norm_unit, **init_kwargs)
 
     @classmethod
     def from_templates(cls, linetable, name=None, bounds=None, amplitude=None,
@@ -308,10 +304,11 @@ class LineGroupBase(LineModelBase):
 
         Notes
         -----
-        The ``'position'`` column is stored internally in Angstrom for
-        kinematic evaluation, but the original spectral unit is preserved
-        as ``_position_unit`` and used by :attr:`domain_family` and
-        :attr:`input_units`.
+        Positions and numerical evaluation retain the resolved native spectral
+        unit. That unit is recorded as ``_position_unit`` and used by
+        :attr:`domain_family` and :attr:`input_units`. The factory prepares the
+        table metadata and Astropy parameter descriptors; evaluation and
+        derivatives are ordinary methods shared by all groups.
 
         Examples
         --------
@@ -393,79 +390,8 @@ class LineGroupBase(LineModelBase):
             params[pname] = Parameter(
                 default=default, fixed=is_fixed, unit=cls._shared_units.get(pname))
 
-        def evaluate(self, x, *args):
-            x_native = self._coerce_domain_axis(x)
-            is_scalar = np.ndim(x) == 0
-            x_native = np.atleast_1d(x_native)
-            
-            # Extract template amplitudes
-            amplitudes = [self._as_value(a) for a in args[:n_templates]]
-            
-            # Extract shared kinematic/width parameters
-            shared = args[n_templates:]
-            shared_values = []
-            for idx, value in enumerate(shared):
-                pname = list(self._shared_params.keys())[idx]
-                if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                    shared_values.append(self._as_kms(self._as_value(value)))
-                else:
-                    shared_values.append(self._as_value(value))
-
-            total = np.zeros_like(x_native, dtype=float)
-            
-            # Loop over each template and evaluate its constituent lines
-            for i in range(n_templates):
-                for j in range(len(_tmpl_positions[i])):
-                    profile_args = self._single_profile_args(
-                        _tmpl_positions[i][j], amplitudes[i],
-                        _tmpl_weights[i][j], *shared_values)
-                    total += cls._profile_func(x_native, *profile_args)
-            
-            return total[0] if is_scalar else total
-
-        def fit_deriv(self, x, *args):
-            x_native = self._coerce_domain_axis(x)
-            x_native = np.atleast_1d(x_native)
-            
-            # Extract template amplitudes
-            amplitudes = [self._as_value(a) for a in args[:n_templates]]
-            
-            # Extract shared kinematic/width parameters
-            shared = args[n_templates:]
-            
-            shared_values = []
-            for idx, value in enumerate(shared):
-                pname = list(self._shared_params.keys())[idx]
-                if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                    shared_values.append(self._as_kms(self._as_value(value)))
-                else:
-                    shared_values.append(self._as_value(value))
-            
-            n_params = len(args)
-            n_x = len(x_native)
-            grad = np.zeros((n_params, n_x))
-            d_shared = [np.zeros(n_x) for _ in shared_values]
-            
-            # Accumulate derivatives for each template and shared parameters
-            for i in range(n_templates):
-                for j in range(len(_tmpl_positions[i])):
-                    derivs = self._single_profile_deriv(
-                        x_native, _tmpl_positions[i][j], amplitudes[i],
-                        _tmpl_weights[i][j], *shared_values)
-                    grad[i] += derivs[1]
-                    for k, d in enumerate(derivs[2:]):
-                        d_shared[k] += d
-                        
-            # Map shared parameter derivatives back to the gradient array
-            for j, d in enumerate(d_shared):
-                grad[n_templates + j] = d
-                
-            return grad
-
         model_class = type(cls.__name__, (cls,), {
             **params,
-            'evaluate': evaluate,
-            'fit_deriv': fit_deriv,
             'n_inputs': 1,
             'n_outputs': 1,
             '_separable_linear_params': tuple(param_names),
@@ -484,6 +410,74 @@ class LineGroupBase(LineModelBase):
             instfwhm=instfwhm,
             **init_kwargs)
 
+    def _shared_values(self, values=None):
+        """Return scalar shared parameters, converting only velocities to km/s.
+
+        ``values`` follows ``_shared_params`` order. When omitted, read the
+        current model parameters; this path is also used by post-fit routines.
+        """
+        if values is None:
+            values = (getattr(self, name).value for name in self._shared_params)
+        return [self._as_kms(value) if name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L')
+                else self._as_value(value)
+                for name, value in zip(self._shared_params, values)]
+
+    def evaluate(self, x, *args):
+        """Sum the prepared template members on the native spectral grid."""
+        x_native = self._coerce_domain_axis(x)
+        is_scalar = np.ndim(x) == 0
+        x_native = np.atleast_1d(x_native)
+
+        # Extract template amplitudes
+        amplitudes = [self._as_value(a) for a in args[:self._n_templates]]
+
+        shared_values = self._shared_values(args[self._n_templates:])
+
+        total = np.zeros_like(x_native, dtype=float)
+
+        # Loop over each template and evaluate its constituent lines
+        for amplitude, positions, weights in zip(
+                amplitudes, self._tmpl_positions, self._tmpl_weights):
+            for pos, weight in zip(positions, weights):
+                profile_args = self._single_profile_args(
+                    pos, amplitude, weight, *shared_values)
+                total += self._profile_func(x_native, *profile_args)
+
+        return total[0] if is_scalar else total
+
+    def fit_deriv(self, x, *args):
+        """Accumulate parameter-major derivatives in the model parameter units."""
+        x_native = self._coerce_domain_axis(x)
+        x_native = np.atleast_1d(x_native)
+
+        # Extract template amplitudes
+        amplitudes = [self._as_value(a) for a in args[:self._n_templates]]
+
+        shared_values = self._shared_values(args[self._n_templates:])
+
+        n_params = len(args)
+        n_x = len(x_native)
+        grad = np.zeros((n_params, n_x))
+        d_shared = [np.zeros(n_x) for _ in shared_values]
+
+        # Accumulate derivatives for each template and shared parameters
+        for i, (amplitude, positions, weights) in enumerate(zip(
+                amplitudes, self._tmpl_positions, self._tmpl_weights)):
+            for pos, weight in zip(positions, weights):
+                derivs = self._single_profile_deriv(
+                    x_native, pos, amplitude, weight, *shared_values)
+                grad[i] += derivs[1]
+                for k, d in enumerate(derivs[2:]):
+                    d_shared[k] += d
+
+        # Map shared parameter derivatives back to the gradient array
+        for j, (pname, d) in enumerate(zip(self._shared_params, d_shared)):
+            if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L') and self._to_kms != 1.0:
+                d = d * self._to_kms
+            grad[self._n_templates + j] = d
+
+        return grad
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -496,12 +490,7 @@ class LineGroupBase(LineModelBase):
     @property
     def flux(self) -> pd.DataFrame:
         """Theoretical fluxes for all templates with uncertainties."""
-        shared_values = []
-        for pname in self._shared_params.keys():
-            if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                shared_values.append(self._as_kms(getattr(self, pname).value))
-            else:
-                shared_values.append(getattr(self, pname).value)
+        shared_values = self._shared_values()
         rows = []
         for tmpl, pname in zip(self._templates, self._param_names_list):
             amp = getattr(self, pname)
@@ -541,12 +530,7 @@ class LineGroupBase(LineModelBase):
             _trap = np.trapz
 
         if continuum is None:
-            shared_values = []
-            for pname in self._shared_params.keys():
-                if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                    shared_values.append(self._as_kms(getattr(self, pname).value))
-                else:
-                    shared_values.append(getattr(self, pname).value)
+            shared_values = self._shared_values()
             redshift = shared_values[-1]
             flux_df = self.flux
             rows = []
@@ -606,12 +590,7 @@ class LineGroupBase(LineModelBase):
             return result
 
         elif method == 'integration':
-            shared_values = []
-            for pname in self._shared_params.keys():
-                if pname in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
-                    shared_values.append(self._as_kms(getattr(self, pname).value))
-                else:
-                    shared_values.append(getattr(self, pname).value)
+            shared_values = self._shared_values()
             rows = []
             for idx, (tmpl, pname) in enumerate(
                     zip(self._templates, self._param_names_list)):
@@ -667,7 +646,7 @@ class LineGroupBase(LineModelBase):
     # ------------------------------------------------------------------
 
     def _template_flux(self, amp_pname, positions, weights):
-        shared = [getattr(self, sp).value for sp in self._shared_params.keys()]
+        shared = self._shared_values()
         param = getattr(self, amp_pname)
         amp = self._parameter_payload(param)
         return sum(
@@ -692,6 +671,8 @@ class LineGroupBase(LineModelBase):
             has_any = True
             orig = param.value
             delta = abs(orig) * eps if orig != 0 else eps
+            if orig == 0 and p_name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                delta /= self._to_kms
             param.value = orig + delta
             df = (self._template_flux(amp_pname, positions, weights)
                   - flux_val) / delta
@@ -709,6 +690,8 @@ class LineGroupBase(LineModelBase):
         for j, idx in enumerate(fit_indices):
             orig = float(all_params[idx])
             delta = abs(orig) * eps if orig != 0 else eps
+            if orig == 0 and self.param_names[idx] in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                delta /= self._to_kms
             all_params[idx] = orig + delta
             self.parameters = all_params
             jac[j] = (self._template_flux(
@@ -813,7 +796,8 @@ class LorentzianLines(LineGroupBase):
     The intrinsic line core is Lorentzian for every member of the group. If an
     instrumental Gaussian broadening term is present, each member is evaluated as
     a Voigt profile after combining the intrinsic Lorentzian with the line-spread
-    function.
+    function. Profile derivatives currently use forward differences; amplitude
+    derivatives retain each member's relative weight in its template.
     """
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
     _shared_units = {'offset': u.km / u.s, 'fwhm': u.km / u.s, 'redshift': None}
@@ -839,8 +823,9 @@ class LorentzianLines(LineGroupBase):
         d_fwhm_step = abs(fwhm) * eps if fwhm != 0 else eps
         d_z_step = abs(redshift) * eps if redshift != 0 else eps
 
-        d_amp_true = (_eval(amp + d_amp_step, offset, fwhm, redshift)
-                      - val) / d_amp_step
+        # _eval already includes the member's relative weight.
+        d_amp = (_eval(amp + d_amp_step, offset, fwhm, redshift)
+                 - val) / d_amp_step
         d_offset = (_eval(amp, offset + d_off_step, fwhm, redshift)
                     - val) / d_off_step
         d_fwhm = (_eval(amp, offset, fwhm + d_fwhm_step, redshift)
@@ -848,7 +833,6 @@ class LorentzianLines(LineGroupBase):
         d_redshift = (_eval(amp, offset, fwhm, redshift + d_z_step)
                       - val) / d_z_step
 
-        d_amp = d_amp_true / weight if weight != 0 else np.zeros_like(val)
         return val, d_amp, d_offset, d_fwhm, d_redshift
 
     def _calc_flux(self, pos, amp, offset, fwhm, redshift):

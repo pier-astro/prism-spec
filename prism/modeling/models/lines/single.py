@@ -61,8 +61,8 @@ class GaussianLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm = self._as_kms(self._as_value(fwhm))
+        offset = self._as_kms(offset)
+        fwhm = self._as_kms(fwhm)
         redshift = self._as_value(redshift)
         
         center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
@@ -78,8 +78,8 @@ class GaussianLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm = self._as_kms(self._as_value(fwhm))
+        offset = self._as_kms(offset)
+        fwhm = self._as_kms(fwhm)
         redshift = self._as_value(redshift)
         
         center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
@@ -88,7 +88,7 @@ class GaussianLine(LineModelBase):
         _, d_amp, d_pos, d_off, d_fwhm, d_z = profiles.gaussian_velocity_deriv(
             x_native, position, amplitude, 1.0, offset, fwhm, redshift,
             self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return [d_amp, d_pos, d_off, d_fwhm, d_z]
+        return [d_amp, d_pos, d_off * self._to_kms, d_fwhm * self._to_kms, d_z]
 
     def _calc_flux(self):
         center = profiles.observed_center(
@@ -139,8 +139,8 @@ class LorentzianLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm = self._as_kms(self._as_value(fwhm))
+        offset = self._as_kms(offset)
+        fwhm = self._as_kms(fwhm)
         redshift = self._as_value(redshift)
         
         center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
@@ -159,11 +159,10 @@ class LorentzianLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm = self._as_kms(self._as_value(fwhm))
+        offset = self._as_value(offset, self.velocity_unit)
+        fwhm = self._as_value(fwhm, self.velocity_unit)
         redshift = self._as_value(redshift)
         
-        center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
         amplitude = self._as_value(amplitude)
         
         params = [amplitude, position, offset, fwhm, redshift]
@@ -172,6 +171,8 @@ class LorentzianLine(LineModelBase):
         eps = 1e-6
         for i, pval in enumerate(params):
             delta = abs(pval) * eps if pval != 0 else eps
+            if pval == 0 and i in (2, 3):  # offset and FWHM use the selected unit
+                delta /= self._to_kms
             shifted = list(params)
             shifted[i] = pval + delta
             derivs.append((np.asarray(self.evaluate(x_native, *shifted), dtype=float) - base) / delta)
@@ -233,9 +234,9 @@ class VoigtLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm_G = self._as_kms(self._as_value(fwhm_G))
-        fwhm_L = self._as_kms(self._as_value(fwhm_L))
+        offset = self._as_kms(offset)
+        fwhm_G = self._as_kms(fwhm_G)
+        fwhm_L = self._as_kms(fwhm_L)
         redshift = self._as_value(redshift)
         
         center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
@@ -252,9 +253,9 @@ class VoigtLine(LineModelBase):
         x_native = np.atleast_1d(x_native)
         
         position = self._as_value(position)
-        offset = self._as_kms(self._as_value(offset))
-        fwhm_G = self._as_kms(self._as_value(fwhm_G))
-        fwhm_L = self._as_kms(self._as_value(fwhm_L))
+        offset = self._as_kms(offset)
+        fwhm_G = self._as_kms(fwhm_G)
+        fwhm_L = self._as_kms(fwhm_L)
         redshift = self._as_value(redshift)
         
         center = profiles.observed_center(position, offset, redshift, domain_family=self.domain_family)
@@ -263,7 +264,8 @@ class VoigtLine(LineModelBase):
         _, d_amp, d_pos, d_off, d_fG, d_fL, d_z = profiles.voigt_velocity_deriv(
             x_native, position, amplitude, 1.0, offset, fwhm_G, fwhm_L, redshift,
             self.instfwhm_val(center), self.instfwhm_deriv(center), domain_family=self.domain_family)
-        return [d_amp, d_pos, d_off, d_fG, d_fL, d_z]
+        return [d_amp, d_pos, d_off * self._to_kms,
+                d_fG * self._to_kms, d_fL * self._to_kms, d_z]
 
     def _calc_flux(self):
         center = profiles.observed_center(

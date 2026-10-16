@@ -141,8 +141,7 @@ def _evaluate_linegroup_template(model, template_name, x, position=None):
     amplitude_param = getattr(model, model._param_names_list[idx])
     amplitude = model._parameter_payload(amplitude_param)
     amplitude_unit = getattr(amplitude_param, 'unit', None)
-    shared_values = [getattr(model, pname).value
-                     for pname in model._shared_params.keys()]
+    shared_values = model._shared_values()
 
     x_native = model._coerce_domain_axis(x)
     is_scalar = np.ndim(x) == 0
@@ -165,13 +164,14 @@ def _evaluate_linegroup_template(model, template_name, x, position=None):
 def _evaluate_single_line(model, x):
     values = model(x)
     center = profiles.observed_center(
-        model.position.value, model.offset.value, model.redshift.value)
+        model.position.value, model._as_kms(model.offset.value), model.redshift.value,
+        domain_family=model.domain_family)
 
     if isinstance(model, (GaussianLine, LorentzianLine)):
-        fwhm = model.fwhm.value / profiles.C_KMS * center
+        fwhm = model._as_kms(model.fwhm.value) / profiles.C_KMS * center
     elif isinstance(model, VoigtLine):
-        fwhm_g = model.fwhm_G.value / profiles.C_KMS * center
-        fwhm_l = model.fwhm_L.value / profiles.C_KMS * center
+        fwhm_g = model._as_kms(model.fwhm_G.value) / profiles.C_KMS * center
+        fwhm_l = model._as_kms(model.fwhm_L.value) / profiles.C_KMS * center
         fwhm = float(_approx_voigt_fwhm(fwhm_g, fwhm_l))
     else:
         raise TypeError(f"Unsupported line model type: {type(model).__name__}")
@@ -185,8 +185,7 @@ def _evaluate_component_profile(model, x):
         values = model(x)
         centers = []
         widths = []
-        shared_values = [getattr(model, pname).value
-                         for pname in model._shared_params.keys()]
+        shared_values = model._shared_values()
         for idx in range(model._n_templates):
             amplitude_param = getattr(model, model._param_names_list[idx])
             amplitude = model._parameter_payload(amplitude_param)
