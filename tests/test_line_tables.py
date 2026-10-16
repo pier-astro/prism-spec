@@ -193,3 +193,15 @@ def test_native_kinematics_linear_vs_wavelength_domain():
 
     peak_ev_as_lam = (peak_ev * u.eV).to_value(u.AA, equivalencies=u.spectral())
     np.testing.assert_allclose(peak_lam, peak_ev_as_lam, rtol=1e-3)
+
+
+def test_agn_factory_uses_current_local_line_table_path(tmp_path,monkeypatch):
+    from prism.modeling.models import agn,lines
+    from prism.modeling.models.lines import tables
+    for name in ('linetable_path','_wmin','_wmax'):
+        monkeypatch.setattr(tables,name,getattr(tables,name))
+    setup_local_lines(min=4700,max=7000,dirpath=str(tmp_path/'lines'))
+    assert lines.linetable_path==str(tmp_path/'lines')
+    assert lines._wmin==4700 and lines._wmax==7000
+    iron=agn.fe(name='iron',fwhm=1200)
+    assert iron.name=='iron' and len(iron.lines)>0

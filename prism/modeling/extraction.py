@@ -6,17 +6,20 @@ PSF and independent voxel errors. Spatial units are local zero-based pixels.
 """
 
 import warnings
+import json
 from numbers import Integral
 
 import numpy as np
 from astropy import units as u
 from astropy.modeling.models import Const2D
 from astropy.table import Table
+from astropy.io import fits
+from .._version import __version__
 
 from ..data import Spectrum
 from ..data.core import world_from_pixel_barycenter
 
-__all__ = ['aperture', 'optimal']
+__all__ = ['aperture', 'optimal', 'write', 'read']
 
 
 def _inputs(cube, psf, mask, center, factor):
@@ -61,11 +64,14 @@ def _result(cube, psf, rows, center, factor, method, mask, background=None):
                   'factor': int(factor), 'psf_domain': psf.domain.tolist(),
                   'psf_waveunit': str(psf.unit), 'mask': np.asarray(mask).tolist(),
                   'uncertainty': 'conditional on fixed PSF; independent voxel errors'}
+    ctype = '' if cube.wcs is None else str(cube.wcs.wcs.ctype[-1])
+    table.meta['wave_type'] = 'air' if ctype.startswith('AWAV') else 'vacuum' if ctype.startswith('WAVE') else 'unknown'
     if method == 'optimal':
         table.meta['covnames'] = ['flux', 'background']
         table.meta['background'] = ('none' if background is None else
                                     'fixed constant' if background.amplitude.fixed else 'fitted constant')
     ra, dec = world_from_pixel_barycenter(cube.wcs, float(center[1]), float(center[0]))
+    table.meta.update(ra=ra, dec=dec)
     spectrum = Spectrum(cube.z.copy(), np.asarray(table['flux']),
                         yerr=np.asarray(table['flux_err']), xunit=cube.zunit,
                         yunit=cube.unit, xtype=cube.ztype, ytype=cube.valuetype,
@@ -285,3 +291,146 @@ def optimal(cube, psf, mask, *, center, background=None, factor=None):
             row['message'] = str(exc)
         rows.append(row)
     return _result(cube, psf, rows, center, geometry['factor'], 'optimal', mask, background)
+
+
+def write(table, filename, *, overwrite=False):
+    """Save an extracted spectrum and numerical diagnostics as a FITS product.
+
+    Parameters
+    ----------
+    table : astropy.table.Table
+        Extraction diagnostics, or the constant-correction table, with wave,
+        flux and flux_err columns and explicit units. flux_err is one-sigma
+        statistical uncertainty. success/message are inspection-only fields
+        and are not exported. Failed channels retain NaN flux and error.
+    filename : path-like
+        Output FITS path.
+    overwrite : bool, optional
+        Default False; protect existing files.
+
+    Notes
+    -----
+    SPECTRUM contains only WAVELENGTH, FLUX, ERROR, one row per sample.
+    DIAGNOSTICS holds remaining numerical columns; APERTURE stores spatial
+    weights when supplied in meta['mask']. Compact METADATA JSON preserves
+    metadata and column ordering without executable serialization or lossy
+    FITS-header conversion. PRIMARY exposes short, descriptive FITS keywords.
+    When celestial WCS is available, ra/dec metadata record the supplied PSF
+    centroid in degrees and are written to PRIMARY and SPECTRUM. Override these
+    coordinates in table.meta before writing if needed.
+    No IVOA Spectrum Data Model or OGIP compliance is claimed.
+    Unsupported/nonfinite metadata raises an error rather than being dropped.
+
+    Examples
+    --------
+    >>> write(diagnostics, 'aperture-spectrum.fits', overwrite=True)
+    >>> spectrum, diagnostics = read('aperture-spectrum.fits')
+    """
+    required = ['wave', 'flux', 'flux_err']
+    if any(name not in table.colnames for name in required):
+        raise ValueError('table must contain wave, flux and flux_err.')
+    if any(table[name].unit is None for name in required):
+        raise ValueError('Spectral coordinates, flux and error require explicit units.')
+    if not u.Unit(table['wave'].unit).is_equivalent(u.m):
+        raise ValueError('wave must have a wavelength unit.')
+    if table['flux'].unit != table['flux_err'].unit:
+        raise ValueError('flux and flux_err must have the same unit.')
+    if any(table[name].ndim != 1 for name in required):
+        raise ValueError('Spectrum columns must be one-dimensional.')
+    if np.any(np.asarray(table['flux_err']) < 0):
+        raise ValueError('Flux errors must be non-negative.')
+    metadata = dict(table.meta)
+    mask = metadata.pop('mask', None)
+    columns = [name for name in table.colnames if name not in ('success', 'message')]
+    payload = json.dumps({'meta': metadata, 'columns': columns}, allow_nan=False)
+    header = fits.Header({'EXTRVER': 1, 'PRISMVER': __version__, 'ERRTYPE': 'STDDEV'})
+    mapping = {'method': 'METHOD', 'factor': 'FACTOR', 'psf_waveunit': 'PSFUNIT',
+               'uncertainty': 'UNCERT', 'source': 'SOURCE', 'psf_source': 'PSFSRC',
+               'correction': 'CORRECT', 'averaging': 'AVGTYPE', 'wave_type': 'WAVETYPE',
+               'background': 'BGMODE', 'ra': 'RA', 'dec': 'DEC'}
+    for key, keyword in mapping.items():
+        if key in metadata and metadata[key] is not None:
+            header[keyword] = metadata[key]
+    for key, keywords in [('center', ('CENY', 'CENX')), ('psf_domain', ('PSFMIN', 'PSFMAX'))]:
+        if key in metadata:
+            if len(metadata[key]) != 2:
+                raise ValueError(f'{key} must contain two values.')
+            for keyword, value in zip(keywords, metadata[key]):
+                header[keyword] = float(value)
+    spectrum = table[required].copy()
+    spectrum.meta.clear()
+    spectrum.rename_columns(required, ['WAVELENGTH', 'FLUX', 'ERROR'])
+    spectral_hdu = fits.BinTableHDU(spectrum, name='SPECTRUM')
+    for keyword in ('RA', 'DEC'):
+        if keyword in header:
+            spectral_hdu.header[keyword] = (header[keyword], 'Source position [deg]')
+    hdus = [fits.PrimaryHDU(header=header), spectral_hdu]
+    diagnostic_names = [name for name in columns if name not in required]
+    if diagnostic_names:
+        diagnostics = table[diagnostic_names].copy()
+        diagnostics.meta.clear()
+        if any(diagnostics[name].dtype.kind not in 'biufc' for name in diagnostic_names):
+            raise ValueError('Diagnostic columns must be numerical.')
+        hdus.append(fits.BinTableHDU(diagnostics, name='DIAGNOSTICS'))
+    if mask is not None:
+        mask = np.asarray(mask)
+        if (mask.ndim != 2 or not np.isfinite(mask).all() or np.any(mask < 0)
+                or np.any(mask > 1) or not np.any(mask > 0)):
+            raise ValueError('Aperture weights must be a nonempty 2-D array in [0, 1].')
+        boolean = mask.dtype.kind == 'b'
+        aperture = fits.ImageHDU(mask.astype(np.uint8) if boolean else mask, name='APERTURE')
+        aperture.header['MASKTYPE'] = 'BOOLEAN' if boolean else 'WEIGHTS'
+        hdus.append(aperture)
+    meta = fits.BinTableHDU.from_columns([
+        fits.Column(name='JSON', format=f'{len(payload)}A', array=[payload])], name='METADATA')
+    hdus.append(meta)
+    fits.HDUList(hdus).writeto(filename, overwrite=overwrite, checksum=True)
+
+
+def read(filename):
+    """Reload a FITS extraction product written by `write`.
+
+    Parameters
+    ----------
+    filename : path-like
+        Prism extraction FITS product.
+
+    Returns
+    -------
+    spectrum : prism.data.Spectrum
+        Flux, wavelength and one-sigma errors, with units. Invalid channels
+        retain NaN values. For the spectral columns alone, the generic
+        Spectrum.from_fits(filename, ext='SPECTRUM') also works.
+    diagnostics : astropy.table.Table
+        Exported spectral and numerical diagnostic columns with metadata and
+        the exact aperture weights restored. Inspection-only success/message
+        fields are deliberately absent; no convergence flags are fabricated.
+    """
+    with fits.open(filename, memmap=False) as hdus:
+        if hdus[0].header.get('EXTRVER') != 1 or hdus[0].header.get('ERRTYPE') != 'STDDEV':
+            raise ValueError('Unsupported extraction FITS format or error convention.')
+        state = json.loads(hdus['METADATA'].data['JSON'][0])
+        table = Table.read(hdus['SPECTRUM'], format='fits')
+        table.rename_columns(['WAVELENGTH', 'FLUX', 'ERROR'], ['wave', 'flux', 'flux_err'])
+        table.meta.clear()
+        if 'DIAGNOSTICS' in hdus:
+            diagnostics = Table.read(hdus['DIAGNOSTICS'], format='fits')
+            if len(diagnostics) != len(table):
+                raise ValueError('Spectrum and diagnostics have different lengths.')
+            for name in diagnostics.colnames:
+                table[name] = diagnostics[name]
+        table = table[state['columns']]
+        table.meta = state['meta']
+        if 'APERTURE' in hdus:
+            mask = hdus['APERTURE'].data
+            if hdus['APERTURE'].header['MASKTYPE'] == 'BOOLEAN':
+                mask = mask.astype(bool)
+            table.meta['mask'] = mask.tolist()
+    spectrum = Spectrum(np.asarray(table['wave']), np.asarray(table['flux']),
+                        yerr=np.asarray(table['flux_err']), xunit=table['wave'].unit,
+                        yunit=table['flux'].unit, xtype='wavelength', dtype=float,
+                        ra=table.meta.get('ra'), dec=table.meta.get('dec'),
+                        meta={'method': table.meta.get('method'),
+                              'uncertainty': table.meta.get('uncertainty'),
+                              'wave_type': table.meta.get('wave_type', 'unknown')})
+    return spectrum, table

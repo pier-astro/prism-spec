@@ -668,8 +668,10 @@ def fitimage(image, model, *, mask=None, background=None, factor=1, init=None):
         Separate background, with its own initial values, fixed flags and
         bounds. None means zero. It is excluded from PSF normalization.
     factor : int, optional
-        Midpoint samples per pixel axis; default 1 samples pixel centers.
-        Integrates the profile without resampling the observations.
+        Sub-pixel samples per axis (factor x factor per pixel); default 1
+        samples pixel centers. Values > 1 integrate the profile over the pixel
+        area to mitigate pixelation bias for sharp or undersampled cores,
+        without resampling the observations.
     init : {None, 'peak'}, optional
         Default None preserves all supplied initial values. 'peak' seeds free
         centroid coordinates and peak amplitude from the brightest valid
@@ -817,10 +819,11 @@ def fitbands(cube, model, bands=20, *, background=None, factor=1):
         slope_x*x + slope_y*y + intercept in local pixels. The background
         never contributes to the PSF flux normalization.
     factor : int, optional
-        Midpoint integration samples per pixel axis, used during fitting and
-        stored for reconstruction. Default 1 samples pixel centers. A value
-        such as 5 approximates pixel integrals; check convergence for your PSF.
-        This integrates the model without resampling the observed data.
+        Sub-pixel samples per axis (factor x factor per pixel), used during
+        fitting and stored for reconstruction; default 1 samples pixel centers.
+        Values > 1 integrate the profile over the pixel area to mitigate
+        pixelation bias for sharp or undersampled cores, without resampling the
+        observed data.
 
     Returns
     -------

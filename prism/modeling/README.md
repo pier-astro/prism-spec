@@ -196,3 +196,37 @@ conditional on the fixed PSF/center and independent voxel uncertainties; PSF,
 centering, calibration and model-mismatch uncertainties and resampling covariance
 are not propagated. The docstrings document the exact estimators and failure
 policies. Treat these errors and unknown host contamination separately.
+
+
+### FITS extraction products
+
+```python
+from prism.modeling.extraction import write, read
+from prism.data import Spectrum
+
+write(diagnostics, 'aperture-spectrum.fits', overwrite=True)
+spectrum, diagnostics = read('aperture-spectrum.fits')
+# Spectral columns alone:
+spectrum = Spectrum.from_fits('aperture-spectrum.fits', ext='SPECTRUM')
+```
+
+The same writer accepts aperture, optimal and constant-correction tables.
+`SPECTRUM` contains only `WAVELENGTH`, `FLUX`, `ERROR`, with explicit units;
+`ERROR` is a standard deviation. Numerical extra columns, including covariance,
+go in `DIAGNOSTICS`. `APERTURE` preserves boolean masks or fractional weights.
+Inspection-only `success` and `message` are not exported. Failed samples remain
+NaN. Short PRIMARY keywords record method, PSF domain/unit, center, correction
+and provenance; `WAVETYPE` records air/vacuum/unknown wavelength convention.
+The compact `METADATA` JSON extension preserves the complete metadata and
+exported column order. Unknown metadata is preserved or rejected explicitly,
+never silently discarded. FITS checksums are written; existing files are
+protected unless `overwrite=True`. This practical FITS layout does not claim
+formal IVOA Spectrum Data Model or OGIP compliance.
+
+Extraction FITS products preserve the supplied PSF centroid as RA/Dec in degrees
+when the cube has a celestial WCS. Coordinates are stored in both PRIMARY and
+SPECTRUM and restored by both extraction `read` and `Spectrum.from_fits`.
+Without a celestial WCS, coordinates remain unknown. To override the saved
+position, set `diagnostics.meta['ra']` and `diagnostics.meta['dec']` before writing.
+Generic `Cube.extract_spectrum` instead uses the aperture-weighted geometric
+barycenter; an explicitly supplied PSF center is not replaced by that position.

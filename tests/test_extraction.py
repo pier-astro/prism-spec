@@ -137,3 +137,106 @@ def test_public_import_and_wavelength_unit_conversion():
     spectrum,table=aperture(cube,psf,mask,center=center)
     assert spectrum.xunit==u.nm and table['wave'].unit==u.nm
     np.testing.assert_allclose(spectrum.y,flux,rtol=4e-4)
+
+
+@pytest.mark.parametrize('method',['aperture','optimal','constant'])
+def test_extraction_fits_roundtrip_without_warnings(tmp_path,method):
+    import warnings
+    from astropy.io import fits
+    from prism.data import Spectrum
+    from prism.modeling.extraction import write,read
+    cube,psf,mask,center,_,_=_source(background=2)
+    if method=='optimal':
+        _,table=optimal(cube,psf,mask,center=center,background=Const2D())
+    else:
+        mask=mask.astype(float);mask[5,5]=.3
+        _,table=aperture(cube,psf,mask,center=center)
+    if method=='constant':
+        scale=float(np.mean(1/np.asarray(table['fraction'])))
+        table=table[['wave','rawflux','rawerr','success']].copy()
+        table.rename_columns(['rawflux','rawerr'],['flux','flux_err'])
+        table['flux']*=scale;table['flux_err']*=scale
+        table.meta.update(method='constant aperture correction',correction=scale,averaging='Unweighted mean')
+    table.meta.update(source='cube.fits',psf_source='psf.fits',wave_type='air')
+    path=tmp_path/f'{method}.fits'
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        write(table,path)
+        spectrum,loaded=read(path)
+        generic=Spectrum.from_fits(path,ext='SPECTRUM',dtype=float)
+    assert not caught,[str(w.message) for w in caught]
+    assert loaded.meta==table.meta
+    assert 'success' not in loaded.colnames and 'message' not in loaded.colnames
+    for name in loaded.colnames:
+        np.testing.assert_array_equal(loaded[name],table[name])
+        assert loaded[name].unit==table[name].unit
+    np.testing.assert_array_equal(spectrum.y,table['flux'])
+    np.testing.assert_array_equal(generic.yerr,table['flux_err'])
+    with fits.open(path,checksum=True) as hdus:
+        assert hdus['SPECTRUM'].columns.names==['WAVELENGTH','FLUX','ERROR']
+        np.testing.assert_array_equal(hdus['APERTURE'].data,np.asarray(mask))
+        assert not any(card.keyword.startswith('HIERARCH') or len(card.keyword)>8 for card in hdus[0].header.cards)
+        for hdu in hdus:assert hdu.verify_checksum()==1 and hdu.verify_datasum()==1
+    with pytest.raises(OSError):write(table,path)
+
+
+def test_extraction_fits_failed_channels_and_metadata_validation(tmp_path):
+    from prism.modeling.extraction import write,read
+    cube,psf,mask,center,_,_=_source()
+    cube.mask[2,5,5]=False
+    with pytest.warns(UserWarning,match='failed'):
+        _,table=aperture(cube,psf,mask,center=center)
+    write(table,tmp_path/'failed.fits')
+    spectrum,loaded=read(tmp_path/'failed.fits')
+    assert np.isnan(spectrum.y[2]) and np.isnan(spectrum.yerr[2])
+    np.testing.assert_array_equal(loaded.meta['mask'],mask)
+    table.meta['custom']={'arbitrary':[1,2,3],'note':'Preserved, not dropped'}
+    write(table,tmp_path/'custom.fits')
+    assert read(tmp_path/'custom.fits')[1].meta==table.meta
+    table.meta['bad']=object()
+    with pytest.raises(TypeError):write(table,tmp_path/'unsupported.fits')
+    assert not (tmp_path/'unsupported.fits').exists()
+
+
+def test_extraction_coordinates_survive_both_fits_readers(tmp_path):
+    from astropy.wcs import WCS
+    from astropy.io import fits
+    from prism.data import Spectrum
+    from prism.modeling.extraction import write,read
+    cube,psf,mask,center,_,_=_source()
+    wcs=WCS(naxis=3)
+    wcs.wcs.ctype=['RA---TAN','DEC--TAN','AWAV']
+    wcs.wcs.crpix=[6,6,1];wcs.wcs.crval=[193.,-13.,5000]
+    wcs.wcs.cdelt=[-.2/3600,.2/3600,1]
+    cube.wcs=wcs
+    expected=wcs.celestial.all_pix2world([[center[1],center[0]]],0)[0]
+    spectrum,table=aperture(cube,psf,mask,center=center)
+    np.testing.assert_allclose([spectrum.ra,spectrum.dec],expected,rtol=0,atol=1e-12)
+    write(table,tmp_path/'coords.fits')
+    for loaded in [read(tmp_path/'coords.fits')[0],Spectrum.from_fits(tmp_path/'coords.fits')]:
+        np.testing.assert_allclose([loaded.ra,loaded.dec],expected,rtol=0,atol=1e-12)
+    # Generic aperture extraction uses its geometric barycenter, not the PSF center.
+    raw=cube.extract_spectrum(mask)
+    geometric=wcs.celestial.all_pix2world([[5,5]],0)[0]
+    np.testing.assert_allclose([raw.ra,raw.dec],geometric,rtol=0,atol=1e-12)
+    table.meta.update(ra=12.3,dec=-4.5)
+    write(table,tmp_path/'override.fits')
+    assert (read(tmp_path/'override.fits')[0].ra,read(tmp_path/'override.fits')[0].dec)==(12.3,-4.5)
+    # External products may store coordinates only in PRIMARY.
+    with fits.open(tmp_path/'coords.fits',mode='update') as hdus:
+        del hdus['SPECTRUM'].header['RA'];del hdus['SPECTRUM'].header['DEC']
+    generic=Spectrum.from_fits(tmp_path/'coords.fits')
+    np.testing.assert_allclose([generic.ra,generic.dec],expected,rtol=0,atol=1e-12)
+    explicit=Spectrum.from_fits(tmp_path/'coords.fits',ra=1.,dec=2.)
+    assert (explicit.ra,explicit.dec)==(1.,2.)
+
+
+def test_no_celestial_wcs_does_not_invent_coordinates(tmp_path):
+    from prism.data import Spectrum
+    from prism.modeling.extraction import write,read
+    cube,psf,mask,center,_,_=_source()
+    spectrum,table=aperture(cube,psf,mask,center=center)
+    assert spectrum.ra is None and spectrum.dec is None
+    write(table,tmp_path/'unknown.fits')
+    assert read(tmp_path/'unknown.fits')[0].ra is None
+    assert Spectrum.from_fits(tmp_path/'unknown.fits').dec is None

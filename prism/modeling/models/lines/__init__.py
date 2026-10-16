@@ -16,12 +16,12 @@ from .groups import (
     GaussianLines, LorentzianLines, VoigtLines,
 )
 
-# Allow attribute access to mutable module-level state in base
-from . import base as _base
+# Expose the current line-table paths and wavelength filter state.
+from . import tables as _tables
 
 def __getattr__(name):
     if name in ('linetable_path', '_wmin', '_wmax', 'resource_path'):
-        return getattr(_base, name)
+        return getattr(_tables, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

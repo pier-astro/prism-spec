@@ -447,8 +447,9 @@ class Spectrum(Data1D):
             uncertainties. Defaults are ``'WAVELENGTH'``, ``'FLUX'``, and
             ``'ERROR'``.
         ra, dec, redshift : optional
-            Metadata stored on the created spectrum. Defaults fall back to the
-            FITS header when present.
+            Metadata stored on the created spectrum. Coordinates default to
+            the spectral-extension header, then PRIMARY when absent there.
+            Explicit ra/dec values take precedence.
         name : str, optional
             Spectrum name. Defaults to the filename stem.
         xtype, ytype : str, optional
@@ -472,8 +473,8 @@ class Spectrum(Data1D):
             xunit = header.get(f'TUNIT{colnames.index(x_col) + 1}', None)
             yunit = header.get(f'TUNIT{colnames.index(y_col) + 1}', None)
 
-            ra = ra if ra is not None else header.get('RA')
-            dec = dec if dec is not None else header.get('DEC')
+            ra = ra if ra is not None else header.get('RA', hdul[0].header.get('RA'))
+            dec = dec if dec is not None else header.get('DEC', hdul[0].header.get('DEC'))
             redshift = redshift if redshift is not None else header.get('REDSHIFT')
             name = name if name is not None else os.path.splitext(os.path.basename(filename))[0]
 
