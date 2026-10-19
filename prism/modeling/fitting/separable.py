@@ -9,20 +9,25 @@ are optimized numerically.
 from __future__ import annotations
 
 import numpy as np
+from .extension import _validate_spectral_inputs
+from .data import _prepare_fit_data
 from numpy.linalg import LinAlgError
 from scipy import optimize
 from astropy.modeling import CompoundModel
-from astropy.modeling.fitting import Fitter, model_to_fit_params
+from ..composition import Model, _is_compound
+from astropy.modeling.fitting import Fitter
 
 from .extension import (
+    _attach_covariance,
     _coerce_max_evaluations,
     _fitter_covariance,
     _fitter_stdevs,
     get_max_evaluations,
-    validate_symmetric_yerr,
 )
 from .multifit import MultiFitMixin, _MULTIFIT_STAT_KEYS
 from .utils import (
+    _free_parameter_indices,
+    _parameter_index_array,
     _apply_tied_fast,
     _get_tied_info,
     _prime_tied_analytic_jacobian_warning,
@@ -33,7 +38,7 @@ __all__ = ['SeparableTRF', 'inspect_separable']
 
 
 def _slice_to_indices(model, name):
-    indices = np.arange(model.parameters.size)[model._param_metrics[name]['slice']]
+    indices = _parameter_index_array(model, name)
     if indices.size != 1:
         raise ValueError(
             f"SeparableTRF currently supports scalar parameters only; '{name}' has size {indices.size}."
@@ -42,6 +47,8 @@ def _slice_to_indices(model, name):
 
 
 def _leaf_linear_names(model):
+    if isinstance(model, Model) and model.op is None:
+        model = model.component
     names = getattr(model, '_separable_linear_params', None)
     if names is None:
         if getattr(model, 'linear', False):
@@ -53,7 +60,7 @@ def _leaf_linear_names(model):
 
 
 def _auto_linear_param_names(model):
-    if isinstance(model, CompoundModel):
+    if _is_compound(model):
         full_names = []
         for idx in range(model.n_submodels):
             submodel = model[idx]
@@ -114,8 +121,11 @@ def _analytic_weighted_jacobian(model, x, weights, row_indices):
 def _project_from_linear_span(weighted_design, weighted_jacobian):
     if weighted_design.size == 0:
         return weighted_jacobian
-    q, _ = np.linalg.qr(weighted_design, mode='reduced')
-    return weighted_jacobian - q @ (q.T @ weighted_jacobian)
+    # Dependent or zero profiles must not create extra projection directions.
+    u, singular, _ = np.linalg.svd(weighted_design, full_matrices=False)
+    cutoff = max(weighted_design.shape) * np.finfo(singular.dtype).eps * singular[0]
+    basis = u[:, singular > cutoff]
+    return weighted_jacobian - basis @ (basis.T @ weighted_jacobian)
 
 
 def inspect_separable(model, linear_params='auto'):
@@ -152,7 +162,7 @@ def inspect_separable(model, linear_params='auto'):
     linear; a non-linear tie like ``amp2 = amp1**2`` does not.
     """
     candidate_linear = _resolve_linear_param_names(model, linear_params)
-    _, fit_indices, _ = model_to_fit_params(model)
+    fit_indices = _free_parameter_indices(model)
     fit_indices = set(np.asarray(fit_indices, dtype=int).tolist())
 
     free_params = []
@@ -266,7 +276,8 @@ class SeparableTRF(MultiFitMixin, Fitter):
 
     When the inner linear block is unconstrained and the model exposes
     analytic derivatives, ``SeparableTRF`` automatically uses a projected
-    analytic outer Jacobian. Bounded linear blocks fall back to numeric outer
+    analytic outer Jacobian approximation, omitting the residual-dependent
+    term of the exact variable-projection derivative. Bounded linear blocks fall back to numeric outer
     derivatives.
 
     A tied parameter remains safe inside the linear block only if the tie is
@@ -312,7 +323,7 @@ class SeparableTRF(MultiFitMixin, Fitter):
         return entry
 
     def _partition_parameters(self, model, linear_param_names):
-        _, fit_indices, _ = model_to_fit_params(model)
+        fit_indices = _free_parameter_indices(model)
         fit_indices = np.asarray(fit_indices, dtype=int)
         free_names = []
         for name in model.param_names:
@@ -397,10 +408,16 @@ class SeparableTRF(MultiFitMixin, Fitter):
 
     def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
                  yerr=None, statistic='chi2', inplace=True, linear_params=None, **kwargs):
+        _validate_spectral_inputs(model, x, y, z, yerr, weights, statistic=statistic)
         if z is not None:
             raise NotImplementedError("SeparableTRF currently supports only 1-D models.")
-        if yerr is not None:
-            yerr = validate_symmetric_yerr(yerr)
+        x, y, yerr, weights, valid = _prepare_fit_data(
+            x, y, yerr, weights, kwargs.pop('mask', None),
+            filter_non_finite=kwargs.pop('filter_non_finite', False))
+        if not np.all(valid):
+            x, y = x[valid], y[valid]
+            yerr = None if yerr is None else yerr[valid]
+            weights = None if weights is None else weights[valid]
         if yerr is not None and weights is None:
             weights = 1.0 / np.asarray(yerr)
 
@@ -418,13 +435,18 @@ class SeparableTRF(MultiFitMixin, Fitter):
         )
 
         if fit_indices.size == 0:
+            self._set_parameters(fit_model, fit_model.parameters.copy(), tied_info)
+            residual = fit_model(x) - y
+            if weights is not None:
+                residual = residual * weights
+            stat = float(np.dot(residual, residual))
             self.fit_info = {
                 'success': True,
                 'nfev': 0,
                 'message': 'No free parameters',
                 'param_cov': None,
-                'cost': 0.0,
-                'stat': 0.0,
+                'cost': 0.5 * stat,
+                'stat': stat,
                 'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
                 'ndata': len(y),
                 'nparam': len(fit_model.param_names),
@@ -435,7 +457,7 @@ class SeparableTRF(MultiFitMixin, Fitter):
                 'n_linear': 0,
                 'n_nonlinear': 0,
             }
-            return fit_model
+            return _attach_covariance(fit_model, None)
 
         if len(linear_free_names) == 0:
             raise ValueError(
@@ -625,10 +647,4 @@ class SeparableTRF(MultiFitMixin, Fitter):
             'outer_jacobian': 'none' if nonlinear_indices.size == 0 else outer_jac_label,
         }
 
-        if param_cov is not None:
-            std = np.sqrt(np.maximum(np.diag(param_cov), 0.0))
-            for free_index, sigma in zip(fit_indices, std):
-                getattr(fit_model, fit_model.param_names[int(free_index)]).std = sigma
-            fit_model._param_cov = np.asarray(param_cov)
-
-        return fit_model
+        return _attach_covariance(fit_model, param_cov)

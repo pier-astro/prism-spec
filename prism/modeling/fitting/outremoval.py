@@ -1,13 +1,10 @@
-import warnings
 import numpy as np
 from astropy.stats import sigma_clip
-from astropy.utils.exceptions import AstropyUserWarning
-from astropy.modeling.fitting import Fitter, model_to_fit_params
+from astropy.modeling.fitting import Fitter
 
-from .extension import _fitter_covariance, _fitter_stdevs
+from .extension import _fitter_covariance, _fitter_stdevs, _validate_native_inputs
+from .data import _prepare_fit_data
 from .multifit import MultiFitMixin
-from .utils import _apply_tied_fast, _get_tied_info
-import copy
 
 __all__ = ['FittingWithOutlierRemoval']
 
@@ -31,7 +28,11 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
     -----
     The wrapper alternates between fitting and residual clipping. Newly flagged
     outliers are assigned zero weight in subsequent iterations, so the wrapped
-    fitter sees a standard weighted least-squares problem at every step.
+    fitter sees a standard weighted least-squares problem at every step. Supplied
+    errors become residual weights before clipping, so they cannot reintroduce
+    rejected samples. The outlier function receives masked raw residuals and
+    may return a masked array or a boolean rejection mask (True means rejected).
+    Exceptions from the inner fitter propagate.
     """
 
     covariance = property(_fitter_covariance)
@@ -80,70 +81,50 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
         return worker_fitter
 
     def __call__(self, model, x, y, z=None, weights=None, **kwargs):
-        # We assume _prepare_fitting logic has run or isn't needed here 
-        # because the internal Fitter will get the wrapped call.
-        if weights is None:
-            weights = np.ones_like(y, dtype=float)
+        yerr = kwargs.pop('yerr', None)
+        _validate_native_inputs(model, x, y, z, yerr, weights)
+        x, y, yerr, weights, valid = _prepare_fit_data(
+            x, y, yerr, weights, kwargs.pop('mask', None),
+            filter_non_finite=kwargs.pop('filter_non_finite', False))
+        if self.niter < 0:
+            raise ValueError('niter must be nonnegative.')
+        if weights is not None:
+            weights = np.array(weights, dtype=float, copy=True)
+        elif yerr is not None:
+            weights = np.zeros_like(y, dtype=float)
+            np.divide(1., np.asarray(yerr), out=weights, where=valid)
         else:
-            weights = np.copy(weights)
-            
-        best_model = None
-        last_mask = np.zeros_like(y, dtype=bool)
-        
-        for i in range(self.niter + 1):
-            
-            # Pass to inner fitter
-            call_weights = np.copy(weights)
-            
-            try:
-                # The underlying fitter might be patched with wrapped_call
-                # and accept filter_non_finite, yerr etc.
-                result_model = self._fitter(model, x, y, z=z, weights=call_weights, **kwargs)
-            except Exception as e:
-                if self.verbose:
-                    print(f"FittingWithOutlierRemoval iteration {i} failed: {e}")
-                break
-                
-            best_model = result_model
-            fit_info = getattr(self._fitter, 'fit_info', {})
-            
-            # If things went pear-shaped, jump out
-            if not fit_info.get('success', False):
-                break
-                
-            if i == self.niter:
-                break
-                
-            # Calculate residuals
-            y_fit = result_model(x)
-            residuals = y - y_fit
-            
-            # Isolate valid elements
-            valid_mask = (weights > 0)
-            if not np.any(valid_mask):
-                break 
-                
-            masked_residuals = np.ma.array(residuals, mask=~valid_mask)
-            
-            clipped = self.outlier_func(masked_residuals, **self.outlier_kwargs)
-            
-            if hasattr(clipped, 'mask'):
-                current_mask = clipped.mask
-                if np.isscalar(current_mask):
-                    current_mask = np.ones_like(residuals, dtype=bool) if current_mask else np.zeros_like(residuals, dtype=bool)
-            else:
-                current_mask = np.zeros_like(residuals, dtype=bool)
-                
-            # Has mask stabilized?
-            if np.array_equal(current_mask, last_mask):
-                break
-            
-            last_mask = current_mask.copy()
-            
-            # Force weights of newly identified outliers to zero
-            weights[current_mask] = 0.0
+            weights = np.ones_like(y, dtype=float)
+        weights[~valid] = 0.
+        rejected = ~valid
 
-        self.outlier_mask = last_mask
-        self.fit_info = getattr(self._fitter, 'fit_info', {})
-        
+        for iteration in range(self.niter + 1):
+            # Pass one effective weighting, so errors cannot undo rejection.
+            best_model = self._fitter(model, x, y, z=z, weights=weights.copy(), **kwargs)
+            self.fit_info = getattr(self._fitter, 'fit_info', {})
+            if not self.fit_info.get('success', False) or iteration == self.niter:
+                break
+            coordinates = np.isfinite(x)
+            if np.all(coordinates):
+                residuals = np.ma.array(y - best_model(x), mask=rejected)
+            else:
+                residuals = np.ma.masked_all(y.shape)
+                residuals[coordinates] = y[coordinates] - best_model(x[coordinates])
+                residuals.mask |= rejected
+            clipped = self.outlier_func(residuals, **self.outlier_kwargs)
+            if np.ma.isMaskedArray(clipped):
+                current_mask = np.ma.getmaskarray(clipped)
+            else:
+                current_mask = np.asarray(clipped)
+                if current_mask.dtype != bool:
+                    raise ValueError('outlier_func must return a masked array or boolean mask.')
+            if current_mask.shape != y.shape:
+                raise ValueError('Outlier mask must have the same shape as y.')
+            current_mask = rejected | current_mask
+            if np.array_equal(current_mask, rejected):
+                break
+            rejected = current_mask
+            weights[rejected] = 0.
+
+        self.outlier_mask = rejected
         return best_model

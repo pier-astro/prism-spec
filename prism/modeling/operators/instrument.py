@@ -50,9 +50,9 @@ import yaml
 
 from scipy.interpolate import interp1d
 from scipy.sparse import csr_matrix, issparse
-from scipy.special import erf
+from scipy.special import ndtr
 from astropy.io import fits
-from .matop import LinearOperatorModel, is_linear_operator_pipe
+from .matop import LinearOperatorModel, is_linear_operator_pipe, _apply_matrix, _sample_response
 
 
 # --- Path utilities ---
@@ -192,15 +192,49 @@ def list_instruments() -> dict:
     return result
 
 
+def _response_grid(wavelength_grid):
+    """Own a finite, strictly increasing one-dimensional response grid."""
+    wave = np.array(wavelength_grid, dtype=float, copy=True)
+    if wave.ndim != 1 or wave.size == 0 or not np.all(np.isfinite(wave)):
+        raise ValueError('Response wavelengths must be a non-empty finite 1-D array.')
+    if np.any(np.diff(wave) <= 0):
+        raise ValueError('Response wavelengths must be strictly increasing.')
+    return wave
+
+
+def _bin_edges(wave):
+    """Infer contiguous bin edges from centers, extending half a step at each end."""
+    if len(wave) < 2:
+        raise ValueError('Gaussian responses require at least two wavelength centers.')
+    return np.r_[wave[0] - (wave[1] - wave[0])/2,
+                 (wave[:-1] + wave[1:])/2,
+                 wave[-1] + (wave[-1] - wave[-2])/2]
+
+
+def _response_matrix(matrix, size=None):
+    matrix = csr_matrix(matrix)
+    if matrix.shape[0] != matrix.shape[1] or (size is not None and matrix.shape[0] != size):
+        raise ValueError('Response matrix must be square and match the wavelength grid.')
+    if not np.all(np.isfinite(matrix.data)):
+        raise ValueError('Response matrix must contain only finite values.')
+    return matrix
+
+
 # --- InstrumentResponse class ---
 
 class InstrumentResponse:
     """
     Class for building, loading, saving, and cropping instrumental response matrices.
     
-    The response matrix is a square matrix where each row represents the redistribution
-    of flux from one wavelength bin to all others due to the instrument's LSF.
-    Rows are normalized to sum to 1 (flux conservation).
+    The density operator acts as ``output = matrix @ input``: rows index output
+    samples and columns index input samples. It is also directly callable on
+    spectra or sample-major Jacobian columns.
+
+    Gaussian builders integrate the LSF over destination bins at each input
+    center, including the input/output bin-width ratio for density arrays.
+    Flux outside the supplied band is lost, without artificial renormalization.
+    Model values are evaluated at native centers; sampling convergence matters.
+    Matrices loaded from files are used as stored, without guessing a convention.
     
     Use classmethods to construct:
     - from_variable_gaussian_resolution(): R(λ) varies with wavelength
@@ -213,8 +247,17 @@ class InstrumentResponse:
     """
     
     def __init__(self, wavelength_grid: np.ndarray, response_matrix: csr_matrix):
-        self.wavelength_grid = np.asarray(wavelength_grid)
-        self.response_matrix = response_matrix
+        self.wavelength_grid = _response_grid(wavelength_grid)
+        self.response_matrix = _response_matrix(response_matrix, len(self.wavelength_grid))
+        self._bin_widths = np.diff(_bin_edges(self.wavelength_grid)) if len(self.wavelength_grid) > 1 else None
+
+    def __call__(self, values):
+        """Apply the response to a spectrum or sample-major Jacobian columns.
+
+        The first axis must match the native grid. Quantity units are retained;
+        normalization and throughput are those encoded in the stored matrix.
+        """
+        return _apply_matrix(self.response_matrix, values)
 
     # ---- BUILDERS ----
     
@@ -292,7 +335,7 @@ class InstrumentResponse:
         """
         if R <= 0:
             raise ValueError("Resolution R must be positive.")
-        delta_lam = wavelength_grid / R
+        delta_lam = np.asarray(wavelength_grid) / R
         sigmas = delta_lam / (2 * np.sqrt(2 * np.log(2)))
         matrix = cls._build_sparse_gaussian_matrix(wavelength_grid, sigmas)
         return cls(wavelength_grid, matrix)
@@ -335,12 +378,6 @@ class InstrumentResponse:
         InstrumentResponse
             The wrapped response matrix.
         """
-        if matrix.shape[0] != matrix.shape[1]:
-            raise ValueError("Response matrix must be square.")
-        if matrix.shape[0] != len(wavelength_grid):
-            raise ValueError("Matrix dimensions must match wavelength grid length.")
-        if not issparse(matrix):
-            matrix = csr_matrix(matrix)
         return cls(wavelength_grid, matrix)
 
     # ---- LOADERS ----
@@ -364,7 +401,13 @@ class InstrumentResponse:
             wavelength_grid = hdul[1].data
             dense_matrix = hdul[2].data.astype(np.float64)
             matrix = csr_matrix(dense_matrix)
-        return cls(wavelength_grid, matrix)
+            response = cls(wavelength_grid, matrix)
+            if 'BINWIDTH' in hdul:
+                widths = np.asarray(hdul['BINWIDTH'].data, dtype=float)
+                if widths.shape != response.wavelength_grid.shape or not np.all(np.isfinite(widths)) or np.any(widths <= 0):
+                    raise ValueError('Stored bin widths must be finite, positive and match the wavelength grid.')
+                response._bin_widths = widths.copy()
+        return response
 
     @classmethod
     def from_instrument(cls, instrument: str) -> "InstrumentResponse":
@@ -415,36 +458,39 @@ class InstrumentResponse:
     @staticmethod
     def _compute_sigmas_variable(wavelength_grid, lambda_R, R_values, interp_kind):
         """Compute sigma array from variable R(λ)."""
-        _R_interp = interp1d(
-            lambda_R, R_values, kind=interp_kind, 
-            bounds_error=False, fill_value=(R_values[0], R_values[-1])
-        )
-        R = np.maximum(_R_interp(wavelength_grid), 1.0)
-        delta_lam = wavelength_grid / R
-        return delta_lam / (2 * np.sqrt(2 * np.log(2)))
+        wavelength_grid = _response_grid(wavelength_grid)
+        lambda_R = _response_grid(lambda_R)
+        R_values = np.asarray(R_values, dtype=float)
+        if R_values.shape != lambda_R.shape or not np.all(np.isfinite(R_values)) or np.any(R_values <= 0):
+            raise ValueError('Resolving powers must be finite, positive and match lambda_R.')
+        R = interp1d(lambda_R, R_values, kind=interp_kind, bounds_error=False,
+                     fill_value=(R_values[0], R_values[-1]))(wavelength_grid)
+        return wavelength_grid / R / (2*np.sqrt(2*np.log(2)))
 
     @staticmethod
     def _build_sparse_gaussian_matrix(wavelength_grid, sigmas):
-        """Build sparse Gaussian response matrix."""
-        N = len(wavelength_grid)
-        wstep = np.diff(wavelength_grid)[0]
-        data, row_indices, col_indices = [], [], []
-        lower_edges = wavelength_grid - wstep / 2
-        upper_edges = wavelength_grid + wstep / 2
-        
-        for i, (lambda_real, sigma) in enumerate(zip(wavelength_grid, sigmas)):
-            a = (lower_edges - lambda_real) / (sigma * np.sqrt(2))
-            b = (upper_edges - lambda_real) / (sigma * np.sqrt(2))
-            integrals = 0.5 * (erf(b) - erf(a))
-            row_sum = integrals.sum()
-            if row_sum > 1e-9:
-                integrals /= row_sum  # normalize to 1
-            non_zero = integrals > 1e-10
-            data.extend(integrals[non_zero])
-            row_indices.extend([i] * np.sum(non_zero))
-            col_indices.extend(np.where(non_zero)[0])
-            
-        return csr_matrix((data, (row_indices, col_indices)), shape=(N, N))
+        """Redistribute bin-integrated flux; do not return escaped flux to the band."""
+        wave = _response_grid(wavelength_grid)
+        edges = _bin_edges(wave)
+        widths = np.diff(edges)
+        sigmas = np.asarray(sigmas, dtype=float)
+        if sigmas.shape != wave.shape or not np.all(np.isfinite(sigmas)) or np.any(sigmas <= 0):
+            raise ValueError('Gaussian sigmas must be finite, positive and match the wavelength grid.')
+
+        data, rows, columns = [], [], []
+        for j, (center, sigma) in enumerate(zip(wave, sigmas)):
+            # Only visit bins overlapping +/-8 sigma: omitted Gaussian mass <1.3e-15.
+            start = max(0, np.searchsorted(edges, center - 8*sigma, side='right') - 1)
+            stop = min(len(wave), np.searchsorted(edges, center + 8*sigma, side='left'))
+            i = np.arange(start, stop)
+            probability = ndtr((edges[i+1] - center)/sigma) - ndtr((edges[i] - center)/sigma)
+            # Input density -> integrated flux -> redistribution -> output density.
+            density = probability * widths[j] / widths[i]
+            nonzero = density > 0
+            data.extend(density[nonzero])
+            rows.extend(i[nonzero])
+            columns.extend([j]*np.count_nonzero(nonzero))
+        return csr_matrix((data, (rows, columns)), shape=(len(wave), len(wave)))
 
     # ---- SAVE & REGISTER ----
     
@@ -456,7 +502,7 @@ class InstrumentResponse:
         filename : str
             The output FITS file path.
         compress : bool, optional
-            If True, uses FITS tile compression for the matrix. Default is ``True``.
+            If True, uses lossless FITS GZIP tile compression. Default is ``True``.
         """
         if self.response_matrix is None:
             raise ValueError("No response matrix to save.")
@@ -464,10 +510,14 @@ class InstrumentResponse:
         wavelength_hdu = fits.ImageHDU(self.wavelength_grid, name='WAVELENGTH')
         dense_matrix = self.response_matrix.toarray()
         if compress:
-            matrix_hdu = fits.CompImageHDU(dense_matrix, name='RESPONSE')
+            matrix_hdu = fits.CompImageHDU(
+                dense_matrix, name='RESPONSE', compression_type='GZIP_1', quantize_level=0.0)
         else:
             matrix_hdu = fits.ImageHDU(dense_matrix, name='RESPONSE')
-        hdul = fits.HDUList([primary_hdu, wavelength_hdu, matrix_hdu])
+        hdus = [primary_hdu, wavelength_hdu, matrix_hdu]
+        if self._bin_widths is not None:
+            hdus.append(fits.ImageHDU(self._bin_widths, name='BINWIDTH'))
+        hdul = fits.HDUList(hdus)
         hdul.writeto(filename, overwrite=True)
 
     def save_and_register(
@@ -501,7 +551,7 @@ class InstrumentResponse:
 
     # ---- CROP ----
     
-    def crop(self, new_wavelengths: np.ndarray, renormalize: bool = True) -> "InstrumentResponse":
+    def crop(self, new_wavelengths: np.ndarray, renormalize: bool = False) -> "InstrumentResponse":
         """Crop the response matrix to match a new subset wavelength grid.
 
         Parameters
@@ -509,7 +559,9 @@ class InstrumentResponse:
         new_wavelengths : numpy.ndarray
             The target wavelength grid to crop to. Must be a subset of the original grid.
         renormalize : bool, optional
-            If True, renormalizes the matrix rows to conserve flux. Default is ``True``.
+            Default False preserves the stored matrix coefficients and boundary
+            losses. True retains the legacy row-normalized smoothing behavior;
+            it does not conserve integrated flux in general.
 
         Returns
         -------
@@ -519,7 +571,10 @@ class InstrumentResponse:
         cropped_matrix = _crop_response_matrix(
             self.response_matrix, self.wavelength_grid, new_wavelengths, renormalize=renormalize
         )
-        return InstrumentResponse(new_wavelengths, cropped_matrix)
+        cropped = InstrumentResponse(new_wavelengths, cropped_matrix)
+        if self._bin_widths is not None:
+            cropped._bin_widths = self._bin_widths[_response_indices(self.wavelength_grid, new_wavelengths)]
+        return cropped
 
     def __repr__(self) -> str:
         shape = self.wavelength_grid.shape if self.wavelength_grid is not None else None
@@ -578,27 +633,8 @@ def delete_instrument(instrument_name: str, user_only: bool = True) -> None:
     raise ValueError(f"Instrument '{instrument_name}' not found in {'user' if user_only else 'any'} archive.")
 
 
-def _crop_response_matrix(
-    matrix: np.ndarray,
-    matrix_wave: np.ndarray,
-    target_wave: np.ndarray,
-    renormalize: bool = True
-) -> np.ndarray:
-    """
-    Crop a response matrix to match the target wavelengths.
-    
-    Target wavelengths must be a subset of the matrix wavelengths (within tolerance).
-    Gaps in the target grid are allowed (e.g., masked spectral regions).
-    
-    Args:
-        matrix: 2D sparse or dense matrix (N x N)
-        matrix_wave: wavelengths corresponding to the matrix
-        target_wave: desired output wavelengths (can have gaps)
-        renormalize: renormalize rows after cropping (default True)
-    
-    Returns:
-        Cropped (and optionally renormalized) sparse matrix
-    """
+def _response_indices(matrix_wave, target_wave):
+    """Match requested samples to distinct ordered native bins within half a step."""
     matrix_wave = np.asarray(matrix_wave, dtype=float)
     target_wave = np.asarray(target_wave, dtype=float)
 
@@ -639,13 +675,35 @@ def _crop_response_matrix(
             "This usually means the target grid is oversampled, unsorted, or otherwise "
             "incompatible with simple matrix cropping."
         )
-    
-    # NOTE: We no longer check step size uniformity.
-    # Target wavelengths can have gaps (masked regions) - this is valid.
-    # The only requirement is that each target wavelength exists in the matrix grid.
-    
+
+    return indices
+
+
+def _crop_response_matrix(
+    matrix: np.ndarray,
+    matrix_wave: np.ndarray,
+    target_wave: np.ndarray,
+    renormalize: bool = False
+) -> np.ndarray:
+    """
+    Crop a response matrix to match the target wavelengths.
+
+    Target wavelengths must be a subset of the matrix wavelengths (within tolerance).
+    Gaps in the target grid are allowed (e.g., masked spectral regions).
+
+    Args:
+        matrix: 2D sparse or dense matrix (N x N)
+        matrix_wave: wavelengths corresponding to the matrix
+        target_wave: desired output wavelengths (can have gaps)
+        renormalize: legacy row normalization after cropping (default False)
+
+    Returns:
+        Cropped (and optionally renormalized) sparse matrix
+    """
+    indices = _response_indices(matrix_wave, target_wave)
+
     cropped = matrix[np.ix_(indices, indices)]
-    
+
     if renormalize:
         row_sums = cropped.sum(axis=1).A1 if issparse(cropped) else cropped.sum(axis=1)
         # Avoid division by zero
@@ -654,7 +712,7 @@ def _crop_response_matrix(
             cropped = cropped.multiply(1 / row_sums[:, np.newaxis])
         else:
             cropped = cropped / row_sums[:, np.newaxis]
-    
+
     return cropped if issparse(cropped) else csr_matrix(cropped)
 
 
@@ -674,20 +732,24 @@ class SpectralResponse(LinearOperatorModel):
         Name of an archived instrument (e.g. ``'MUSE-WFM'``) **or** an
         ``InstrumentResponse`` instance built manually.
     wave : array-like
-        Rest-frame wavelength grid.  If *z* > 0 the matrix is cropped at
-        λ_obs = wave * (1 + z).
+        Requested rest-frame samples, matched at lambda_obs = wave*(1+z).
+        With flexible=True and renormalize=False, the native model grid also
+        retains available neighboring source bins from the supplied response.
+        Consequently wavelength_grid can be larger than wave.
     z : float, default 0
         Redshift used to map rest→observer wavelengths.
     response_matrix : sparse matrix, optional
         Supply a pre-built matrix directly (no archive lookup, no cropping).
-    renormalize : bool, default True
-        Renormalize rows to unity after cropping.
+    renormalize : bool, default False
+        Preserve stored coefficients and physical boundary losses by default.
+        True requests the legacy cropped, row-normalized smoothing behavior.
     flexible : bool, default True
         If ``True``, evaluation on a different wavelength grid is handled by
         evaluating the source model on the native response grid and
         interpolating the convolved spectrum back to the requested grid. This
-        keeps same-grid fitting on the fast matrix path while allowing subset
-        or plotting grids.
+        preserves native-grid contributions while allowing subset or plotting
+        grids. False restricts evaluation to the supplied wave grid and disables
+        automatic retention of neighboring source bins.
     name : str, default ``'rsp'``
         Name of the response operator model.
 
@@ -701,7 +763,7 @@ class SpectralResponse(LinearOperatorModel):
     >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1, name='muse')
     >>> model = source | rsp
 
-    >>> # From InstrumentResponse instance (not serializable from recipe)
+    >>> # From InstrumentResponse instance (matrix serialized directly)
     >>> ir = InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.5)
     >>> rsp = SpectralResponse(instrument=ir, wave=wave)
     >>> model = source | rsp
@@ -713,23 +775,28 @@ class SpectralResponse(LinearOperatorModel):
         wave: np.ndarray | None = None,
         z: float = 0,
         response_matrix=None,
-        renormalize: bool = True,
+        renormalize: bool = False,
         flexible: bool = True,
         name: str = 'rsp',
     ):
+        if not np.isfinite(z) or z <= -1:
+            raise ValueError('Response redshift must be finite and greater than -1.')
         self.z = z
         self.flexible = flexible
+        self.renormalize = renormalize
         self._instrument_name = None
         self._interp_cache = None
+        self._requested_wave = None
         
         if response_matrix is not None:
             # Direct matrix mode - use as-is
-            self.response_matrix = response_matrix
-            self.wavelength_grid = np.asarray(wave, dtype=float) if wave is not None else None
+            self.wavelength_grid = _response_grid(wave) if wave is not None else None
+            self.response_matrix = _response_matrix(
+                response_matrix, len(self.wavelength_grid) if wave is not None else None)
             self._mode = "direct"
             
         elif instrument is not None and wave is not None:
-            wave = np.asarray(wave, dtype=float)
+            wave = _response_grid(wave)
             wave_obs = wave * (1 + z) if z != 0 else wave
             
             # Check if instrument is a string (name) or InstrumentResponse instance
@@ -746,11 +813,23 @@ class SpectralResponse(LinearOperatorModel):
                     f"instrument must be str or InstrumentResponse, got {type(instrument).__name__}"
                 )
             
-            # Crop to observer wavelengths
-            cropped = response.crop(wave_obs, renormalize=renormalize)
-            
-            self.response_matrix = cropped.response_matrix
-            self.wavelength_grid = wave  # store rest-frame grid
+            self._requested_wave = wave.copy()
+            if flexible and not renormalize:
+                # Keep all available source columns that can illuminate requested outputs.
+                _response_indices(response.wavelength_grid, wave_obs)
+                # Sampling between centers also needs the two bracketing output rows.
+                first = max(0, np.searchsorted(response.wavelength_grid, wave_obs[0], side='right') - 1)
+                last = min(len(response.wavelength_grid) - 1,
+                           np.searchsorted(response.wavelength_grid, wave_obs[-1], side='left'))
+                support = response.response_matrix[first:last+1].indices
+                start = min(first, support.min()) if support.size else first
+                stop = max(last, support.max()) + 1 if support.size else last + 1
+                self.response_matrix = response.response_matrix[start:stop, start:stop]
+                self.wavelength_grid = response.wavelength_grid[start:stop] / (1 + z)
+            else:
+                cropped = response.crop(wave_obs, renormalize=renormalize)
+                self.response_matrix = cropped.response_matrix
+                self.wavelength_grid = wave
             self._mode = "instrument"
             
         else:
@@ -761,153 +840,33 @@ class SpectralResponse(LinearOperatorModel):
         super().__init__(
             self.response_matrix,
             x=self.wavelength_grid,
+            flexible=self.flexible,
             recipe=self._build_recipe(),
             name=name,
         )
 
-    def _same_grid(self, x) -> bool:
-        if self.wavelength_grid is None:
-            return False
-        x = np.asarray(x, dtype=float).ravel()
-        if x.shape != self.wavelength_grid.shape:
-            return False
-        return np.array_equal(x, self.wavelength_grid) or np.allclose(
-            x,
-            self.wavelength_grid,
-            rtol=0.0,
-            atol=np.finfo(float).eps * max(1.0, np.abs(self.wavelength_grid).max()),
-        )
+    @property
+    def response_matrix(self):
+        """The operator matrix; alias of ``matrix`` with no duplicate storage."""
+        return self._matrix
 
-    def _get_interp_cache(self, x):
-        x = np.asarray(x, dtype=float).ravel()
-        if self.wavelength_grid is None:
-            raise ValueError("Flexible response evaluation requires a wavelength grid.")
-        if self._interp_cache is not None and np.array_equal(x, self._interp_cache["x"]):
-            return self._interp_cache
+    @response_matrix.setter
+    def response_matrix(self, value):
+        self._matrix = _response_matrix(value)
 
-        native = self.wavelength_grid
-        indices = np.searchsorted(native, x)
-        inside = (x >= native[0]) & (x <= native[-1])
-        left = np.clip(indices - 1, 0, len(native) - 1)
-        right = np.clip(indices, 0, len(native) - 1)
+    @property
+    def wavelength_grid(self):
+        """The native operator grid; alias of ``x`` with no duplicate storage."""
+        return self._x
 
-        same = inside & (left == right)
-        frac = np.zeros_like(x, dtype=float)
+    @wavelength_grid.setter
+    def wavelength_grid(self, value):
+        self._x = None if value is None else _response_grid(value)
+        self._interp_cache = None
 
-        span = native[right] - native[left]
-        valid = inside & (~same)
-        frac[valid] = (x[valid] - native[left[valid]]) / span[valid]
-        frac[same] = 0.0
-
-        cache = {
-            "x": x,
-            "inside": inside,
-            "left": left,
-            "right": right,
-            "frac": frac,
-        }
-        self._interp_cache = cache
-        return cache
-
-    def _resample_from_native(self, values, x):
-        unit = values.unit if hasattr(values, "unit") else None
-        arr = values.to_value(unit) if unit is not None else np.asarray(values)
-        arr = np.asarray(arr).ravel()
-
-        if self._same_grid(x):
-            return values
-
-        cache = self._get_interp_cache(x)
-        result = np.zeros(len(cache["x"]), dtype=arr.dtype)
-        inside = cache["inside"]
-        left = cache["left"][inside]
-        right = cache["right"][inside]
-        frac = cache["frac"][inside]
-        result[inside] = (1.0 - frac) * arr[left] + frac * arr[right]
-        return result * unit if unit is not None else result
-
-    def _native_response(self, values):
-        unit = values.unit if hasattr(values, "unit") else None
-        arr = values.to_value(unit) if unit is not None else np.asarray(values)
-        arr = np.asarray(arr).ravel()
-        result = np.asarray(self.response_matrix.dot(arr)).ravel()
-        return result * unit if unit is not None else result
-
-    def _prism_pipe_evaluate(
-        self,
-        leftval,
-        left_inputs,
-        right_params,
-        left_model=None,
-        left_params=None,
-        **kwargs,
-    ):
-        x = np.asarray(left_inputs[0], dtype=float).ravel()
-        if self.wavelength_grid is None or self._same_grid(x):
-            return super()._prism_pipe_evaluate(
-                leftval,
-                left_inputs,
-                right_params,
-                left_model=left_model,
-                left_params=left_params,
-                **kwargs,
-            )
-        if not self.flexible:
-            raise ValueError(
-                f"LinearOperatorModel expects {self.response_matrix.shape[0]} samples, got {len(x)}."
-            )
-        if left_model is None:
-            raise ValueError("Flexible response evaluation requires access to the source model.")
-
-        native_x = self.wavelength_grid
-        if hasattr(left_inputs[0], "unit"):
-            native_x = native_x * left_inputs[0].unit
-        if left_params is None:
-            native_flux = left_model(native_x, **kwargs)
-        else:
-            native_flux = left_model.evaluate(native_x, *left_params)
-        native_result = self._native_response(native_flux)
-        return self._resample_from_native(native_result, x)
-
-    def _prism_pipe_fit_deriv(
-        self,
-        left_deriv,
-        left_inputs,
-        left_params,
-        right_params,
-        left_model,
-    ):
-        x = np.asarray(left_inputs[0], dtype=float).ravel()
-        if self.wavelength_grid is None or self._same_grid(x):
-            return super()._prism_pipe_fit_deriv(
-                left_deriv,
-                left_inputs,
-                left_params,
-                right_params,
-                left_model,
-            )
-        if not self.flexible:
-            raise ValueError(
-                f"LinearOperatorModel expects {self.response_matrix.shape[0]} samples, got {len(x)}."
-            )
-
-        native_x = self.wavelength_grid
-        if hasattr(left_inputs[0], "unit"):
-            native_x = native_x * left_inputs[0].unit
-        native_deriv = left_model.fit_deriv(native_x, *left_params)
-        if native_deriv is None:
-            return None
-        derivs = np.asanyarray(native_deriv)
-        if not left_model.col_fit_deriv:
-            derivs = np.moveaxis(derivs, -1, 0)
-        derivs = derivs.reshape((derivs.shape[0], -1))
-
-        return np.asarray(
-            [
-                np.asarray(self._resample_from_native(self._native_response(dparam), x)).ravel()
-                for dparam in derivs
-            ]
-        )
+    @property
+    def recipe(self):
+        return self._build_recipe()
 
     def _build_recipe(self):
         """Build a reconstruction recipe for serialization.
@@ -920,8 +879,11 @@ class SpectralResponse(LinearOperatorModel):
                 'type': 'instrument',
                 'instrument': self._instrument_name,
                 'z': float(self.z),
+                'renormalize': bool(self.renormalize),
+                'flexible': bool(self.flexible),
             }
-        return {'type': 'direct'}
+        return {'type': 'direct', 'flexible': bool(self.flexible),
+                'renormalize': bool(self.renormalize), 'z': float(self.z)}
 
     def __repr__(self) -> str:
         shape = self.wavelength_grid.shape if self.wavelength_grid is not None else None

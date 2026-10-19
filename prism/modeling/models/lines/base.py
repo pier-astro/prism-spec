@@ -3,7 +3,8 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 
 import astropy.units as u
-from astropy.modeling import Fittable1DModel, Parameter
+from astropy.modeling import Fittable1DModel
+from ...parameters import _Parameter as Parameter
 
 from . import profiles
 

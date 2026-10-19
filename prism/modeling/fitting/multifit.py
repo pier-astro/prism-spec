@@ -5,10 +5,10 @@ This module isolates the batched spectral fitting functionality, allowing
 fitters to efficiently optimize a model across multiple spectra (1D, 2D, 3D data)
 with a clean, independent API.
 
-Both `.multifit()` (explicit) and `fitter(model, x, y)` with multi-dimensional
-`y` (transparent) are supported. All standard single-spectrum options are
-preserved: `yerr`, `weights`, `statistic`, `calc_uncertainties`/`stdevs`,
-`progress`, `nproc`, `initpars`, `bounds`, `fixed`, `tied`.
+Use ``fitter.multifit(model, x, y, ...)`` explicitly for independent spectra.
+Input preparation and numerical fitting remain in the single-spectrum fitter.
+Completed targets are collected individually, in arrival order, and stored by
+spatial index. A bin map fits each representative once and propagates its result.
 """
 
 import time
@@ -17,10 +17,14 @@ import numpy as np
 import abc
 import os
 import copy
+import threading
+from contextlib import contextmanager
+from tempfile import TemporaryDirectory
+import dill
 import multiprocess as mp
 from tqdm.auto import tqdm
 import pandas as pd
-from astropy.modeling.fitting import model_to_fit_params
+from .utils import _free_parameter_indices
 from ...data.core import parse_binmap
 
 _MULTIFIT_STAT_KEYS = (
@@ -33,6 +37,7 @@ __all__ = [
 
 
 _MULTIFIT_WORKER_STATE = {}
+_MULTIFIT_SPAWN_LOCK = threading.Lock()
 
 
 def _combine_validity_masks(base, extra):
@@ -70,32 +75,6 @@ def _extract_multifit_inputs(y, yerr=None, weights=None, mask=None):
     return y, yerr, weights, mask
 
 
-def _prepare_masked_spectrum(x, y_1d, yerr_1d, weights_1d, mask_1d, *, skip_invalid):
-    """Apply a 1-D validity mask before fitting one spectrum."""
-    if mask_1d is None:
-        return np.asarray(x), y_1d, yerr_1d, weights_1d
-
-    valid = np.asarray(mask_1d, dtype=bool)
-    if valid.ndim != 1:
-        raise ValueError('Per-spectrum mask must be 1-D.')
-    if valid.shape != np.shape(y_1d):
-        raise ValueError(
-            f'Per-spectrum mask must have shape {np.shape(y_1d)}; got {valid.shape}.'
-        )
-    if not np.any(valid):
-        if skip_invalid:
-            return None, None, None, None
-        raise ValueError('No valid spectral samples remain after masking.')
-
-    x = np.asarray(x)[valid]
-    y_1d = np.asarray(y_1d)[valid]
-    if yerr_1d is not None:
-        yerr_1d = np.asarray(yerr_1d)[valid]
-    if weights_1d is not None:
-        weights_1d = np.asarray(weights_1d)[valid]
-    return x, y_1d, yerr_1d, weights_1d
-
-
 def _nan_multifit_payload(model, message):
     """Return the standard NaN-filled multifit payload for one failed target."""
     return (
@@ -111,59 +90,50 @@ def _nan_multifit_payload(model, message):
     )
 
 
-def _multifit_worker_initializer(fitter=None, template_model=None, x=None,
-                                 statistic=None, kwargs=None, skip_invalid=True):
-    """Configure worker runtime and preload shared multifit state."""
-    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
-    os.environ.setdefault('MKL_NUM_THREADS', '1')
-    os.environ.setdefault('OMP_NUM_THREADS', '1')
+def _multifit_worker_initializer(snapshot_file):
+    """Load one private worker configuration from the parent-owned snapshot."""
+    from .extension import set_max_evaluations
+    with open(snapshot_file, 'rb') as stream:
+        state = dill.load(stream)
+    set_max_evaluations(state.pop('max_evaluations'))
+    if state.pop('astropy_pipe'):
+        from ..interop.astropy import install_pipe_patch
+        install_pipe_patch()
+    global _MULTIFIT_WORKER_STATE
+    _MULTIFIT_WORKER_STATE = state
 
-    if fitter is not None:
-        global _MULTIFIT_WORKER_STATE
-        _MULTIFIT_WORKER_STATE = {
-            'fitter': fitter,
-            'template_model': template_model,
-            'x': x,
-            'statistic': statistic,
-            'kwargs': {} if kwargs is None else kwargs,
-            'skip_invalid': bool(skip_invalid),
-        }
+
+@contextmanager
+def _multifit_pool(nproc, **kwargs):
+    """Set child thread defaults before imports, without changing the parent."""
+    # Spawn copies the environment when each child starts. Setting defaults in
+    # the initializer is too late for NumPy/BLAS imported during module loading.
+    with _MULTIFIT_SPAWN_LOCK:
+        names = ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'OMP_NUM_THREADS')
+        previous = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ.setdefault(name, '1')
+            pool = mp.get_context('spawn').Pool(nproc, **kwargs)
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+    with pool:
+        yield pool
 
 
 def _multifit_worker_task(args):
     """Run one multifit target using preloaded worker state."""
     idx, y_1d, yerr_1d, weights_1d, mask_1d, initpars_1d, bounds_1d = args
     state = _MULTIFIT_WORKER_STATE
-    fitter = state['fitter']
-    model = state['template_model']
-    x = state['x']
-    statistic = state['statistic']
-    kwargs = state['kwargs']
-    skip_invalid = state.get('skip_invalid', True)
-
-    try:
-        local_model = model.copy()
-        fitter._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
-        fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
-            x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
-        )
-        if fit_x is None:
-            payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
-            return (idx, payload[0], payload[1], payload[2], payload[3])
-        fitted = fitter(
-            model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
-            statistic=statistic, weights=fit_weights,
-            inplace=True, **kwargs
-        )
-        return (idx, fitted.parameters, fitter.stdevs,
-                fitter._multifit_entry_from_fit_info(), fitter.covariance)
-    except Exception as e:
-        if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
-            raise
-        if getattr(fitter, 'verbose', False):
-            print(f"Worker {idx} failed: {e}")
-        payload = _nan_multifit_payload(model, str(e))
-        return (idx, payload[0], payload[1], payload[2], payload[3])
+    return state['fitter']._fit_single_direct(
+        idx, state['template_model'], state['x'], y_1d, yerr_1d,
+        state['statistic'], weights_1d, mask_1d, state['skip_invalid'],
+        initpars_1d, bounds_1d, state['kwargs'],
+    )
 
 
 # =============================================================================
@@ -583,6 +553,8 @@ class MultiFitResult:
         return model
 
     def _attach_model_stds(self, model, flat_index, stds):
+        from .extension import _clear_fit_uncertainties
+        _clear_fit_uncertainties(model)
         if stds is None:
             return model
         for name, std in zip(self.param_names, stds):
@@ -1375,59 +1347,30 @@ class MultiFitMixin(abc.ABC):
     # Per-spaxel worker
     # ------------------------------------------------------------------
 
-    def _fit_single_target(self, args):
-        """Worker function for multiprocess mapping (one 1-D fit per call)."""
-        idx, model, x, y_1d, yerr_1d, statistic, weights_1d, mask_1d, skip_invalid, initpars_1d, bounds_1d, kwargs = args
-        try:
-            local_model = model.copy()
-            self._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
-            fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
-                x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
-            )
-            if fit_x is None:
-                payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
-                return (idx, payload[0], payload[1], payload[2], payload[3])
-            fitted = self(
-                model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
-                statistic=statistic, weights=fit_weights,
-                inplace=True, **kwargs
-            )
-            return (idx, fitted.parameters, self.stdevs,
-                    self._multifit_entry_from_fit_info(), self.covariance)
-        except Exception as e:
-            if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
-                raise
-            if getattr(self, 'verbose', False):
-                print(f"Worker {idx} failed: {e}")
-            payload = _nan_multifit_payload(model, str(e))
-            return (idx, payload[0], payload[1], payload[2], payload[3])
-
     def _fit_single_direct(self, idx, model, x, y_1d, yerr_1d,
                            statistic, weights_1d, mask_1d, skip_invalid, initpars_1d, bounds_1d,
                            kwargs):
-        """Direct in-process single-target fit used by the serial multifit path."""
+        """Fit one independent target in either the parent or a worker process."""
         try:
             local_model = model.copy()
             self._apply_scalar_multifit_overrides(local_model, initpars=initpars_1d, bounds=bounds_1d)
-            fit_x, fit_y, fit_yerr, fit_weights = _prepare_masked_spectrum(
-                x, y_1d, yerr_1d, weights_1d, mask_1d, skip_invalid=skip_invalid
-            )
-            if fit_x is None:
-                payload = _nan_multifit_payload(model, 'skipped: no valid spectral samples')
-                return (idx, payload[0], payload[1], payload[2], payload[3])
+            # Let the single-spectrum fitter prepare data exactly once. Keep
+            # coordinates intact for responses and profile-wide transforms.
             fitted = self(
-                model=local_model, x=fit_x, y=fit_y, yerr=fit_yerr,
-                statistic=statistic, weights=fit_weights,
+                model=local_model, x=x, y=y_1d, yerr=yerr_1d,
+                statistic=statistic, weights=weights_1d, mask=mask_1d,
                 inplace=True, **kwargs
             )
             return (idx, fitted.parameters, self.stdevs,
                     self._multifit_entry_from_fit_info(), self.covariance)
         except Exception as e:
-            if (not skip_invalid) and isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.':
+            empty = isinstance(e, ValueError) and str(e) == 'No valid spectral samples remain after masking.'
+            if empty and not skip_invalid:
                 raise
             if getattr(self, 'verbose', False):
                 print(f"Worker {idx} failed: {e}")
-            payload = _nan_multifit_payload(model, str(e))
+            message = 'skipped: no valid spectral samples' if empty else str(e)
+            payload = _nan_multifit_payload(model, message)
             return (idx, payload[0], payload[1], payload[2], payload[3])
 
     def _multifit_spawn_fitter(self):
@@ -1473,27 +1416,21 @@ class MultiFitMixin(abc.ABC):
             entry[name] = self.fit_info.get(name, np.nan)
         return entry
 
-    def _multifit_chunksize(self, n_spaxels, nproc):
-        """Choose a low-overhead chunksize with predictable scheduling."""
-        if nproc <= 1:
-            return 1
-        if n_spaxels <= 32 * nproc:
-            return max(1, n_spaxels // nproc)
-        if n_spaxels <= 256 * nproc:
-            return max(1, n_spaxels // (2 * nproc))
-        return max(1, n_spaxels // (4 * nproc))
-
     # ------------------------------------------------------------------
     # Main batch fitting loop
     # ------------------------------------------------------------------
 
     def _fit_multi(self, model, x, y, yerr=None, statistic='chi2', weights=None,
                    mask=None, skip_invalid=True,
-                   nproc=1, spectral_axis=None, progress=True, batch=False,
+                   nproc=1, spectral_axis=None, progress=True,
                    binmap=None,
                    initpars=None, bounds=None, fixed=None, tied=None,
                    **kwargs):
         """Internal: run fits over all spaxels and accumulate a MultiFitResult."""
+        if not isinstance(nproc, (int, np.integer)) or nproc < 1:
+            raise ValueError('nproc must be a positive integer.')
+        if 'batch' in kwargs:
+            raise TypeError('multifit no longer accepts batch; completed fits are streamed individually.')
         y, yerr, weights, mask = _extract_multifit_inputs(y, yerr=yerr, weights=weights, mask=mask)
         y = np.asarray(y)
         if y.ndim < 2:
@@ -1529,22 +1466,19 @@ class MultiFitMixin(abc.ABC):
         if binmap is not None:
             validated_binmap = parse_binmap(binmap, spatial_shape=spatial_shape, name='binmap')
             flat_binmap = validated_binmap.reshape(-1)
-            fit_flat_indices = []
-            fit_groups = {}
-            for bin_id in np.unique(flat_binmap):
-                if int(bin_id) < 0:
-                    continue
-                members = np.flatnonzero(flat_binmap == bin_id)
-                if members.size == 0:
-                    continue
-                representative = int(members[0])
-                fit_flat_indices.append(representative)
-                fit_groups[representative] = members.astype(int)
-            if not fit_flat_indices:
+            # A stable sort groups equal labels and keeps their first spatial
+            # member as representative, without rescanning the entire map.
+            order = np.argsort(flat_binmap, kind='stable')
+            order = order[flat_binmap[order] >= 0]
+            if order.size == 0:
                 raise ValueError('binmap does not contain any non-negative bin labels.')
+            boundaries = np.flatnonzero(np.diff(flat_binmap[order])) + 1
+            groups = np.split(order, boundaries)
+            fit_flat_indices = [int(group[0]) for group in groups]
+            fit_groups = dict(zip(fit_flat_indices, groups))
         else:
-            fit_flat_indices = list(range(n_spaxels))
-            fit_groups = {idx: np.array([idx], dtype=int) for idx in fit_flat_indices}
+            fit_flat_indices = range(n_spaxels)
+            fit_groups = None
 
         res = MultiFitResult(
             spatial_shape,
@@ -1553,21 +1487,15 @@ class MultiFitMixin(abc.ABC):
             x=x,
             has_cov=self.calc_uncertainties,
             spectral_axis=resolved_axis,
-            fit_indices=model_to_fit_params(template_model)[1],
+            fit_indices=_free_parameter_indices(template_model),
             parameter_metadata=config['parameter_metadata'],
         )
-
-        def task_generator():
-            for idx in fit_flat_indices:
-                ip, bo = self._multifit_task_overrides(idx, config)
-                yield (idx, template_model, x, y_flat[idx],
-                       yerr_flat[idx], statistic, weights_flat[idx], mask_flat[idx],
-                       skip_invalid, ip, bo, kwargs)
 
         if progress is None:
             progress = True
 
         show_progress = progress
+        nproc = min(nproc, max(1, len(fit_flat_indices)))
 
         if self.verbose:
             if binmap is None:
@@ -1577,50 +1505,55 @@ class MultiFitMixin(abc.ABC):
 
         t0 = time.perf_counter()
 
-        if nproc <= 1:
-            indices = fit_flat_indices
-            if show_progress:
-                indices = tqdm(indices, total=len(fit_flat_indices), desc="Fitting bins" if binmap is not None else "Fitting spectra")
-            for idx in indices:
+        def tasks():
+            for idx in fit_flat_indices:
                 ip, bo = self._multifit_task_overrides(idx, config)
-                entry = self._fit_single_direct(
-                    idx=idx,
-                    model=template_model,
-                    x=x,
-                    y_1d=y_flat[idx],
-                    yerr_1d=yerr_flat[idx],
-                    statistic=statistic,
-                    weights_1d=weights_flat[idx],
-                    mask_1d=mask_flat[idx],
-                    skip_invalid=skip_invalid,
-                    initpars_1d=ip,
-                    bounds_1d=bo,
-                    kwargs=kwargs,
-                )
-                for target_idx in fit_groups[idx]:
-                    res.update(target_idx, entry[1], entry[2], entry[3], entry[4])
-        else:
-            ctx = mp.get_context('spawn')
-            worker_fitter = self._multifit_spawn_fitter()
-            with ctx.Pool(
-                nproc,
-                initializer=_multifit_worker_initializer,
-                initargs=(worker_fitter, template_model, x, statistic, kwargs, skip_invalid),
-            ) as pool:
-                def worker_task_generator():
-                    for idx in fit_flat_indices:
-                        ip, bo = self._multifit_task_overrides(idx, config)
-                        yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], mask_flat[idx], ip, bo)
+                yield (idx, y_flat[idx], yerr_flat[idx], weights_flat[idx], mask_flat[idx], ip, bo)
 
-                chunksize = self._multifit_chunksize(len(fit_flat_indices), nproc) if batch else 1
-                it = pool.imap_unordered(_multifit_worker_task, worker_task_generator(),
-                                         chunksize=chunksize)
-                if show_progress:
-                    it = tqdm(it, total=len(fit_flat_indices), desc="Fitting bins" if binmap is not None else "Fitting spectra")
-                for result in it:
-                    rep_idx, model_params, stdevs, fit_info, cov = result
-                    for target_idx in fit_groups[rep_idx]:
-                        res.update(target_idx, model_params, stdevs, fit_info, cov)
+        def collect(entries):
+            if show_progress:
+                entries = tqdm(entries, total=len(fit_flat_indices),
+                               desc="Fitting bins" if binmap is not None else "Fitting spectra")
+            for idx, params, stds, info, covariance in entries:
+                targets = (idx,) if fit_groups is None else fit_groups[idx]
+                for target in targets:
+                    res.update(target, params, stds, info, covariance)
+
+        if nproc == 1:
+            entries = (
+                self._fit_single_direct(
+                    idx, template_model, x, spectrum, error, statistic,
+                    weight, mask, skip_invalid, ip, bo, kwargs)
+                for idx, spectrum, error, weight, mask, ip, bo in tasks()
+            )
+            collect(entries)
+        else:
+            from .extension import get_max_evaluations
+            from astropy.modeling import CompoundModel
+            worker_state = {
+                'fitter': self._multifit_spawn_fitter(),
+                'template_model': template_model,
+                'x': x,
+                'statistic': statistic,
+                'kwargs': kwargs,
+                'skip_invalid': bool(skip_invalid),
+                'max_evaluations': get_max_evaluations(),
+                'astropy_pipe': bool(getattr(CompoundModel, '_prism_linear_operator_patch', False)),
+            }
+            # Large initializer arguments can block spawn's startup pipe and
+            # serialize worker imports. Pass a small reference instead; each
+            # worker restores its own model and fitter, including callable links.
+            with TemporaryDirectory(prefix='prism-workers-') as directory:
+                snapshot_file = os.path.join(directory, 'worker.pkl')
+                with open(snapshot_file, 'wb') as stream:
+                    dill.dump(worker_state, stream)
+                with _multifit_pool(
+                    nproc,
+                    initializer=_multifit_worker_initializer,
+                    initargs=(snapshot_file,),
+                ) as pool:
+                    entries = pool.imap_unordered(_multifit_worker_task, tasks(), chunksize=1)
+                    collect(entries)
 
         total_time = time.perf_counter() - t0
         self._set_batch_fit_info(res, total_time)
@@ -1639,7 +1572,7 @@ class MultiFitMixin(abc.ABC):
 
     def multifit(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
                  mask=None, skip_invalid=True,
-                 inplace=False, nproc=1, spectral_axis=None, progress=True, batch=False,
+                 inplace=False, nproc=1, spectral_axis=None, progress=True,
                  binmap=None,
                  initpars=None, bounds=None, fixed=None, tied=None,
                  **kwargs) -> MultiFitResult:
@@ -1685,14 +1618,7 @@ class MultiFitMixin(abc.ABC):
         spectral_axis : int, optional
             Axis of ``y`` that is the spectral dimension.
         progress : bool, optional
-            Show tqdm progress bar.  Defaults to ``fitter.verbose``.
-        batch : bool, optional
-            When ``True`` and ``nproc > 1``, results are delivered to the
-            progress bar in chunks (smarter scheduling, slightly lower IPC
-            overhead).  When ``False`` (default) the bar updates once per
-            completed fit.  The difference is negligible for real spectral
-            fits (>1 ms each); use ``batch=True`` only for very fast synthetic
-            fits where IPC dominates.
+            Show tqdm progress bar. Defaults to ``True``.
         initpars : dict, optional
             Per-parameter initial value overrides.
         bounds : dict, optional
@@ -1720,7 +1646,7 @@ class MultiFitMixin(abc.ABC):
         return self._fit_multi(
             model, x, y, yerr=yerr, statistic=statistic, weights=weights,
             mask=mask, skip_invalid=skip_invalid,
-            nproc=nproc, spectral_axis=spectral_axis, progress=progress, batch=batch,
+            nproc=nproc, spectral_axis=spectral_axis, progress=progress,
             binmap=binmap,
             initpars=initpars, bounds=bounds, fixed=fixed, tied=tied,
             **kwargs

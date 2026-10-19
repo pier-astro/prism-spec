@@ -24,7 +24,7 @@ MultiFitResult, SpectrumFitResult, MultiFitParameter
 
 from . import astropyfitters, utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty, separable
 from .astropyfitters import *
-from .utils import *
+from .utils import apply_tied
 from .scipyfit import *
 from .sherpafit import *
 from .lmfit import *
@@ -32,14 +32,9 @@ from .multifit import *
 from .outremoval import *
 from .separable import *
 
-from .extension import enable_astropy_fitting_compatibility_patch
-enable_astropy_fitting_compatibility_patch()
-
-from ..io import install_model_io_methods
-install_model_io_methods()
 
 __all__ = [
-    'tie', 'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter'
+    'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter'
 ]
 __all__.extend(astropyfitters.__all__)
 __all__.extend(scipyfit.__all__)

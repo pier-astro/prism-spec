@@ -1,3 +1,4 @@
+from prism.modeling.interop.astropy import tie
 """Physical equivalence and derivatives across user-selected velocity units."""
 import numpy as np
 import pytest
@@ -90,6 +91,7 @@ def test_velocity_jacobian_matches_independent_differences(kind, spectral_unit, 
                                    atol=tolerance*max(abs(numeric).max(), 1e-12))
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 @pytest.mark.parametrize('kind', KINDS)
 def test_defaults_bounds_instrument_and_serialization(kind, tmp_path):
     kwargs = {'bounds': {'offset': (-100*u.km/u.s, 100*u.km/u.s)}}
@@ -152,6 +154,7 @@ def test_flux_uncertainty_is_independent_of_velocity_unit(kind, offset):
     np.testing.assert_allclose(unpack(models[1]),unpack(models[0]),rtol=2e-5)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 @pytest.mark.parametrize('kind', [GaussianLine, GaussianLines])
 @pytest.mark.parametrize('method', ['TRFLSQFitter','ScipyTRF','SherpaLM'])
 def test_cold_fit_and_covariance_scale(kind, method, tmp_path):
@@ -201,8 +204,8 @@ def test_quantity_data_and_tied_response_fit(unit):
         second = GaussianLine(name='second',amplitude=1.*u.Jy,position=5010.*u.AA,
                               offset=offset*u.km/u.s,fwhm=fwhm*u.km/u.s,velocity_unit=unit)
         model = (first+second)|response
-        model['second'].offset.tied=fitting.tie('first',lambda m:m.offset)
-        model['second'].fwhm.tied=fitting.tie('first',lambda m:m.fwhm)
+        model['second'].offset.tied=tie('first',lambda m:m.offset)
+        model['second'].fwhm.tied=tie('first',lambda m:m.fwhm)
         return model
     truth = construct(35.,180.)
     initial = construct(-60.,350.)

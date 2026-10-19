@@ -1,28 +1,33 @@
-"""
-Compatibility helpers for Prism fitter wrappers and narrow Astropy patches.
-
-This module no longer patches Astropy fitter classes broadly. It provides:
-
-- shared call-wrapping logic used by Prism-owned Astropy-style fitters
-- shared fit-info and covariance helpers for those wrappers
-- the narrow tied-analytic-Jacobian compatibility patch Prism still needs
-    for Astropy nonlinear fitters when operator-enhanced compound models are
-    fit with analytic derivatives
-"""
+"""Shared call, diagnostic and covariance helpers for Prism fitters."""
 
 import inspect
 import warnings
-import astropy.modeling.fitting as ast_fit
 import numpy as np
+from .data import _prepare_fit_data
 
 from .utils import (
     _free_parameter_indices,
     _prime_tied_analytic_jacobian_warning,
-    _reduce_tied_analytic_jacobian,
 )
 
 
 _DEFAULT_MAX_EVALUATIONS = None
+
+
+def _validate_spectral_inputs(model, x, y, z=None, yerr=None, weights=None, *, statistic='chi2'):
+    """Keep the numerical spectral fitting boundary explicit."""
+    if z is not None:
+        raise NotImplementedError('Numerical spectral fitters are one-dimensional; use an Astropy spatial adapter for z.')
+    if statistic not in ('chi2', 'leastsq'):
+        raise NotImplementedError("Numerical fitters minimize weighted least squares; statistic must be 'chi2' or 'leastsq'.")
+    _validate_native_inputs(model, x, y, yerr, weights)
+
+
+def _validate_native_inputs(model, *values):
+    """Require explicit numeric units at the native fitting boundary."""
+    from ..composition import Model
+    if isinstance(model, Model) and any(hasattr(value, 'unit') for value in values if value is not None):
+        raise TypeError('Native fitting expects numeric data in consistent native units; convert Quantities explicitly before fitting.')
 
 
 def validate_symmetric_yerr(yerr, *, context='fitters'):
@@ -119,33 +124,43 @@ def _wrap_fitter_call(original_call):
 
     def wrapped_call(self, model, x, y, z=None, yerr=None, statistic='chi2', weights=None,
                      filter_non_finite=False, verbose=False, inplace=True, **kwargs):
-        if yerr is not None:
-            yerr = validate_symmetric_yerr(yerr)
-        
-        # 1. Handle non-finite
-        if filter_non_finite:
-            finite = np.isfinite(y)
-            if weights is not None:
-                finite &= np.isfinite(np.asarray(weights))
-            elif yerr is not None:
-                finite &= np.isfinite(np.asarray(yerr))
-            
-            x = np.asarray(x)[finite]
-            y = np.asarray(y)[finite]
-            if z is not None:
-                z = np.asarray(z)[finite]
-            if weights is not None:
-                weights = np.asarray(weights)[finite]
-            if yerr is not None:
-                yerr = np.asarray(yerr)[finite]
+        _validate_native_inputs(model, x, y, z, yerr, weights)
+        if z is None:
+            x, y, yerr, weights, valid = _prepare_fit_data(
+                x, y, yerr, weights, kwargs.pop('mask', None),
+                filter_non_finite=filter_non_finite)
+            if not np.all(valid):
+                x, y = x[valid], y[valid]
+                yerr = None if yerr is None else yerr[valid]
+                weights = None if weights is None else weights[valid]
         else:
-            # Check inputs
-            if not np.all(np.isfinite(y)):
-                raise ValueError("Non-finite values detected in the data. Set filter_non_finite=True.")
-            if weights is not None and not np.all(np.isfinite(np.asarray(weights))):
-                raise ValueError("Non-finite values detected in the weights. Set filter_non_finite=True.")
-            if yerr is not None and not np.all(np.isfinite(np.asarray(yerr))):
-                raise ValueError("Non-finite values detected in the uncertainties. Set filter_non_finite=True.")
+            if yerr is not None:
+                yerr = validate_symmetric_yerr(yerr)
+        
+            # 1. Handle non-finite
+            if filter_non_finite:
+                finite = np.isfinite(y)
+                if weights is not None:
+                    finite &= np.isfinite(np.asarray(weights))
+                elif yerr is not None:
+                    finite &= np.isfinite(np.asarray(yerr))
+            
+                x = np.asarray(x)[finite]
+                y = np.asarray(y)[finite]
+                if z is not None:
+                    z = np.asarray(z)[finite]
+                if weights is not None:
+                    weights = np.asarray(weights)[finite]
+                if yerr is not None:
+                    yerr = np.asarray(yerr)[finite]
+            else:
+                # Check inputs
+                if not np.all(np.isfinite(y)):
+                    raise ValueError("Non-finite values detected in the data. Set filter_non_finite=True.")
+                if weights is not None and not np.all(np.isfinite(np.asarray(weights))):
+                    raise ValueError("Non-finite values detected in the weights. Set filter_non_finite=True.")
+                if yerr is not None and not np.all(np.isfinite(np.asarray(yerr))):
+                    raise ValueError("Non-finite values detected in the uncertainties. Set filter_non_finite=True.")
 
         # 2. Compute weights
         if weights is None and yerr is not None:
@@ -156,6 +171,9 @@ def _wrap_fitter_call(original_call):
         else:
             eval_model = model
 
+        prepare_links = getattr(self, '_prepare_links', None)
+        if prepare_links is not None:
+            prepare_links(eval_model, x, y, z)
         _prime_tied_analytic_jacobian_warning(eval_model)
 
         # 3. Build call kwargs
@@ -208,15 +226,26 @@ def _wrap_fitter_call(original_call):
         else:
             result = original_call(self, eval_model, x, y, **call_kwargs)
 
+        restore_units = getattr(self, '_restore_link_units', None)
+        if restore_units is not None:
+            restore_units(result)
+
         if inplace and result is not model:
-            model.parameters = result.parameters
+            for name in model.param_names:
+                fitted = getattr(result, name)
+                original = getattr(model, name)
+                if fitted.unit is not None and original.unit is not None:
+                    original.value = fitted.quantity.to_value(original.unit)
+                elif fitted.unit is not None:
+                    setattr(model, name, fitted.quantity)
+                else:
+                    original.value = fitted.value
             result = model
 
         # Enrich fit_info with standard diagnostic fields
         if hasattr(self, 'fit_info'):
             fi = self.fit_info
-            from astropy.modeling.fitting import model_to_fit_params
-            _, fit_indices_info, _ = model_to_fit_params(result)
+            fit_indices_info = _free_parameter_indices(result)
             n_free = len(fit_indices_info)
             n_data = int(np.prod(np.shape(y))) if z is None else int(np.prod(np.shape(z)))
 
@@ -250,43 +279,49 @@ def _wrap_fitter_call(original_call):
             msg = getattr(self, 'fit_info', {}).get('message', '')
             print(f"{self.__class__.__name__} fit completed: {msg}")
 
-        if hasattr(self, 'fit_info') and 'param_cov' in self.fit_info and self.fit_info['param_cov'] is not None:
-            cov = self.fit_info['param_cov']
-            std = np.sqrt(np.maximum(np.diagonal(np.asarray(cov), axis1=-2, axis2=-1), 0))
-            
-            # Find free parameters and attach
-            from astropy.modeling.fitting import model_to_fit_params
-            init_values, fit_indices, _ = model_to_fit_params(result)
-            
-            idx_map = {}
-            cumulative_idx = 0
-            for param_name in result.param_names:
-                param = getattr(result, param_name)
-                for offset in range(param.size):
-                    idx_map[cumulative_idx + offset] = (param, offset)
-                cumulative_idx += param.size
-
-            for free_index, sigma in zip(fit_indices, std):
-                if free_index not in idx_map:
-                    continue
-                param, offset = idx_map[free_index]
-                if param.size == 1:
-                    param.std = sigma
-                else:
-                    if not hasattr(param, 'std') or param.std is None or np.isscalar(param.std):
-                        param.std = np.full(param.size, np.nan)
-                    param.std[offset] = sigma
-
-            # Attach covariance matrix to the model for downstream propagation
-            result._param_cov = np.asarray(cov)
-
-        # 5. Ensure direct fitted_model.save()/to_fits() methods are installed
-        from ..io import install_model_io_methods
-        install_model_io_methods()
+        _attach_covariance(result, getattr(self, 'fit_info', {}).get('param_cov'))
 
         return result
 
     return wrapped_call
+
+
+def _clear_fit_uncertainties(model):
+    """Remove uncertainty estimates belonging to a previous fit."""
+    for name in model.param_names:
+        parameter = getattr(model, name)
+        for attribute in ('std', 'median', 'lolim', 'uplim', 'percentiles', 'samples'):
+            if hasattr(parameter, attribute):
+                try:
+                    delattr(parameter, attribute)
+                except (AttributeError, TypeError):
+                    setattr(parameter, attribute, None)
+    for attribute in ('_param_cov', '_fit_indices'):
+        if hasattr(model, attribute):
+            delattr(model, attribute)
+
+
+def _attach_covariance(model, covariance):
+    """Replace uncertainty estimates in the shared free-parameter order."""
+    if covariance is None:
+        _clear_fit_uncertainties(model)
+        return model
+    covariance = np.asarray(covariance)
+    free = _free_parameter_indices(model)
+    if covariance.shape != (len(free), len(free)):
+        raise ValueError('Covariance shape does not match the free parameter vector.')
+    _clear_fit_uncertainties(model)
+    std = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+    free_position = 0
+    for name in model.param_names:
+        param = getattr(model, name)
+        if not param.fixed and not param.tied:
+            values = std[free_position:free_position + param.size]
+            param.std = values[0] if param.size == 1 else values.reshape(param.shape)
+            free_position += param.size
+    model._param_cov = covariance
+    model._fit_indices = free
+    return model
 
 
 def _fitter_stdevs(self):
@@ -304,68 +339,3 @@ def _fitter_covariance(self):
     if hasattr(self, 'fit_info'):
         return self.fit_info.get('param_cov', None)
     return None
-
-
-def _patch_astropy_tied_jacobian_wrapper():
-    """Patch Astropy's nonlinear fitter Jacobian wrapper once."""
-    fitter_cls = getattr(ast_fit, '_NonLinearLSQFitter', None)
-    if fitter_cls is None or getattr(fitter_cls, '_prism_tied_jacobian_patch', False):
-        return
-
-    original = fitter_cls.__dict__['_wrap_deriv']
-    original_func = original.__func__ if isinstance(original, staticmethod) else original
-
-    def _patched_wrap_deriv(params, model, weights, x, y, z=None, fit_param_indices=None):
-        if not model.has_tied:
-            return original_func(params, model, weights, x, y, z=z, fit_param_indices=fit_param_indices)
-
-        if weights is None:
-            weights = 1.0
-
-        if not hasattr(model, '_prism_warn_tied_analytic_jacobian'):
-            _prime_tied_analytic_jacobian_warning(model)
-        ast_fit.fitter_to_model_params(model, params)
-        if z is None:
-            full = model.fit_deriv(x, *model.parameters)
-        else:
-            full = [np.ravel(item) for item in model.fit_deriv(x, y, *model.parameters)]
-
-        corrected = _reduce_tied_analytic_jacobian(
-            model,
-            full,
-            warn=True,
-            stacklevel=3,
-        )
-        weighted = np.ravel(weights) * corrected
-        fit_indices = fit_param_indices
-        if fit_indices is None:
-            fit_indices = _free_parameter_indices(model)
-        fit_indices = np.asarray(fit_indices, dtype=int)
-
-        if not model.col_fit_deriv:
-            residues = weighted[fit_indices].T
-        else:
-            residues = weighted[fit_indices]
-
-        return [np.ravel(item) for item in residues]
-
-    fitter_cls._wrap_deriv = staticmethod(_patched_wrap_deriv)
-    fitter_cls._prism_tied_jacobian_patch = True
-
-
-def enable_astropy_fitting_compatibility_patch():
-    """Enable the narrow Astropy fitting compatibility patch Prism still needs."""
-    _patch_astropy_tied_jacobian_wrapper()
-
-
-def patch_astropy_fitters():
-    """Deprecated compatibility shim for the old broad fitter patch API."""
-    warnings.warn(
-        "patch_astropy_fitters() no longer patches native Astropy fitter classes. "
-        "Use prism.modeling.fitting.TRFLSQFitter, DogBoxLSQFitter, "
-        "LevMarLSQFitter, and related Prism wrappers instead. "
-        "Only the narrow tied-analytic-Jacobian compatibility patch is retained.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    enable_astropy_fitting_compatibility_patch()

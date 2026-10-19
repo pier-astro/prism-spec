@@ -126,3 +126,20 @@ width estimate covers Gaussian/Voigt parameters; other profiles override it.
 Single and grouped models bind the same functions;
 adding one does not require another uncertainty or EW implementation. Astropy
 parameter descriptor generation remains confined to the group constructor.
+
+## Reading the implementation
+
+The built-in classes in `single.py` and `groups.py` show the evaluation sequence
+explicitly: velocity/unit preparation, observed center, effective profile
+parameters, named Gaussian or Voigt evaluation, and component accumulation.
+`profiles.py` holds the shared physical expressions and analytic derivatives;
+`base.py` handles common units, instrumental setup, and measurement adapters.
+A Lorentzian with Gaussian instrumental broadening is evaluated as a Voigt.
+
+## Parameter links
+
+Use `component_b.fwhm.link = component_a.fwhm` or arithmetic expressions such as
+`component_b.amplitude.link = component_a.amplitude / 2.98`. Assemble all referenced
+components before fitting or saving. Copies of the complete model preserve links;
+renaming components does not redirect them. Declarative links are restored by
+`load_model()`. See the fitting README for units, arithmetic and callable limits.

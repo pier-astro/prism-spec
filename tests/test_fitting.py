@@ -176,6 +176,7 @@ def test_prism_trf_max_evaluations_controls():
         prism_fitting.set_max_evaluations(previous)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_covariance_attach_and_roundtrip_from_saved_model():
     x, y, yerr, model = _build_covariance_dataset()
     fitter = ScipyTRF(calc_uncertainties=True)
@@ -259,6 +260,7 @@ def test_separable_trf_solves_gaussian_amplitude_inside_outer_nonlinear_fit():
     assert np.isclose(fitted.fwhm.value, truth.fwhm.value, atol=40.0)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_separable_trf_exposes_covariance_for_fully_linear_case():
     x, y, yerr, _, init = _build_separable_empirical_dataset(seed=27)
 
@@ -371,6 +373,7 @@ def test_separable_trf_raises_when_no_linear_block_is_available():
         fitter(init, x, y, inplace=False)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_linear_lsq_wrapper_exposes_covariance_and_std_by_default():
     x = np.linspace(-2.0, 2.0, 50)
     y = 3.5 * x - 1.2

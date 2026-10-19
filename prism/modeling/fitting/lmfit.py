@@ -3,18 +3,20 @@ Levenberg-Marquardt fitter with parameter transformations for bounds support.
 """
 
 import numpy as np
+from .extension import _validate_spectral_inputs
+from .data import _prepare_fit_data
 from scipy.optimize import leastsq
 from numpy.linalg import LinAlgError
-from astropy.modeling.fitting import Fitter, model_to_fit_params
+from astropy.modeling.fitting import Fitter
 from .extension import (
+    _attach_covariance,
     _coerce_max_evaluations,
     _fitter_covariance,
     _fitter_stdevs,
     get_max_evaluations,
-    validate_symmetric_yerr,
 )
 from .multifit import MultiFitMixin
-from .utils import _get_tied_info, _apply_tied_fast
+from .problem import _FitProblem
 
 __all__ = ['LMFitter']
 
@@ -138,49 +140,39 @@ class LMFitter(MultiFitMixin, Fitter):
 
     def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
                  yerr=None, statistic='chi2', **kwargs):
-        if yerr is not None:
-            yerr = validate_symmetric_yerr(yerr)
+        _validate_spectral_inputs(model, x, y, z, yerr, weights, statistic=statistic)
+        x, y, yerr, weights, valid = _prepare_fit_data(
+            x, y, yerr, weights, kwargs.pop('mask', None),
+            filter_non_finite=kwargs.pop('filter_non_finite', False))
         if yerr is not None and weights is None:
-            weights = 1.0 / np.asarray(yerr)
+            weights = np.zeros_like(np.asarray(yerr), dtype=float)
+            np.divide(1.0, np.asarray(yerr), out=weights, where=valid)
         if 'uncertainties' in kwargs:
             raise TypeError("The 'uncertainties' parameter is no longer supported.")
 
         model = model.copy()
-        init_values, fit_indices, _ = model_to_fit_params(model)
-        bounds_list = [getattr(model, n).bounds for n in model.param_names]
-        all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
-                                b[1] if b[1] is not None else np.inf)
-                               for b in bounds_list])
-        param_bounds = all_bounds[fit_indices]
+        problem = _FitProblem(model, x, y, weights, valid)
+        parameters = problem.parameters
+        init_values = parameters.values
+        param_bounds = parameters.bounds
 
-        tied_info = _get_tied_info(model)
-        params_cache = model.parameters.copy()
-        
         n_free = len(init_values)
-        has_tied = bool(tied_info)
         
         if n_free == 0:
-            if self.verbose:
-                print("No free parameters to fit.")
+            residual = problem.residual(init_values)
+            stat = float(np.dot(residual, residual))
             self.fit_info = {
                 'success': True, 'nfev': 0, 'message': 'No free parameters',
-                'param_cov': None,
-                'stat': np.nan, 'cost': np.nan, 'statmethod': 'leastsq',
-                'nfree': 0, 'ndata': len(y), 'dof': len(y),
+                'param_cov': None, 'stat': stat, 'cost': 0.5 * stat,
+                'statmethod': statistic if weights is not None else 'leastsq',
+                'nfree': 0, 'ndata': problem.ndata, 'dof': problem.ndata,
             }
-            return model
-        
+            return _attach_covariance(problem.finish(init_values), None)
+
         def residuals(internal_params):
             external_params = self._untransform_params(internal_params)
-            params_cache[fit_indices] = external_params
-            model.parameters = params_cache
-            if has_tied:
-                _apply_tied_fast(model, tied_info, params_cache)
-            diff = model(x) - y
-            if weights is not None:
-                return diff * weights
-            return diff
-        
+            return problem.residual(external_params)
+
         x0_internal = self._transform_params(init_values, param_bounds)
         
         # Merge call-time kwargs with init-time leastsq_kwargs
@@ -239,15 +231,15 @@ class LMFitter(MultiFitMixin, Fitter):
             except Exception:
                 native_cov = None
         
-        n_data = len(y)
-        cost_val = chi2 / 2.0 if success else np.nan
+        n_data = problem.ndata
+        cost_val = chi2 / 2.0
         
         self.fit_info = {
             'success': success,
             'nfev': infodict['nfev'],
             'message': mesg,
             'param_cov': native_cov,
-            'stat': chi2 if success else np.nan,
+            'stat': chi2,
             'cost': cost_val,
             'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
             'nfree': n_free,
@@ -255,9 +247,6 @@ class LMFitter(MultiFitMixin, Fitter):
             'dof': n_data - n_free,
         }
         
-        params_cache[fit_indices] = xopt_external
-        model.parameters = params_cache
-        if tied_info:
-            _apply_tied_fast(model, tied_info, params_cache)
-            
-        return model
+        problem.finish(xopt_external)
+
+        return _attach_covariance(model, native_cov)

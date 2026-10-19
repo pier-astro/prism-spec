@@ -1,42 +1,49 @@
 # prism.modeling
 
-`prism.modeling` is the Astropy-facing layer of Prism: models, operators, fitting helpers, line analysis, display, and model I/O live here.
+Prism provides composable spectral models, instrumental operators, fitting,
+line measurements and model I/O. Analysis decisions remain in user notebooks.
 
-## Compatibility Policy
+## Native spectral composition
 
-Prism follows a hybrid compatibility strategy:
+```python
+from prism.modeling import Model
+from prism.modeling.fitting import ScipyTRF
 
-- prefer Prism-owned subclasses and wrappers where the workflow can stay clean without mutating Astropy globally
-- keep a very small number of Astropy monkey-patches only where native Astropy currently blocks transparent interoperability
-- keep the resulting objects Astropy-compatible whenever possible
+source = Model.from_astropy(continuum + narrow + broad)
+model = source | response
+best = ScipyTRF()(model, x, y, yerr=yerr, inplace=False)
+```
 
-In practice this means Prism aims to let users combine native Astropy models and Prism models naturally, while avoiding a large parallel abstraction layer.
+`Model.from_astropy` adapts individual components or an existing arithmetic
+expression, retaining their parameter identities. Copy the complete model for
+an independent parameter graph. Reusing a parameterized component twice in one
+expression is rejected; parameter-free operators can be reused.
 
-## Import-Time Behavior
+Addition, subtraction, multiplication, division and powers retain their
+parentheses. `source | operator` is an explicit application node; order matters.
+Responses can have distinct input/output grids, including rectangular matrices.
+See `operators/README.md` for fixed, parameterized and general transforms.
 
-Two convenience hooks are intentionally enabled at import time:
+The native expression shares numerical kernels, parameter mapping, fitters,
+component analysis and session I/O with the existing adapters. It does not
+inherit Astropy's model class or use its compound-expression evaluation.
+Parameter constraints are edited explicitly through `model.parameter.fixed`,
+`.bounds`, `.tied` or supported Prism `.link` properties; the aggregate constraint
+mappings are read-only. Native fitting currently requires numeric arrays in
+consistent native units. Ordinary evaluation also accepts Quantity coordinates.
 
-- `enable_model_display()`
-- `install_model_io_methods()`
+## Supported interoperability
 
-These are kept because Prism users typically want richer display and direct FITS save/load methods immediately.
+Astropy components remain available through the explicit adapter. SciPy, Sherpa
+and separable Prism fitters support native expressions. Prism's Astropy fitter
+wrappers continue to accept Astropy model roots; they reject native `Model`
+roots explicitly. General custom Python models can be evaluated, but saving
+requires a registered reconstruction rule; arbitrary Python code is not archived.
 
-They are convenience patches, not compatibility-critical patches.
-
-Astropy transparency is preserved in the sense that:
-
-- Prism models remain ordinary Astropy-style models
-- native Astropy models can still be passed through Prism utilities
-- free-function APIs still exist for display and I/O when explicit control is preferred
-
-## Remaining Compatibility-Critical Patches
-
-The only patches Prism currently treats as structurally necessary are the ones that preserve smooth mixed-model behavior for:
-
-- operator-aware `CompoundModel` pipe expressions
-- tied analytic Jacobians in those enhanced fitting paths
-
-Those behaviors are documented in the module READMEs under `operators/` and `fitting/`.
+Astropy extensions live in `interop.astropy` and require explicit activation;
+importing Prism does not modify Astropy display, I/O or compound evaluation.
+Native expressions provide their own display, persistence and operator action.
+This is supported interoperability, rather than complete Astropy transparency.
 
 ## Chromatic PSF fitting
 
@@ -230,3 +237,13 @@ Without a celestial WCS, coordinates remain unknown. To override the saved
 position, set `diagnostics.meta['ra']` and `diagnostics.meta['dec']` before writing.
 Generic `Cube.extract_spectrum` instead uses the aperture-weighted geometric
 barycenter; an explicitly supplied PSF center is not replaced by that position.
+
+
+## Astropy interoperability
+
+`Model.from_astropy(model)` imports supported models into native Prism
+composition. Generic extensions of Astropy live separately in
+`prism.modeling.interop.astropy`: `tie`, standalone display functions and
+explicit `enable_model_display()` / `disable_model_display()` activation.
+Importing `prism.modeling.display` no longer changes Astropy classes. Native
+Prism display is implemented directly and does not need activation.

@@ -1,247 +1,165 @@
-# prism.modeling.line_analysis
+# Line analysis
 
-Post-fit line selection, measurement, and uncertainty propagation for Prism models.
+Small tools for extracting a fitted line and measuring its sampled profile.
+They do not prescribe a scientific analysis pipeline.
 
-This module operates on already constructed spectral models and extracts physically meaningful line-level measurements from them without forcing the user to manually rebuild submodels.
-
-## Concept
-
-`line_analysis` answers a simple question:
-
-Given a composite spectral model, what is the profile and what are the measured properties of one physical line or one tied line component?
-
-It provides:
-
-- selection of one physical line from a compound model
-- direct evaluation of the extracted profile
-- numerical measurements of flux, width, centroids, and moments
-- equivalent width estimation
-- Monte Carlo propagation of attached parameter uncertainties
-
-The API is designed as an analysis layer on top of the models in `prism.modeling.models.lines`.
-
-## Structure
-
-- `selection.py`
-  Resolves a requested physical line into one or more source-model components and exposes `SelectedLineProfile` and `SelectedLineCollection`.
-- `measurement.py`
-  Computes summary measurements and Monte Carlo uncertainty propagation.
-- `__init__.py`
-  Public entry points.
-
-## Physical Overview
-
-The extracted line profile is treated as a spectral-density profile on the same spectral axis as the source model.
-
-This means:
-
-- if the source model is in wavelength, measurements are in wavelength units
-- if the source model is in frequency, measurements are in frequency units
-- if the source model output carries quantities, the extracted profile and its measurements preserve those units
-
-The principal measured quantities are:
-
-- `flux`
-  Integrated line flux over the selected spectral axis.
-- `peak_value`
-  Peak spectral density of the selected line profile.
-- `peak_position`
-  Spectral coordinate of the peak.
-- `fwhm`, `hw_blue`, `hw_red`
-  Width measures on the selected axis.
-- `moment1`, `moment2`, `sigma`
-  First and second moments and the corresponding dispersion.
-- `skewness`, `kurtosis`, `bisector_span`
-  Shape diagnostics.
-
-Equivalent width is computed relative to a supplied or inferred continuum in the same spectral domain as the selected profile.
-
-## Main Objects
-
-### `select_line(...)`
-
-Resolves a selector, such as `Hb4861` or `oiii`, into a line-analysis object.
-
-For grouped templates where multiple physical lines share the same selector,
-`select_line(..., position=...)` can be used to pick a specific rest wavelength.
-If `position` is omitted, grouped selectors default to the unique sub-line with
-`weight=1` and raise if the selector remains ambiguous.
-
-Returns:
-
-- `SelectedLineProfile` for a single model
-- `SelectedLineCollection` for multi-spaxel or multi-fit containers
-
-### `SelectedLineProfile`
-
-Represents one extracted line profile.
-
-Important attributes and properties:
-
-- `source_model`
-- `selector`
-- `entries`
-- `component_names`
-- `domain`
-- `axis_unit`
-- `output_unit`
-- `flux_unit`
-- `eqw_unit`
-- `position`
-
-Important methods:
-
-- `evaluate(x)` or `__call__(x)`
-- `evaluate_components(...)`
-- `infer_window(...)`
-- `measure(...)`
-- `eqw(...)`
-- `sample(...)`
-- `sample_eqw(...)`
-
-### `SelectedLineCollection`
-
-Represents the same logical selection across a multi-fit result.
-
-Important properties:
-
-- `shape`
-- `axis_unit`
-- `output_unit`
-- `eqw_unit`
-
-Important methods:
-
-- `get_profile(index)`
-- `evaluate(...)`
-- `measure(...)`
-- `eqw(...)`
-
-### `LineResult`
-
-Container for measured quantities of one extracted line.
-
-Each measurement is stored as a `Metric`, with:
-
-- `value`
-- `std`
-- `lolim`
-- `uplim`
-- `unit`
-- `quantity`
-
-`LineResult.to_frame()` returns a compact table including the unit column.
-
-## Complete Examples
-
-### 1. Select and Evaluate a Line from a Composite Model
+## From a model or from arrays
 
 ```python
-import numpy as np
-from prism.modeling.models import GaussianLines
-from prism.modeling.line_analysis import select_line
+from prism.modeling.line_analysis import select_line, profile_metrics
 
-hb_narrow = GaussianLines.from_arrays(
-    names=['Hb4861'],
-    pos=[4861.333],
-    name='hb_narrow',
-    amplitude=2.0,
-    offset=0.0,
-    fwhm=300.0,
+line = select_line(model, 'Hb4861', components=['narrow', 'broad'])
+y = line(x)
+parts = line.evaluate_components(x=x)
+
+metrics = line.measure(x=x)
+# The same numerical measurements on any continuum-subtracted profile:
+metrics = profile_metrics(x, y)
+```
+
+`profile_metrics(x, y)` accepts matching finite one-dimensional arrays with at
+least three samples. Coordinates must be strictly monotonic; descending inputs
+are oriented internally. Quantity inputs retain their coordinate and density
+units. Plain arrays do not imply physical units. Coordinate transformations and
+corresponding spectral-density transformations remain the caller's choice.
+
+`LineResult` exposes `Metric` objects such as `flux`, `peak_value`,
+`peak_position`, `fwhm`, `sigma`, `moment1`, `moment2`, `skewness` and `kurtosis`.
+Each metric carries `value`, `std`, `lolim`, `uplim`, `unit` and `quantity`.
+`to_frame()` returns a table. Deterministic measurements do not estimate errors.
+
+`select_line` resolves the requested components and physical transition once.
+Parameter edits remain live; rebuild the selection after replacing components or
+changing the compiled line-table layout. Prefer an explicit choice:
+
+```python
+from prism.modeling.models import get_components
+
+parts = get_components(model, additive=False)
+line = select_line(model, 'Hb4861', components=[parts['narrow'], parts['broad']])
+```
+
+Names, indices, a single component, or a list of component objects belonging to
+the parent are supported. Aliases of the same leaf count once. Object references
+are matched by identity; an unrelated object with the same name is rejected.
+Keeping the parent preserves joint covariance and links to other components.
+For independent components, a shorter standalone form is available:
+
+```python
+line = select_line([narrow, broad], 'Hb4861')
+```
+
+This form does not recover a former parent's covariance; components with links
+must be selected from their original parent. For a whole template complex or
+band integral, evaluate the component directly and use `profile_metrics`.
+
+Without `components=`, discovery only matches tags in a single group or a simple
+sum of components. It does not distribute algebraic expressions: non-additive
+models require explicit intrinsic leaves. The old `additive` argument is retained
+for existing calls but no longer requests algebraic decomposition. Response
+pipes require `components=` explicitly, keeping the fitted parent for joint
+covariance and links while evaluating the chosen intrinsic leaves. For example:
+
+```python
+line = select_line(fitted_model, 'Hb4861', components=['blr', 'hhe_nlr'])
+```
+
+Equivalent widths of such selections require an explicit intrinsic continuum;
+Prism does not subtract an intrinsic line from a response-folded parent.
+
+For multi-transition templates, `position=` chooses a rest position (a scalar
+uses native coordinates; a Quantity is converted). Otherwise the unique member
+with weight=1 is selected, or the sole member. Ambiguity raises. Selected
+components must use the same native coordinate unit; equivalent amplitude units
+are converted before summation, and unitless/quantity amplitudes cannot be mixed.
+
+For cube selections, specify components by names or indices so the same choice
+can be applied to each reconstructed model. Explicit component objects from one
+spectrum are not reused across different models.
+
+## Keep physical choices visible
+
+```python
+summary, samples = line.sample(
+    x=x, n_samples=1000, method='std', distribution='gaussian',
+    random_state=7, return_samples=True,
 )
-hb_broad = GaussianLines.from_arrays(
-    names=['Hb4861'],
-    pos=[4861.333],
-    name='hb_broad',
-    amplitude=1.5,
-    offset=150.0,
-    fwhm=1800.0,
+```
+
+Sampling is optional. The same numerical measurement functions process every
+realization. The source model is left unchanged. Fixed parameters stay fixed;
+derived parameters follow their links through the parent model. Arbitrary
+callable links require retaining all parent free parameters as possible drivers.
+Only parameters with usable uncertainty information are independently perturbed;
+others stay nominal. This is conditional error propagation, not a posterior fit.
+
+- `method='covariance'`: joint Gaussian draws from the parent covariance in free
+  parameter order. Both compressed fit covariance and cube-expanded covariance
+  with explicit fit indices are supported. Invalid matrices raise.
+- `method='std'`: independent draws from attached standard deviations. Gaussian
+  draws are explicit; `distribution='auto'` retains the existing variance-matched
+  uniform rule, value ± sqrt(3)*std.
+- `method='limits'`: uniform draws between attached finite lower/upper limits.
+- `method='auto'`: use valid covariance first, otherwise attached limits/std.
+  Unusable covariance emits a warning before falling back.
+
+Draws are clipped to parameter bounds for compatibility. Clipping creates mass
+at boundaries and is not sampling a truncated posterior. Reported intervals
+summarize propagated draws and retain the existing boundary-limit convention.
+A seed gives reproducibility within this implementation; corrected parameter
+selection/link handling can change samples relative to earlier versions.
+
+Equivalent width is another optional operation:
+
+```python
+ew = line.eqw(continuum=continuum, x=x)
+ew = line.sample_eqw(
+    continuum=continuum, x=x, method='covariance', random_state=7,
 )
-
-model = hb_narrow + hb_broad
-hb = select_line(model, 'Hb4861')
-
-x = np.linspace(4800.0, 4925.0, 4000)
-y = hb(x)
-
-print(hb.component_names)
-print(hb.position)
 ```
 
-### 2. Measure Flux, Width, and Moments
+A scalar or callable continuum is treated as exact. Omitting it retains the
+legacy local-median estimate of source model minus selected line; this is a
+convenience policy, not a continuum fit. With an inferred continuum,
+`perturb_continuum=True` includes non-line free parameters in the same joint
+propagation. Links can also couple line and continuum drivers. EW uses the same
+selected transition, grid validation and parameter-update path as other measures.
+Positive sampled continua are required for numerical integration; legacy signed
+nonzero scalar continua remain supported.
 
-```python
-result = hb.measure(x=x)
+## Numerical conventions
 
-print(result.flux)
-print(result.peak_position)
-print(result.fwhm)
-print(result.moment1)
-print(result.to_frame())
-```
+Flux and moments describe the supplied finite window, not an infinite analytic
+profile. Heavy-tailed moments may depend strongly on that window. FWHM and other
+fractional widths use the nearest crossings about the highest positive peak,
+not the outer extent of all peaks in a blend. Negative-only profiles have signed
+flux/moments and undefined crossing widths. Widths remain in the coordinate unit;
+converting them to velocity requires an explicit reference and convention.
 
-### 3. Equivalent Width Against an Explicit Continuum
+`select_line` on a multi-fit result returns `SelectedLineCollection`.
+`collection.measure(x=x)` produces spatial maps with the same numerical core;
+`collection[index].sample(...)` propagates uncertainties for one spectrum.
+There is no separate cube-specific implementation of the physics.
 
-```python
-ew = hb.eqw(continuum=100.0)
-print(ew)
-```
+## Implementation map
 
-If the selected line carries quantity units, the EW unit follows the spectral axis.
+- `numerical.py`: flux, crossings, moments and EW on numeric arrays; NumPy only.
+- `measurement.py`: array/Quantity entry point and deterministic selection adapters.
+- `sampling.py`: parameter draws, parent-model updates, shared propagation and summaries.
+- `selection.py`: component/member resolution and thin user-facing methods.
+- `results.py`: scalar/spatial results, units and table presentation.
 
-### 4. Quantity-Aware Selection in Frequency Space
+The existing root imports remain supported. Direct imports of the sampler from
+`measurement.py` should use `prism.modeling.line_analysis` or `sampling.py`.
+Luminosities, mass calibrations, extinction assumptions, outflow geometry and
+energetics belong in notebooks or downstream applications.
 
-```python
-import astropy.units as u
-from prism.modeling.models import GaussianLine
-from prism.modeling.models.lines import profiles
-from prism.modeling.line_analysis import select_line
+## Loading fitted models
 
-line = GaussianLine(
-    amplitude=3.0 * u.Jy,
-    position=5007.0 * u.AA,
-    fwhm=500.0 * u.km / u.s,
-    domain='frequency',
-    name='oiii',
-)
-
-sel = select_line(line, 'oiii')
-nu0 = (profiles.C_AA_S / 5007.0) * u.Hz
-
-print(sel(nu0))
-print(sel.eqw(1.5 * u.Jy).quantity)
-print(sel.measure(num=2048).flux.quantity)
-```
-
-### 5. Monte Carlo Sampling from Attached Parameter Uncertainties
-
-```python
-hb_narrow.amp_hb4861.std = 0.10
-hb_broad.amp_hb4861.std = 0.08
-
-summary, samples = hb.sample(
-    n_samples=128,
-    random_state=123,
-    return_samples=True,
-)
-
-print(summary.flux)
-print(samples.head())
-```
-
-### 6. Evaluate Individual Contributing Components
-
-```python
-parts = hb.evaluate_components(x=x)
-for name, values in parts.items():
-    print(name, values.shape)
-```
-
-This is useful when one selected physical line is built from multiple components, such as narrow and broad systems.
-
-## Notes
-
-- `line_analysis` works on intrinsic model components, not on linear-operator pipe wrappers.
-- The selected profile stays in the same spectral domain as the source model.
-- Unit propagation now follows Astropy units consistently through profile evaluation, measurement results, and EW.
-- This file is a compact addendum intended to complement fuller documentation later.
+Callable Python links are analysis code and are not reconstructed by model YAML.
+Newly saved parameter states record whether a link existed and loading warns
+which constraints need restoring. Reapply those `.tied` functions before
+refitting or propagating covariance. The saved covariance is usable only when
+the restored free-parameter order matches the fit. The Blended Line Analysis
+example shows this explicitly after regenerating its input with Model Single
+Spectrum. No callable pickle is loaded automatically.

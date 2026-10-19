@@ -63,9 +63,7 @@ from .spatial import *
 from ..operators import instrument                               # models.instrument.*
 from ..operators.instrument import InstrumentResponse, SpectralResponse
 
-from .display import (
-    enable_model_display,
-    disable_model_display,
+from ..display import (
     get_model_expression,
     format_model_text,
     format_model_html,
@@ -73,3 +71,5 @@ from .display import (
     format_fit_html,
     show_model,
 )
+
+from ..composition import Model

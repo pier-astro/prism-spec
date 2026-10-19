@@ -16,6 +16,7 @@ For linear-operator pipe models (convolved models, ``h = M @ f``):
 
 import numpy as np
 from astropy.modeling import CompoundModel
+from ..composition import Model, _is_compound
 from astropy.modeling.models import Const1D, Identity
 
 from ..operators.matop import is_linear_operator_pipe
@@ -38,6 +39,8 @@ def _wrap_component(component, op_info):
 
 def _is_negative_const(model):
     """Return True when *model* is the synthetic Const1D(-1) sign carrier."""
+    if isinstance(model, Model) and model.op is None:
+        model = model.component
     return isinstance(model, Const1D) and np.isclose(float(model.amplitude.value), -1.0)
 
 
@@ -92,6 +95,11 @@ class ModelComponents(dict):
         ``deconvolve=True`` removes ``linop2`` only. Nested pipe nodes are
         still distributed across additive source terms, so
         ``(A + B) | linop`` becomes ``A|linop, B|linop``.
+
+    Additive extraction preserves the algebra: products distribute over sums,
+    ratios distribute only over their numerator, and powers remain whole.
+    Returned terms can therefore be expressions rather than individual leaves.
+    This decomposition alone does not assign a physical flux to every factor.
 
     Examples
     --------
@@ -194,11 +202,12 @@ class ModelComponents(dict):
                 traverse(submodel.left)
                 add_operator_marker(submodel)
                 return
-            if isinstance(submodel, CompoundModel):
+            if _is_compound(submodel):
                 traverse(submodel.left)
                 traverse(submodel.right)
             else:
-                add_item(submodel, self._get_component_name(submodel))
+                component = submodel.component if isinstance(submodel, Model) else submodel
+                add_item(component, self._get_component_name(component))
 
         traverse(self._original_model)
 
@@ -213,6 +222,11 @@ class ModelComponents(dict):
                 out = _wrap_component(comp, self._op_info)
             else:
                 out = comp
+
+            if isinstance(out, Model) and out is not self._original_model:
+                # A plotted term may link to another term in the full source.
+                # Resolve those links in the parent, retaining its parameter graph.
+                out._evaluation_parent = self._original_model
 
             name = self._get_component_name(out)
             unique_name = _make_unique_name(name, used_names)
@@ -230,7 +244,9 @@ class ModelComponents(dict):
         
         For addition (+): keep components separate
         For subtraction (-): negate right side with Const1D(-1) * component
-        For multiplication/division/power: expand all pairwise combinations
+        Products distribute over sums on both sides. Division distributes only
+        over the numerator; its denominator stays intact. Powers are opaque
+        because exponentiation is not generally additive.
         
         Parameters
         ----------
@@ -242,14 +258,18 @@ class ModelComponents(dict):
         list
             List of additive component models.
         """
-        if not isinstance(model, CompoundModel):
+        if not _is_compound(model):
             return [model]
 
         if is_linear_operator_pipe(model):
             source_components = self._expand_additive(model.left)
             return [_wrap_component(component, model) for component in source_components]
         
+        if model.op == '**':
+            return [model]
         left = self._expand_additive(model.left)
+        if model.op == '/':
+            return [term / model.right for term in left]
         right = self._expand_additive(model.right)
         
         # Check operator (stored as string in Astropy)
@@ -257,28 +277,19 @@ class ModelComponents(dict):
             return left + right
         elif model.op == '-':
             # Negate right side: create (-1) * component for each right component
-            neg_right = [Const1D(-1) * r for r in right]
+            neg_right = [r * Const1D(-1) if isinstance(r, Model) else Const1D(-1) * r for r in right]
             return left + neg_right
-        elif model.op in ('*', '/', '**'):
-            # Create all pairwise combinations
-            products = []
-            for l in left:
-                for r in right:
-                    # Create compound model with the appropriate operator
-                    if model.op == '*':
-                        products.append(l * r)
-                    elif model.op == '/':
-                        products.append(l / r)
-                    elif model.op == '**':
-                        products.append(l ** r)
-            return products
+        elif model.op == '*':
+            return [l * r for l in left for r in right]
         else:
             # Unknown operator, treat as single component
             return [model]
     
     def _get_component_name(self, model):
         """Name from model: ``model.name``, compound expression, or class name."""
-        if isinstance(model, CompoundModel):
+        if isinstance(model, Model) and model.op is None:
+            model = model.component
+        if _is_compound(model):
             return self._construct_compound_name(model)
         if hasattr(model, 'name') and model.name:
             return model.name
@@ -288,7 +299,7 @@ class ModelComponents(dict):
         """Return multiplicative factor names, omitting synthetic -1 factors."""
         if _is_negative_const(model):
             return []
-        if isinstance(model, CompoundModel) and model.op == '*':
+        if _is_compound(model) and model.op == '*':
             return self._flatten_product_names(model.left) + self._flatten_product_names(model.right)
         return [self._get_component_name(model)]
 
@@ -296,7 +307,7 @@ class ModelComponents(dict):
         """Build a descriptive name like ``A*B`` from a compound model."""
         if is_linear_operator_pipe(model):
             left_name = self._get_component_name(model.left)
-            if isinstance(model.left, CompoundModel):
+            if _is_compound(model.left):
                 left_name = f"({left_name})"
             right_name = getattr(model.right, 'name', None) or getattr(model, 'name', None) or 'linop'
             return f"{left_name}|{right_name}"
@@ -307,10 +318,12 @@ class ModelComponents(dict):
         if model.op == '*':
             factors = self._flatten_product_names(model)
             return '*'.join(factors) if factors else 'Const1D'
-        elif model.op == '/':
-            return f"{left_name}/{right_name}"
-        elif model.op == '**':
-            return f"{left_name}**{right_name}"
+        elif model.op in ('/', '**'):
+            if _is_compound(model.left):
+                left_name = f"({left_name})"
+            if _is_compound(model.right):
+                right_name = f"({right_name})"
+            return f"{left_name}{model.op}{right_name}"
         elif model.op == '-':
             # Shouldn't happen if _expand_additive worked correctly
             return f"{left_name}-{right_name}"

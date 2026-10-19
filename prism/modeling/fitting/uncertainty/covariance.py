@@ -188,7 +188,7 @@ def attach(model, fitter, verbose=False):
     >>> attach(fitted, fitter, verbose=True)
     >>> print(f"Amplitude: {fitted.amplitude_0.value:.3f} ± {fitted.amplitude_0.std:.3f}")
     """
-    from astropy.modeling.fitting import model_to_fit_params
+    from ..utils import _free_parameter_indices
     
     # Extract covariance matrix
     try:
@@ -203,7 +203,7 @@ def attach(model, fitter, verbose=False):
         raise CovarianceError("Could not compute standard deviations from covariance.")
     
     # Get indices of free parameters
-    _, fit_indices, _ = model_to_fit_params(model)
+    fit_indices = _free_parameter_indices(model)
     
     if len(std) != len(fit_indices):
         warnings.warn(

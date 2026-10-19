@@ -14,13 +14,12 @@ fitting
 io
     FITS I/O for fitted models and multi-fit results.
 """
+from .composition import Model
 from . import line_analysis
 from .line_analysis import *
-from .operators.matop import LinearOperatorModel, install_pipe_patch, is_linear_operator_pipe
+from .operators.matop import LinearOperatorModel, is_linear_operator_pipe
 from .operators.instrument import InstrumentResponse, SpectralResponse
-from .models.display import (
-    enable_model_display,
-    disable_model_display,
+from .display import (
     get_model_expression,
     format_model_text,
     format_model_html,

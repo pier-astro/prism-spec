@@ -2,6 +2,7 @@
 
 import warnings
 import numpy as np
+from ..utils import _free_parameter_indices
 
 __all__ = [
     'Bootstrap',
@@ -26,52 +27,41 @@ def is_batched_result_like(model) -> bool:
 
 
 def prepare_noise_and_weights(y, yerr, weights, statistic):
-    """
-    Normalize yerr/weights inputs and return both arrays.
-    - If only weights are provided, derive yerr for noise generation.
-    - If only yerr is provided, compute chi-squared style weights.
-    - If neither is provided and statistic is Poisson, synthesize yerr/weights.
-    """
-    stat = statistic.lower()
+    """Prepare noise widths and residual weights, consistently with the fitters."""
+    y = np.asarray(y, dtype=float)
+    if y.ndim != 1:
+        raise ResampleError('Resampling expects one-dimensional observations.')
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        if weights.shape != y.shape or np.any(~np.isfinite(weights)) or np.any(weights < 0):
+            raise ResampleError('weights must match y and be finite and nonnegative.')
+    valid = np.ones(y.shape, dtype=bool) if weights is None else weights > 0
+    if not np.any(valid):
+        raise ResampleError('No valid samples remain for resampling.')
+    if np.any(~np.isfinite(y[valid])):
+        raise ResampleError('Included observations must be finite.')
+    if statistic.lower() == 'poisson' and np.any(y[valid] < 0):
+        raise ResampleError('Poisson resampling requires nonnegative counts.')
 
     if yerr is None:
         if weights is not None:
-            weights = np.asarray(weights)
-            if np.any(~np.isfinite(weights)):
-                raise ResampleError("weights contains non-finite values.")
-            safe_weights = np.maximum(weights, 1e-20)
-            yerr = np.sqrt(1.0 / safe_weights)
-        elif stat == 'poisson':
-            base = np.maximum(np.abs(y), 1)
-            yerr = np.sqrt(base)
+            yerr = np.zeros_like(y)
+            np.divide(1.0, weights, out=yerr, where=valid)
+        elif statistic.lower() == 'poisson':
+            yerr = np.sqrt(np.maximum(y, 1.0))
         else:
-            raise ResampleError(
-                "yerr or weights required for Gaussian bootstrap. "
-                "Provide data uncertainties or weights for noise generation."
-            )
-
+            raise ResampleError('yerr or residual weights are required for Gaussian resampling.')
     yerr = np.asarray(yerr, dtype=float)
-    if yerr.ndim not in {1, 2}:
-        raise ResampleError('yerr must be symmetric (N,) or asymmetric (2, N).')
-    if yerr.ndim == 2 and yerr.shape[0] != 2:
-        raise ResampleError('Asymmetric yerr must have shape (2, N).')
-    yerr = np.maximum(yerr, 1e-10)
-    if np.any(~np.isfinite(yerr)):
-        raise ResampleError("yerr contains non-finite values.")
-
-    effective_yerr = 0.5 * (yerr[0] + yerr[1]) if yerr.ndim == 2 else yerr
-
+    if yerr.shape not in (y.shape, (2, len(y))):
+        raise ResampleError('yerr must have shape (N,) or (2, N), matching y.')
+    included = yerr[..., valid]
+    if np.any(~np.isfinite(included)) or np.any(included <= 0):
+        raise ResampleError('Included uncertainties must be finite and strictly positive.')
+    # Excluded samples carry zero weight and require no random noise draw.
+    yerr = np.where(valid, yerr, 0.0)
+    effective_yerr = yerr.mean(axis=0) if yerr.ndim == 2 else yerr
     if weights is None:
-        if stat == 'poisson':
-            weights = 1.0 / np.maximum(np.abs(y), 1e-10)
-        else:
-            weights = 1.0 / (effective_yerr ** 2)
-    else:
-        weights = np.asarray(weights)
-        if np.any(~np.isfinite(weights)):
-            raise ResampleError("weights contains non-finite values.")
-        weights = np.maximum(weights, 1e-20)
-
+        weights = 1.0 / effective_yerr
     return yerr, effective_yerr, weights
 
 
@@ -129,8 +119,9 @@ class Bootstrap:
     - ``poisson``: y_new[i] ~ Poisson(lam = y_obs[i])
                    (requires raw non-negative integer counts)
 
-    The original uncertainty array is passed unchanged to the fitter in every
-    iteration — only the flux values are perturbed.
+    The same effective errors and residual weights are used in every fit.
+    Symmetric errors give weights 1/yerr; asymmetric errors use their mean for
+    fitting and retain the supplied lower/upper widths for noise generation.
 
     References
     ----------
@@ -141,7 +132,7 @@ class Bootstrap:
     def __init__(self, model, fitter=None, x=None, y=None, yerr=None, weights=None,
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
                  seed=None, confidence=68, noise_dist='uniform',
-                 verbose=True, nproc=1, batch=False,
+                 verbose=True, nproc=1,
                  inplace=True, set_values=True, xerr=None, perturb_x=False):
         # Frozen copy: all bootstrap iterations start from this state.
         # The original model is never mutated during the run.
@@ -162,7 +153,6 @@ class Bootstrap:
         self.seed = seed
         self.verbose = bool(verbose)
         self.nproc = int(nproc)
-        self.batch = bool(batch)
         self.inplace = bool(inplace)
         self.confidence = confidence
         self.set_values = bool(set_values)
@@ -171,9 +161,7 @@ class Bootstrap:
 
     @staticmethod
     def _fit_param_names(model):
-        from astropy.modeling.fitting import model_to_fit_params
-
-        _, fit_indices, _ = model_to_fit_params(model)
+        fit_indices = _free_parameter_indices(model)
         names = []
         cumulative_idx = 0
         for pname in model.param_names:
@@ -186,8 +174,6 @@ class Bootstrap:
 
     def run(self):
         """Run bootstrap and return parameter sample arrays."""
-        from astropy.modeling.fitting import model_to_fit_params
-
         if is_batched_result_like(self.model):
             raise NotImplementedError(
                 "Resampling for batched spectra/cubes is not implemented yet. "
@@ -208,7 +194,7 @@ class Bootstrap:
         # Flux Randomization: perturb observed data with measured uncertainties.
         # The observed spectrum carries the signal; only the noise realization
         # changes across iterations (Peterson et al. 1998, PASP 110, 660).
-        y_obs = np.asarray(self.y, dtype=float)
+        y_obs = np.where(weights > 0, self.y, 0.0)
         n_pts = y_obs.size
         _sqrt3 = np.sqrt(3.0)
 
@@ -251,7 +237,9 @@ class Bootstrap:
             # Poisson: λ = observed counts. y_obs must be raw non-negative counts.
             lam = np.maximum(y_obs, 0.0)
             y_synth = rng.poisson(lam, size=(self.n_samples, n_pts)).astype(float)
-            fit_stat = 'poisson'
+            # Poisson draws are refitted with the same fixed-error chi-square
+            # approximation; this does not implement a Poisson likelihood.
+            fit_stat = 'chi2'
 
         if self.perturb_x:
             if self.noise_dist == 'uniform':
@@ -284,7 +272,6 @@ class Bootstrap:
                 statistic=fit_stat,
                 nproc=self.nproc,
                 progress=True,
-                batch=self.batch,
                 **self.fitter_kwargs,
             )
 
@@ -299,14 +286,12 @@ class Bootstrap:
                     continue
 
                 fitted_model = result.get_model(i)
-                fitted_params, _, _ = model_to_fit_params(fitted_model)
+                fitted_params = fitted_model.parameters[_free_parameter_indices(fitted_model)]
                 for name, value in zip(param_names, fitted_params):
                     samples[name][i] = value
                 n_success += 1
 
-            nfev_arr = result.nfev.ravel()
         else:
-            nfev_arr = np.full(self.n_samples, np.nan, dtype=float)
             for i in range(self.n_samples):
                 try:
                     fitted_model = self.fitter(
@@ -319,30 +304,18 @@ class Bootstrap:
                         inplace=False,
                         **self.fitter_kwargs,
                     )
+                    if not self.fitter.fit_info.get('success', False):
+                        raise RuntimeError(self.fitter.fit_info.get('message', 'Fit did not converge.'))
                 except Exception as exc:
                     if self.verbose and warned < max_warn:
                         warnings.warn(f'Bootstrap iteration {i} failed: {exc}', RuntimeWarning)
                         warned += 1
                     continue
 
-                fitted_params, _, _ = model_to_fit_params(fitted_model)
+                fitted_params = fitted_model.parameters[_free_parameter_indices(fitted_model)]
                 for name, value in zip(param_names, fitted_params):
                     samples[name][i] = value
                 n_success += 1
-
-        # Post-run diagnostic: warn if most fits barely moved
-        valid_nfev = nfev_arr[np.isfinite(nfev_arr)]
-        if len(valid_nfev) > 0:
-            frac_stale = np.mean(valid_nfev < 3)
-            if frac_stale > 0.5:
-                warnings.warn(
-                    f"{frac_stale * 100:.0f}% of bootstrap fits converged in <3 "
-                    f"function evaluations (nfev<3), suggesting the fitter is not "
-                    f"re-optimizing the perturbed data. This leads to underestimated "
-                    f"uncertainties. Consider using ScipyTRF() or SherpaLM() as the "
-                    f"bootstrap fitter.",
-                    RuntimeWarning,
-                )
 
         # Post-run diagnostic: warn if all samples are identical (degenerate)
         if n_success > 1:
@@ -476,7 +449,7 @@ class Bootstrap:
 
 def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
               n_samples=1000, statistic='gauss', fitter_kwargs=None, seed=None,
-              verbose=False, nproc=1, batch=False,
+              verbose=False, nproc=1,
               inplace=True, confidence=68, set_values=True, noise_dist='gauss',
               xerr=None, perturb_x=False):
     """Estimate parameter uncertainties via Flux Randomization (Empirical Monte Carlo).
@@ -529,7 +502,6 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         seed=seed,
         verbose=verbose,
         nproc=nproc,
-        batch=batch,
         inplace=inplace,
         confidence=confidence,
         set_values=set_values,

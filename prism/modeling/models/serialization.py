@@ -1,56 +1,21 @@
 """
-YAML serialization hooks for prism-spec models.
+YAML serialization hooks for Prism models and explicit composition trees.
 
-Calling ``register()`` (done automatically on import) registers all
-prism model types with ``astropy.io.misc.yaml``, enabling round-trip
-``dump``/``load`` for fitted models saved to FITS via ``prism.modeling.io``.
+Registration supports line models/groups, compound models, generic Astropy
+one-dimensional models and fixed linear-operator pipes. FITS sessions reference
+external sparse operator resources through per-call loader/dumper context;
+standalone YAML embeds fixed matrices. Registered instrument recipes rebuild
+responses and verify their content fingerprint. Missing resources or unsupported
+operator behavior raise errors instead of dropping the operator.
 
-Supported types
----------------
-* ``LineModelBase`` (``GaussianLine``, ``VoigtLine``, ``LorentzianLine``) —
-  stored as class name + per-parameter state.
-* ``LineGroupBase`` (``GaussianLines``, …) — dynamically-created classes
-  rebuilt via ``from_templates`` from the embedded ``_df`` table.
-* ``CompoundModel`` — tree of sub-models with Astropy operators.
-* Prism linear-operator pipe models — store the source model plus a
-    reconstruction *recipe* (instrument name, redshift, wavelength grid).
-    The matrix is never serialized; it is rebuilt on load.
-* Generic ``Fittable1DModel`` — fallback for any Astropy model.
-
-Response serialization
-----------------------
-Prism linear-operator pipe models are saved with a *recipe* that records
-how the operator matrix was constructed:
-
-* **Instrument recipe** (``type='instrument'``): the instrument name,
-  redshift, and wavelength grid are stored.  On load, the matrix is
-  rebuilt from the archived instrument file.  This is fully
-  round-trippable as long as the instrument is registered::
-
-      from prism.modeling.operators.instrument import SpectralResponse
-      rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=z)
-    model = source | rsp
-    model.save('fit.fits')               # recipe = {type: 'instrument', ...}
-    loaded = load_model('fit.fits')      # linear-operator pipe reconstructed
-
-* **Direct recipe** (``type='direct'``): the operator was built from an
-  ``InstrumentResponse`` object directly, without an instrument name.
-  The matrix cannot be reconstructed from the recipe alone.  On load
-  the source model is returned *without* convolution and a warning is
-  issued.  Re-apply the operator manually::
-
-      loaded = load_model('fit.fits')       # source model only (warning)
-      loaded = rsp(loaded)                  # re-apply manually
-
-If the ``serialization`` module is not imported before loading (e.g. in
-a fresh session), call ``prism.modeling.models.serialization.register()``
-or simply ``import prism.modeling.models`` to activate the hooks.
+Declarative links are stored by the FITS session writer as an explicit graph.
+Callable parameter links are marked but must be restored explicitly by analysis
+code. Import ``prism.modeling.models`` to register these hooks.
 """
 
 import warnings
 import numpy as np
 import pandas as pd
-import re
 import astropy.units as u
 
 from astropy.table import QTable
@@ -65,11 +30,17 @@ from ..operators.matop import is_linear_operator_pipe
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _param_state(param):
+def _param_state(param, dumper):
     """Compact serialisable dict for one Astropy Parameter."""
+    from ..parameters import _Expression
+    declarative = isinstance(param.tied, _Expression)
+    if declarative and not getattr(dumper, 'declarative_links', False):
+        raise ValueError('Save declarative parameter links through model.save(), which records the complete model graph.')
     state = {
         'value':  float(param.value),
+        'unit': param.unit.to_string() if param.unit is not None else None,
         'fixed':  bool(param.fixed),
+        'tied':   bool(param.tied) and not declarative,
         'bounds': list(param.bounds) if param.bounds != (None, None) else [None, None],
     }
     # Persist prism uncertainty attributes when available; scalars only.
@@ -87,9 +58,17 @@ def _param_state(param):
 
 def _restore_param(model, name, state):
     param = getattr(model, name)
-    param.value = state['value']
+    if state.get('unit') is not None:
+        setattr(model, name, state['value'] * u.Unit(state['unit']))
+    else:
+        param.value = state['value']
     param.fixed = state['fixed']
     param.bounds = tuple(state['bounds'])
+    if state.get('tied', False):
+        warnings.warn(
+            f"Restore the analysis's callable link for {model.name or type(model).__name__}.{name} "
+            "before refitting or covariance propagation; Python links are not serialized.",
+            UserWarning, stacklevel=3)
     # Restore prism uncertainty attributes if present.
     for attr in ('std', 'lolim', 'uplim', 'median'):
         if attr in state:
@@ -103,7 +82,7 @@ def _restore_param(model, name, state):
 # ---------------------------------------------------------------------------
 
 def _linemodel_representer(dumper, obj):
-    state = {pn: _param_state(getattr(obj, pn)) for pn in obj.param_names}
+    state = {pn: _param_state(getattr(obj, pn), dumper) for pn in obj.param_names}
     state['_velocity_unit'] = obj.velocity_unit.to_string()
     instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
     if isinstance(instfwhm_raw, np.ndarray):
@@ -118,7 +97,9 @@ def _linemodel_constructor(loader, node, cls):
     instfwhm = mapping.pop('_instfwhm', 0.0)
     mdl_name = mapping.pop('_name', None)
     velocity_unit = mapping.pop('_velocity_unit', 'km/s')
-    obj = cls(instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit)
+    parameters = {name: state['value'] * u.Unit(state['unit'])
+                  for name, state in mapping.items() if state.get('unit') is not None}
+    obj = cls(instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit, **parameters)
     for pn, state in mapping.items():
         if hasattr(obj, pn):
             _restore_param(obj, pn, state)
@@ -162,7 +143,7 @@ def _linegroup_representer(dumper, obj):
         state['_name'] = obj.name
 
     for pn in obj.param_names:
-        state[pn] = _param_state(getattr(obj, pn))
+        state[pn] = _param_state(getattr(obj, pn), dumper)
 
     return dumper.represent_mapping('!prism.LineGroup', state)
 
@@ -198,7 +179,7 @@ def _linegroup_constructor(loader, node):
 # ---------------------------------------------------------------------------
 
 def _continuum_representer(dumper, obj):
-    state = {pn: _param_state(getattr(obj, pn)) for pn in obj.param_names}
+    state = {pn: _param_state(getattr(obj, pn), dumper) for pn in obj.param_names}
     if obj.name:
         state['_name'] = obj.name
     return dumper.represent_mapping(f'!prism.{obj.__class__.__name__}', state)
@@ -220,13 +201,15 @@ def _continuum_constructor(loader, node, cls):
 def _astropy_model_representer(dumper, obj):
     """Generic representer for any Astropy Fittable1DModel without a prism hook."""
     cls = type(obj)
+    if not cls.__module__.startswith('astropy.modeling.'):
+        raise ValueError(f'No reconstruction rule for model class {cls.__module__}.{cls.__qualname__}.')
     state = {
         '_class': f'{cls.__module__}.{cls.__qualname__}',
     }
     if obj.name:
         state['_name'] = obj.name
     for pn in obj.param_names:
-        state[pn] = _param_state(getattr(obj, pn))
+        state[pn] = _param_state(getattr(obj, pn), dumper)
     return dumper.represent_mapping('!prism.AstropyModel', state)
 
 
@@ -257,31 +240,49 @@ def _astropy_model_constructor(loader, node):
 # Compound models
 # ---------------------------------------------------------------------------
 
+def _native_representer(dumper, obj):
+    if is_linear_operator_pipe(obj):
+        state = _linear_operator_pipe_representer(dumper, obj)
+        return state
+    state = {'name': obj.name}
+    if obj.op is None:
+        state['component'] = obj.component
+    else:
+        state.update(op=obj.op, left=obj.left, right=obj.right)
+    return dumper.represent_mapping('!prism.Model', state)
+
+
+def _native_constructor(loader, node):
+    from ..composition import Model
+    state = loader.construct_mapping(node, deep=True)
+    if 'component' in state:
+        return Model.from_astropy(state['component'])
+    result = Model(op=state['op'], left=state['left'], right=state['right'], name=state['name'])
+    if result.op not in ('+', '-', '*', '/', '**', '|'):
+        raise ValueError('Unsupported native model operation.')
+    return result
+
+
 def _compound_representer(dumper, obj):
     if is_linear_operator_pipe(obj):
         return _linear_operator_pipe_representer(dumper, obj)
-
-    state = {
-        '_expr': obj._format_expression(),
-        '_components': list(obj._leaflist),
-    }
-    if obj.name:
-        state['_name'] = obj.name
-    return dumper.represent_mapping('!prism.CompoundModel', state)
+    return dumper.represent_mapping('!prism.CompoundModel',
+        {'_op': obj.op, '_left': obj.left, '_right': obj.right, '_name': obj.name})
 
 
 def _compound_constructor(loader, node):
+    import operator
+    from astropy.modeling import fix_inputs
     mapping = loader.construct_mapping(node, deep=True)
-    expr = mapping['_expr']
-    components = mapping['_components']
-    mdl_name = mapping.get('_name')
-
-    namespace = {f'c{i}': comp for i, comp in enumerate(components)}
-    py_expr = re.sub(r'\[(\d+)\]', lambda m: f"c{m.group(1)}", expr)
-    obj = eval(py_expr, {'__builtins__': {}}, namespace)
-    if mdl_name is not None:
-        obj.name = mdl_name
-    return obj
+    operations = {'+': operator.add, '-': operator.sub, '*': operator.mul,
+                  '/': operator.truediv, '**': operator.pow, '|': operator.or_,
+                  '&': operator.and_, 'fix_inputs': fix_inputs}
+    op = mapping['_op']
+    if op not in operations:
+        raise ValueError(f'Unsupported model composition: {op!r}.')
+    result = operations[op](mapping['_left'], mapping['_right'])
+    result.name = mapping.get('_name')
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -289,80 +290,66 @@ def _compound_constructor(loader, node):
 # ---------------------------------------------------------------------------
 
 def _linear_operator_pipe_representer(dumper, obj):
-    """Serialize a Prism linear-operator pipe expression.
-
-    Stores the source model (serialized recursively) and a reconstruction
-    recipe for the operator.  The full matrix is *not* stored — it is
-    rebuilt from the recipe on load.
-    """
-    state = {
-        '_source': obj.left,  # serialized by its own representer
-    }
+    """Persist source and a fixed operator, using a session resource if available."""
+    from ..operators.storage import _operator_state, _operator_digest
+    from scipy.sparse import csr_matrix
     operator = obj.right
-    recipe = operator.recipe
-    if recipe:
-        state['_recipe'] = dict(recipe)
-
-    x = operator.x
-    if x is not None:
-        state['_wave'] = x.tolist()
-
-    name = operator.name or obj.name
-    if name:
-        state['_name'] = name
-
-    if not recipe or recipe.get('type') == 'direct':
-        warnings.warn(
-            "Linear-operator pipe model has no reconstruction recipe. "
-            "The model will be saved without the response operator. "
-            "Re-apply the response after loading.",
-            UserWarning, stacklevel=4,
-        )
-
+    metadata = _operator_state(operator)
+    state = {'_source': obj.left, '_name': operator.name, '_model_name': obj.name}
+    resource = getattr(dumper, 'operator_files', {}).get(id(operator))
+    if resource is not None:
+        state['_operator_file'] = {'path': resource['path'], 'fingerprint': resource['fingerprint']}
+    elif metadata['kind'] == 'spectral' and operator.recipe.get('type') == 'instrument':
+        requested = getattr(operator, '_requested_wave', None)
+        state.update(_recipe=operator.recipe, _name=operator.name,
+                     _wave=operator.x if requested is None else requested,
+                     _fingerprint=_operator_digest(operator))
+    else:
+        matrix = csr_matrix(operator.matrix)
+        state['_operator'] = dict(state=metadata, x=operator.x, xout=operator.xout,
+            matrix=dict(data=matrix.data, indices=matrix.indices, indptr=matrix.indptr, shape=matrix.shape))
     return dumper.represent_mapping('!prism.LinearOperatorPipe', state)
 
 
 def _linear_operator_pipe_constructor(loader, node):
-    """Reconstruct a linear-operator pipe model from its recipe."""
+    """Rebuild the fixed operator and verify external resources/calibrations."""
+    from pathlib import Path
+    from scipy.sparse import csr_matrix
+    from ..operators.matop import LinearOperatorModel
+    from ..operators.storage import _operator_digest, _restore_operator
     mapping = loader.construct_mapping(node, deep=True)
     source = mapping['_source']
-    recipe = mapping.get('_recipe', {})
-    wave_list = mapping.get('_wave')
-    name = mapping.get('_name')
-
-    wave = np.asarray(wave_list) if wave_list else None
-    rtype = recipe.get('type', 'unknown')
-
-    if rtype == 'instrument' and wave is not None:
+    if '_operator_file' in mapping:
+        resource = mapping['_operator_file']
+        base = getattr(loader, 'base_path', None)
+        path = Path(resource['path'])
+        if not path.is_absolute():
+            if base is None:
+                raise ValueError('Relative operator files require loading through load_model(filename).')
+            path = base/path
+        operator = LinearOperatorModel.from_fits(path)
+        if _operator_digest(operator) != resource['fingerprint']:
+            raise ValueError(f'Operator resource differs from the saved session: {path}')
+    elif '_operator' in mapping:
+        payload = mapping['_operator']
+        matrix = payload['matrix']
+        operator = _restore_operator(csr_matrix((matrix['data'], matrix['indices'], matrix['indptr']),
+                                               shape=tuple(matrix['shape'])),
+                                     payload['x'], payload['xout'], payload['state'])
+    elif mapping.get('_recipe', {}).get('type') == 'instrument' and '_wave' in mapping:
         from ..operators.instrument import SpectralResponse
-        instrument_name = recipe['instrument']
-        z = recipe.get('z', 0)
-        try:
-            rsp = SpectralResponse(instrument=instrument_name, wave=wave, z=z, name=name or 'rsp')
-            return source | rsp
-        except Exception as exc:
-            warnings.warn(
-                f"Could not reconstruct response from recipe "
-                f"(instrument='{instrument_name}', z={z}): {exc}. "
-                "Returning source model without convolution.",
-                UserWarning, stacklevel=2,
-            )
-            return source
-
-    if rtype == 'direct':
-        warnings.warn(
-            "Model was saved with a direct response matrix that cannot be "
-            "reconstructed from a recipe.  Re-apply the response manually.",
-            UserWarning, stacklevel=2,
-        )
-        return source
-
-    warnings.warn(
-        f"Unknown response recipe type '{rtype}'. "
-        "Returning source model without convolution.",
-        UserWarning, stacklevel=2,
-    )
-    return source
+        recipe = mapping['_recipe']
+        operator = SpectralResponse(instrument=recipe['instrument'], wave=mapping['_wave'],
+            z=recipe.get('z', 0), flexible=recipe.get('flexible', True),
+            renormalize=recipe.get('renormalize', False), name=mapping.get('_name', 'rsp'))
+        if '_fingerprint' not in mapping or _operator_digest(operator) != mapping['_fingerprint']:
+            raise ValueError('Instrument calibration or response configuration differs from the saved session.')
+    else:
+        raise ValueError('Cannot reconstruct an operator without a saved matrix, resource, or verified recipe.')
+    operator.name = mapping.get('_name', operator.name)
+    result = source | operator
+    result.name = mapping.get('_model_name')
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -392,10 +379,12 @@ def register():
             tag, lambda loader, node, cls=cls: _continuum_constructor(loader, node, cls)
         )
 
+    from ..composition import Model
+    AstropyDumper.add_representer(Model, _native_representer)
+    AstropyLoader.add_constructor('!prism.Model', _native_constructor)
     AstropyDumper.add_representer(CompoundModel, _compound_representer)
     AstropyLoader.add_constructor('!prism.CompoundModel', _compound_constructor)
     AstropyLoader.add_constructor('!prism.LinearOperatorPipe', _linear_operator_pipe_constructor)
-    AstropyLoader.add_constructor('!prism.ConvolvedModel', _linear_operator_pipe_constructor)
 
     # LineGroup - all dynamic subclasses share a single representer/constructor
     for cls in [GaussianLines, LorentzianLines, VoigtLines]:
@@ -408,8 +397,10 @@ def register():
     # Generic fallback for vanilla Astropy Fittable1DModel subclasses that
     # have no prism-specific representer.  Uses add_multi_representer so
     # that exact-match representers (prism models) take priority.
-    from astropy.modeling import Fittable1DModel
+    from astropy.modeling import Model as AstropyModel, Fittable1DModel, Fittable2DModel
+    AstropyDumper.add_multi_representer(AstropyModel, _astropy_model_representer)
     AstropyDumper.add_multi_representer(Fittable1DModel, _astropy_model_representer)
+    AstropyDumper.add_multi_representer(Fittable2DModel, _astropy_model_representer)
     AstropyLoader.add_constructor('!prism.AstropyModel', _astropy_model_constructor)
 
 

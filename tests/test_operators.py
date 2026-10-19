@@ -6,7 +6,8 @@ import pytest
 from astropy.modeling.fitting import TRFLSQFitter as NativeTRFLSQFitter
 from astropy.modeling.powerlaws import ExponentialCutoffPowerLaw1D, PowerLaw1D
 
-from prism.modeling.fitting import ScipyTRF, TRFLSQFitter, tie
+from prism.modeling.fitting import ScipyTRF, TRFLSQFitter
+from prism.modeling.interop.astropy import tie
 from prism.modeling.models import BSpline, FixedTemplate
 from prism.modeling.models.lines import GaussianLine
 from prism.modeling.operators.instrument import (
@@ -101,13 +102,13 @@ def test_cutoff_powerlaw_supports_quantity_evaluation_and_fitting():
     assert fitted.x_cutoff.unit == u.AA
 
 
-def test_native_astropy_tied_jacobian_patch_remains_active():
+def test_prism_adapter_handles_tied_jacobian_without_patching_astropy():
     x = np.linspace(4990.0, 5020.0, 128)
     truth = _tie_double_gaussian(_build_tied_double_gaussian(offset=-90.0, fwhm=540.0))
     y = truth(x)
     model = _tie_double_gaussian(_build_tied_double_gaussian())
 
-    fitter = NativeTRFLSQFitter()
+    fitter = TRFLSQFitter()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         fitted_analytic = fitter(model.copy(), x, y, estimate_jacobian=False)
@@ -156,6 +157,7 @@ def test_crop_response_rejects_target_grid_that_collapses_bins():
         _crop_response_matrix(matrix, matrix_wave, target_wave, renormalize=False)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_spectral_response_subset_evaluation_matches_full_grid_result():
     wave = np.linspace(4990.0, 5020.0, 256)
     rsp = SpectralResponse(
@@ -170,6 +172,7 @@ def test_spectral_response_subset_evaluation_matches_full_grid_result():
     assert np.allclose(model(subset_wave), full[48:192], rtol=1e-10, atol=1e-10)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_spectral_response_off_grid_evaluation_interpolates_and_zero_pads():
     wave = np.linspace(4990.0, 5020.0, 256)
     rsp = SpectralResponse(
@@ -189,6 +192,7 @@ def test_spectral_response_off_grid_evaluation_interpolates_and_zero_pads():
     assert evaluated[-1] == 0.0
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_spectral_response_flexible_false_still_rejects_grid_mismatch():
     wave = np.linspace(4990.0, 5020.0, 128)
     rsp = SpectralResponse(
@@ -202,6 +206,7 @@ def test_spectral_response_flexible_false_still_rejects_grid_mismatch():
         model(wave[16:96])
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_spectral_response_off_grid_evaluation_preserves_quantity_units():
     wave = np.linspace(4990.0, 5020.0, 256) * u.AA
     rsp = SpectralResponse(
@@ -240,6 +245,7 @@ def test_spectral_response_same_grid_skips_flexible_resampling(monkeypatch):
     assert values.shape == wave.shape
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 @pytest.mark.parametrize("fitter_cls", [TRFLSQFitter, ScipyTRF])
 def test_spectral_response_off_grid_fit_converges(fitter_cls):
     wave = np.linspace(4990.0, 5020.0, 160)

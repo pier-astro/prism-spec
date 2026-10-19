@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 import astropy.units as u
-from astropy.modeling import Parameter
+from ...parameters import _Parameter as Parameter
 
 from ...metrics import Metric
 from . import profiles, _measurements
@@ -599,6 +599,25 @@ class GaussianLines(LineGroupBase):
     _profile_deriv = staticmethod(profiles.gaussian_velocity_deriv)
     _profile_flux = staticmethod(profiles.gaussian_flux)
 
+    def evaluate(self, x, *args):
+        """Evaluate the gaussian profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        amplitudes = args[:self._n_templates]
+        offset, fwhm, redshift = self._shared_values(args[self._n_templates:])
+        total = np.zeros_like(x_native, dtype=float)
+
+        for amplitude, positions, weights in zip(
+                amplitudes, self._tmpl_positions, self._tmpl_weights):
+            amplitude = self._as_value(amplitude)
+            for pos, weight in zip(positions, weights):
+                center = profiles.observed_center(
+                    pos, offset, redshift, domain_family=self.domain_family)
+                amplitude_eff, sigma_eff = profiles.gaussian_profile_params(
+                    center, amplitude, weight, fwhm, redshift,
+                    self.instfwhm_val(center))
+                total += profiles.gaussian(x_native, amplitude_eff, center, sigma_eff)
+        return total[0] if np.ndim(x) == 0 else total
+
 
 class LorentzianLines(LineGroupBase):
     """Lorentzian template group with shared velocity offset and FWHM.
@@ -617,6 +636,26 @@ class LorentzianLines(LineGroupBase):
     _profile_params = staticmethod(profiles.lorentzian_profile_params)
     _profile_deriv = staticmethod(profiles._lorentzian_velocity_deriv)
     _profile_flux = staticmethod(profiles.voigt_flux)
+
+    def evaluate(self, x, *args):
+        """Evaluate the lorentzian profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        amplitudes = args[:self._n_templates]
+        offset, fwhm, redshift = self._shared_values(args[self._n_templates:])
+        total = np.zeros_like(x_native, dtype=float)
+
+        for amplitude, positions, weights in zip(
+                amplitudes, self._tmpl_positions, self._tmpl_weights):
+            amplitude = self._as_value(amplitude)
+            for pos, weight in zip(positions, weights):
+                center = profiles.observed_center(
+                    pos, offset, redshift, domain_family=self.domain_family)
+                amplitude_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
+                    center, amplitude, weight, fwhm, redshift,
+                    self.instfwhm_val(center))
+                # Gaussian instrumental broadening turns a Lorentzian into a Voigt.
+                total += profiles.voigt(x_native, amplitude_eff, center, sigma_inst, gamma)
+        return total[0] if np.ndim(x) == 0 else total
 
 
 class VoigtLines(LineGroupBase):
@@ -637,3 +676,22 @@ class VoigtLines(LineGroupBase):
     _profile_params = staticmethod(profiles.voigt_profile_params)
     _profile_deriv = staticmethod(profiles.voigt_velocity_deriv)
     _profile_flux = staticmethod(profiles.voigt_flux)
+
+    def evaluate(self, x, *args):
+        """Evaluate the voigt profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        amplitudes = args[:self._n_templates]
+        offset, fwhm_G, fwhm_L, redshift = self._shared_values(args[self._n_templates:])
+        total = np.zeros_like(x_native, dtype=float)
+
+        for amplitude, positions, weights in zip(
+                amplitudes, self._tmpl_positions, self._tmpl_weights):
+            amplitude = self._as_value(amplitude)
+            for pos, weight in zip(positions, weights):
+                center = profiles.observed_center(
+                    pos, offset, redshift, domain_family=self.domain_family)
+                amplitude_eff, sigma_eff, gamma = profiles.voigt_profile_params(
+                    center, amplitude, weight, fwhm_G, fwhm_L, redshift,
+                    self.instfwhm_val(center))
+                total += profiles.voigt(x_native, amplitude_eff, center, sigma_eff, gamma)
+        return total[0] if np.ndim(x) == 0 else total

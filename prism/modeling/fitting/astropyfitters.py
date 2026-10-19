@@ -12,6 +12,7 @@ import astropy.modeling.fitting as ast_fit
 import numpy as np
 
 from .extension import (
+    _attach_covariance,
     _coerce_max_evaluations,
     _fitter_covariance,
     _fitter_stdevs,
@@ -19,7 +20,12 @@ from .extension import (
     get_max_evaluations,
     set_max_evaluations,
 )
-from .multifit import MultiFitMixin, _MULTIFIT_STAT_KEYS
+from .multifit import MultiFitMixin
+from .utils import (
+    _free_parameter_indices,
+    _prime_tied_analytic_jacobian_warning,
+    _reduce_tied_analytic_jacobian,
+)
 
 __all__ = [
     'TRFLSQFitter',
@@ -67,52 +73,65 @@ class _PrismAstropyFitterMixin(MultiFitMixin):
     def max_evaluations(self, value):
         self._prism_max_evaluations = _coerce_max_evaluations(value)
 
-    def _multifit_entry_from_fit_info(self):
-        fit_info = getattr(self, 'fit_info', {})
-        entry = {
-            'success': fit_info.get('success', False),
-            'nfev': fit_info.get('nfev', np.nan),
-            'message': fit_info.get('message', ''),
-        }
-        for name in _MULTIFIT_STAT_KEYS:
-            entry[name] = fit_info.get(name, np.nan)
-        return entry
+    @staticmethod
+    def _prepare_links(model, x, y, z):
+        """Retain numerical-unit conventions while Astropy strips quantities."""
+        from astropy import units as u
+        from ..composition import Model
+        if isinstance(model, Model):
+            raise TypeError('Use ScipyTRF, Sherpa, or SeparableTRF for a native Prism Model; Astropy fitters accept Astropy models.')
+        from ..parameters import _Expression
+        from .utils import _get_tied_info
+        ties = _get_tied_info(model)
+        if not any(isinstance(expression, _Expression) for expression, _, _ in ties):
+            return
+        coordinates = [x] if z is None else [x, y]
+        inputs = {name: getattr(value, 'unit', u.dimensionless_unscaled)
+                  for name, value in zip(model.inputs, coordinates)}
+        outputs = {model.outputs[0]: getattr(y if z is None else z, 'unit', u.dimensionless_unscaled)}
+        units = model._parameter_units_for_data_units(inputs, outputs)
+        for name, unit in units.items():
+            getattr(model, name)._prism_evaluation_unit = unit
 
-    def _apply_scalar_multifit_overrides(self, model, initpars=None, bounds=None):
-        if initpars:
-            for name, value in initpars.items():
-                if value is None:
-                    continue
-                if np.isscalar(value) and not np.isfinite(value):
-                    continue
-                getattr(model, name).value = value
-        if bounds:
-            for name, pair in bounds.items():
-                getattr(model, name).bounds = pair
-        return model
+    @staticmethod
+    def _restore_link_units(model):
+        """Restore dimensional parameter units retained for declared links."""
+        from astropy import units as u
+        for name in model.param_names:
+            parameter = getattr(model, name)
+            unit = getattr(parameter, '_prism_evaluation_unit', None)
+            if parameter.unit is None and unit is not None and unit != u.dimensionless_unscaled:
+                setattr(model, name, parameter.value * unit)
+
+    @staticmethod
+    def _wrap_deriv(params, model, weights, x, y, z=None, fit_param_indices=None):
+        """Apply linked-parameter chain rules only inside Prism's adapters."""
+        if not model.has_tied:
+            return ast_fit.TRFLSQFitter._wrap_deriv(
+                params, model, weights, x, y, z=z,
+                fit_param_indices=fit_param_indices)
+
+        if not hasattr(model, '_prism_warn_tied_analytic_jacobian'):
+            _prime_tied_analytic_jacobian_warning(model)
+        ast_fit.fitter_to_model_params(model, params)
+        if z is None:
+            full = model.fit_deriv(x, *model.parameters)
+        else:
+            full = [np.ravel(item) for item in model.fit_deriv(x, y, *model.parameters)]
+        corrected = _reduce_tied_analytic_jacobian(model, full, warn=True, stacklevel=3)
+        weighted = corrected if weights is None else np.ravel(weights) * corrected
+        indices = _free_parameter_indices(model) if fit_param_indices is None else fit_param_indices
+        residues = weighted[np.asarray(indices, dtype=int)]
+        if not model.col_fit_deriv:
+            residues = residues.T
+        return [np.ravel(item) for item in residues]
 
 
 def _attach_linear_lsq_covariance(fitter, model):
     cov = getattr(getattr(model, 'cov_matrix', None), 'cov_matrix', None)
-    if cov is None:
-        fitter.fit_info['param_cov'] = None
-        return model
-
-    cov = np.asarray(cov, dtype=float)
+    cov = None if cov is None else np.asarray(cov, dtype=float)
     fitter.fit_info['param_cov'] = cov
-    model._param_cov = cov
-
-    _, fit_indices, _ = ast_fit.model_to_fit_params(model)
-    stds_obj = getattr(model, 'stds', None)
-    stds = getattr(stds_obj, 'stds', None)
-    if stds is None:
-        stds = np.sqrt(np.maximum(np.diag(cov), 0.0))
-
-    for free_index, sigma in zip(fit_indices, stds):
-        if sigma is None:
-            sigma = np.nan
-        getattr(model, model.param_names[int(free_index)]).std = float(sigma)
-    return model
+    return _attach_covariance(model, cov)
 
 
 class TRFLSQFitter(_PrismAstropyFitterMixin, ast_fit.TRFLSQFitter):

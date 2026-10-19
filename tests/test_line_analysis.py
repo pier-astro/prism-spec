@@ -1,3 +1,4 @@
+import pytest
 import os
 import tempfile
 import inspect
@@ -205,6 +206,7 @@ def test_line_sampling_methods_and_bounds():
             assert np.all(draws[:, column] <= upper)
 
 
+@pytest.mark.usefixtures('astropy_extensions')
 def test_saved_model_retains_uncertainty_for_line_sampling():
     fitted, wave = _build_fitted_model()
 

@@ -5,7 +5,7 @@ prism.modeling.models.lines.single — single-line spectral models.
 """
 import numpy as np
 import astropy.units as u
-from astropy.modeling import Parameter
+from ...parameters import _Parameter as Parameter
 
 from . import profiles
 from .base import LineModelBase
@@ -127,6 +127,20 @@ class GaussianLine(_SingleLineBase):
     _profile_flux = staticmethod(profiles.gaussian_flux)
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
 
+    def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
+        """Evaluate the gaussian profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        offset, fwhm, redshift = self._shared_values((offset, fwhm, redshift))
+        pos = self._as_value(position)
+        amplitude = self._as_value(amplitude)
+        center = profiles.observed_center(
+            pos, offset, redshift, domain_family=self.domain_family)
+        amplitude_eff, sigma_eff = profiles.gaussian_profile_params(
+            center, amplitude, 1.0, fwhm, redshift,
+            self.instfwhm_val(center))
+        values = profiles.gaussian(x_native, amplitude_eff, center, sigma_eff)
+        return values[0] if np.ndim(x) == 0 else values
+
 
 class LorentzianLine(_SingleLineBase):
     """Single Lorentzian line with optional instrumental Gaussian broadening.
@@ -165,6 +179,21 @@ class LorentzianLine(_SingleLineBase):
     _profile_deriv = staticmethod(profiles._lorentzian_velocity_deriv)
     _profile_flux = staticmethod(profiles.voigt_flux)
     _shared_params = {'offset': 0.0, 'fwhm': 1000.0, 'redshift': 0.0}
+
+    def evaluate(self, x, amplitude, position, offset, fwhm, redshift):
+        """Evaluate the lorentzian profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        offset, fwhm, redshift = self._shared_values((offset, fwhm, redshift))
+        pos = self._as_value(position)
+        amplitude = self._as_value(amplitude)
+        center = profiles.observed_center(
+            pos, offset, redshift, domain_family=self.domain_family)
+        amplitude_eff, sigma_inst, gamma = profiles.lorentzian_profile_params(
+            center, amplitude, 1.0, fwhm, redshift,
+            self.instfwhm_val(center))
+        # Gaussian instrumental broadening turns a Lorentzian into a Voigt.
+        values = profiles.voigt(x_native, amplitude_eff, center, sigma_inst, gamma)
+        return values[0] if np.ndim(x) == 0 else values
 
 
 class VoigtLine(_SingleLineBase):
@@ -209,3 +238,17 @@ class VoigtLine(_SingleLineBase):
     _profile_deriv = staticmethod(profiles.voigt_velocity_deriv)
     _profile_flux = staticmethod(profiles.voigt_flux)
     _shared_params = {'offset': 0.0, 'fwhm_G': 1000.0, 'fwhm_L': 1000.0, 'redshift': 0.0}
+
+    def evaluate(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
+        """Evaluate the voigt profile in the native spectral domain."""
+        x_native = np.atleast_1d(self._coerce_domain_axis(x))
+        offset, fwhm_G, fwhm_L, redshift = self._shared_values((offset, fwhm_G, fwhm_L, redshift))
+        pos = self._as_value(position)
+        amplitude = self._as_value(amplitude)
+        center = profiles.observed_center(
+            pos, offset, redshift, domain_family=self.domain_family)
+        amplitude_eff, sigma_eff, gamma = profiles.voigt_profile_params(
+            center, amplitude, 1.0, fwhm_G, fwhm_L, redshift,
+            self.instfwhm_val(center))
+        values = profiles.voigt(x_native, amplitude_eff, center, sigma_eff, gamma)
+        return values[0] if np.ndim(x) == 0 else values

@@ -3,7 +3,6 @@
 import warnings
 
 import numpy as np
-from astropy.modeling import CompoundModel
 
 _TIE_DERIV_REL_STEP = 1e-7
 _TIE_DERIV_ABS_STEP = 1e-10
@@ -17,89 +16,74 @@ _TIED_ANALYTIC_JACOBIAN_MESSAGE = (
     "in the fitter settings, e.g. prism.modeling.fitting.ScipyTRF(jac='2-point')"
 )
 
-def tie(submodel_name, func):
-    """
-    Create a tie function for parameter constraints in compound models.
+def _parameter_slices(model):
+    """Map public parameter names/sizes to the flattened model vector."""
+    slices = {}
+    cursor = 0
+    for name in model.param_names:
+        size = getattr(model, name).size
+        slices[name] = slice(cursor, cursor + size)
+        cursor += size
+    return slices
 
-    This is the recommended way to tie parameters in prism models.
 
-    Parameters
-    ----------
-    submodel_name : str
-        Name of the submodel containing the parameter to reference.
-    func : callable
-        Function taking submodel, returns tied value.
+class _ParameterMap:
+    """One flattened parameter order for optimization, bounds and constraints."""
 
-    Returns
-    -------
-    callable
-        Tie function for use with model.param.tied = ...
-    """
-    def _tie(model):
-        if isinstance(model, CompoundModel) or hasattr(model, 'submodel_names'):
-            if submodel_name not in model.submodel_names:
-                raise KeyError(
-                    f"Submodel '{submodel_name}' not found. "
-                    f"Available: {model.submodel_names}"
-                )
-            sub = model[submodel_name]
-        else:
-            sub = model
-        try:
-            return func(sub)
-        except AttributeError as e:
-            params = list(getattr(sub, 'param_names', []))
-            raise AttributeError(
-                f"Tie error: {e}. Available params in '{submodel_name}': {params}"
-            ) from e
-    return _tie
+    def __init__(self, model):
+        self.initial = model.parameters.copy()
+        self.slices = _parameter_slices(model)
+        free = []
+        bounds = []
+        self.names = []
+        self.tied = []
+        for name, section in self.slices.items():
+            param = getattr(model, name)
+            self.names.extend([name] * param.size)
+            if param.tied:
+                self.tied.append((param.tied, section, param))
+            if param.fixed or param.tied:
+                continue
+            free.extend(range(section.start, section.stop))
+            lower, upper = param.bounds
+            bounds.extend([(lower if lower is not None else -np.inf,
+                            upper if upper is not None else np.inf)] * param.size)
+        from ..parameters import _ordered_ties
+        self.tied = _ordered_ties(model, self.tied)
+        self.free = np.asarray(free, dtype=int)
+        self.values = self.initial[self.free]
+        self.bounds = np.asarray(bounds, dtype=float).reshape(-1, 2)
 
 
 def apply_tied(model):
-    """Apply all tied parameter constraints to a model."""
-    if not model.has_tied:
-        return model
+    """Update links after ordering their declared dependencies.
 
-    param_metrics = model._param_metrics
-    parameters = model.parameters.copy()
-
-    for name in model.param_names:
-        tied_func = model.tied[name]
-        if tied_func:
-            value = tied_func(model)
-            slice_ = param_metrics[name]["slice"]
-            parameters[slice_] = value
-
-    model.parameters = parameters
+    Declarative expressions expose dependencies and reject missing references
+    or cycles. Opaque callables retain their original parameter order unless a
+    declarative expression explicitly depends on their target.
+    """
+    if model.has_tied:
+        _apply_tied_fast(model, _get_tied_info(model), model.parameters.copy())
     return model
 
 
 def _get_tied_info(model):
-    """Extract and cache tied parameter information for fast evaluation."""
-    tied_info = []
+    """Prepare callable links using public parameter names and sizes."""
     if not model.has_tied:
-        return tied_info
-
-    param_metrics = model._param_metrics
-    tied_dict = model.tied
-
-    for name in model.param_names:
-        tied_func = tied_dict[name]
-        if tied_func:
-            slice_ = param_metrics[name]["slice"]
-            tied_info.append((tied_func, slice_))
-
-    return tied_info
+        return []
+    from ..parameters import _ordered_ties
+    items = [(model.tied[name], section, getattr(model, name))
+             for name, section in _parameter_slices(model).items() if model.tied[name]]
+    return _ordered_ties(model, items)
 
 
 def _apply_tied_fast(model, tied_info, parameters_cache):
-    """Apply tied constraints using pre-cached info (fast path)."""
-    if not tied_info:
-        return
-    for tied_func, slice_ in tied_info:
-        value = tied_func(model)
-        parameters_cache[slice_] = value
-    model.parameters = parameters_cache
+    """Apply prepared links, making each new value visible to subsequent links."""
+    for tied_func, section, parameter in tied_info:
+        size = section.stop - section.start
+        values = _coerce_tied_value_array(tied_func(model), size)
+        parameters_cache[section] = values
+        parameter.value = values.reshape(parameter.shape)
 
 
 def _prime_tied_analytic_jacobian_warning(model):
@@ -127,8 +111,8 @@ def _coerce_tied_value_array(value, size):
     if hasattr(value, 'value'):
         value = value.value
     array = np.asarray(value, dtype=float).reshape(-1)
-    if array.size == 1 and size == 1:
-        return array
+    if array.size == 1:
+        return np.full(size, array.item())
     if array.size != size:
         raise ValueError(
             f"Tied parameter returned {array.size} values, expected {size}."
@@ -137,18 +121,19 @@ def _coerce_tied_value_array(value, size):
 
 
 def _parameter_index_array(model, name):
-    """Return the flattened parameter indices corresponding to a model parameter."""
-    return np.arange(model.parameters.size)[model._param_metrics[name]['slice']].reshape(-1)
+    """Return flattened indices using public parameter names and sizes."""
+    section = _parameter_slices(model)[name]
+    return np.arange(section.start, section.stop)
 
 
 def _free_parameter_indices(model):
-    """Return flattened indices for free parameters only."""
-    free = []
-    for name in model.param_names:
+    """Return flattened free indices in the canonical model parameter order."""
+    indices = []
+    for name, section in _parameter_slices(model).items():
         if model.fixed[name] or model.tied[name]:
             continue
-        free.extend(_parameter_index_array(model, name).tolist())
-    return np.asarray(free, dtype=int)
+        indices.extend(range(section.start, section.stop))
+    return np.asarray(indices, dtype=int)
 
 
 def _analytic_jacobian_parameter_major(model, jacobian):
@@ -169,41 +154,30 @@ def _reduce_tied_analytic_jacobian(model, jacobian, *, warn=False, stacklevel=3)
         _warn_tied_analytic_jacobian(model, stacklevel=stacklevel)
 
     original = model.parameters.copy()
-    tied_rows = []
+    tied_info = _get_tied_info(model)
+    tied_rows = [np.arange(section.start, section.stop)
+                 for _, section, _ in tied_info]
     free_rows = _free_parameter_indices(model)
 
-    for name in model.param_names:
-        tied_func = model.tied[name]
-        if not tied_func:
-            continue
-        tied_rows.append((name, _parameter_index_array(model, name), tied_func))
-
     try:
-        base_tied_values = {
-            name: _coerce_tied_value_array(tied_func(model), len(indices))
-            for name, indices, tied_func in tied_rows
-        }
-
         for free_index in free_rows:
             p0 = float(original[free_index])
             eps = max(abs(p0) * _TIE_DERIV_REL_STEP, _TIE_DERIV_ABS_STEP)
             perturbed = original.copy()
             perturbed[free_index] = p0 + eps
             model.parameters = perturbed
-            apply_tied(model)
+            _apply_tied_fast(model, tied_info, perturbed)
+            constrained = model.parameters.copy()
 
-            for name, tied_indices, tied_func in tied_rows:
-                delta = (
-                    _coerce_tied_value_array(tied_func(model), len(tied_indices))
-                    - base_tied_values[name]
-                ) / eps
+            for indices in tied_rows:
+                delta = (constrained[indices] - original[indices]) / eps
                 if np.any(np.abs(delta) > _TIE_DERIV_ZERO_TOL):
-                    full[free_index] += np.sum(full[tied_indices] * delta[:, np.newaxis], axis=0)
+                    full[free_index] += np.sum(full[indices] * delta[:, np.newaxis], axis=0)
     finally:
         model.parameters = original
-        apply_tied(model)
+        _apply_tied_fast(model, tied_info, original.copy())
 
-    for _, tied_indices, _ in tied_rows:
-        full[tied_indices] = 0.0
+    for indices in tied_rows:
+        full[indices] = 0.0
 
     return full

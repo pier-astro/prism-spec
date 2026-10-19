@@ -5,12 +5,12 @@ from astropy.modeling import models
 from astropy.modeling.powerlaws import PowerLaw1D
 
 import astropy.units as u
-import prism.modeling.display as model_display
+from prism.modeling.interop import astropy as model_display
 from prism.modeling.fitting import TRFLSQFitter
-from prism.modeling.fitting.utils import tie
+from prism.modeling.interop.astropy import tie
 from prism.modeling.models import GaussianLines
 from prism.modeling.models.components import get_components
-from prism.modeling.models.display import (
+from prism.modeling.display import (
     format_fit_html,
     format_fit_text,
     format_model_html,
@@ -41,7 +41,7 @@ def _build_multifit_cube():
 
 def test_model_display_workflow():
     single = models.Gaussian1D(1.234, 5000.0, 2.5, name='gauss')
-    assert hasattr(single, '_repr_html_')
+    assert not hasattr(single, '_repr_html_')
 
     try:
         model_display.disable_model_display()
@@ -96,7 +96,7 @@ def test_model_display_workflow():
             plain.show(mode='text')
         assert any('No parameter std or interval limits were found' in str(w.message) for w in caught)
     finally:
-        model_display.enable_model_display()
+        model_display.disable_model_display()
 
 
 def test_model_components_accessor():

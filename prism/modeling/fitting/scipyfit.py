@@ -7,23 +7,24 @@ standardized interfaces and robust error handling.
 
 import warnings
 import numpy as np
+from .extension import _validate_spectral_inputs
 from scipy import optimize
 from numpy.linalg import LinAlgError
-from astropy.modeling.fitting import Fitter, model_to_fit_params
+from astropy.modeling.fitting import Fitter
 from .extension import (
+    _attach_covariance,
     _coerce_max_evaluations,
     _fitter_covariance,
     _fitter_stdevs,
+    _resolve_max_evaluations,
     get_max_evaluations,
-    validate_symmetric_yerr,
 )
 from .multifit import MultiFitMixin
+from .problem import _FitProblem
+from .data import _prepare_fit_data
 from .utils import (
     _analytic_jacobian_parameter_major,
-    _apply_tied_fast,
-    _get_tied_info,
     _prime_tied_analytic_jacobian_warning,
-    _reduce_tied_analytic_jacobian,
 )
 
 __all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
@@ -64,6 +65,15 @@ class ScipyFitter(MultiFitMixin, Fitter):
         self.calc_uncertainties = calc_uncertainties
         self.verbose = verbose
         self.fit_kwargs = kwargs
+        # Normalize constructor controls once; keep optimizer options separate.
+        controls = {name: self.fit_kwargs.pop(name) for name in
+                    ('max_evaluations', 'max_nfev', 'maxiter', 'maxfev', 'maxfun')
+                    if name in self.fit_kwargs}
+        budget = None
+        if any(value is not None for value in controls.values()):
+            budget = _resolve_max_evaluations(self, controls)
+        if budget is not None:
+            self.fit_kwargs['max_nfev'] = budget
         if method not in ('trf', 'dogbox'):
             raise ValueError(f"method must be 'trf' or 'dogbox', got {method}")
 
@@ -86,8 +96,10 @@ class ScipyFitter(MultiFitMixin, Fitter):
     def _is_numeric_jacobian_request(jac):
         return isinstance(jac, str) and jac in {'2-point', '3-point', 'cs'}
 
-    def _build_jacobian(self, model, x, fit_indices, tied_info, params_cache, weights, requested_jac):
+    def _build_jacobian(self, problem, requested_jac):
         """Build Jacobian function with proper error handling."""
+        model = problem.model
+        evaluation = problem.evaluation
         use_analytic = True
 
         if callable(requested_jac) or self._is_numeric_jacobian_request(requested_jac):
@@ -100,7 +112,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
             # Test if fit_deriv works and check for NaNs/Infs
             test_deriv = _analytic_jacobian_parameter_major(
                 model,
-                model.fit_deriv(x, *model.parameters),
+                evaluation.fit_deriv(model.parameters),
             )
             
             if np.any(~np.isfinite(test_deriv)):
@@ -111,32 +123,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
             if not use_analytic:
                 return '2-point'
             
-            def jacobian(p):
-                params_cache[fit_indices] = p
-                model.parameters = params_cache
-                if tied_info:
-                    _apply_tied_fast(model, tied_info, params_cache)
-                
-                # Get full jacobian
-                J_all = _reduce_tied_analytic_jacobian(
-                    model,
-                    model.fit_deriv(x, *model.parameters),
-                    warn=bool(tied_info),
-                    stacklevel=3,
-                )
-                
-                # Check for NaNs/infs
-                if np.any(~np.isfinite(J_all)):
-                    raise ValueError("Invalid derivatives encountered")
-                
-                # Select only free parameters
-                J = J_all[fit_indices].T
-                
-                if weights is not None:
-                    return J * weights[:, np.newaxis]
-                return J
-                
-            return jacobian
+            return problem.jacobian
             
         except Exception as e:
             if self.verbose:
@@ -144,68 +131,51 @@ class ScipyFitter(MultiFitMixin, Fitter):
             return '2-point'
 
     def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
-                 yerr=None, statistic='chi2', **kwargs):
+                 yerr=None, statistic='chi2', inplace=False, **kwargs):
         """
         Implement SciPy least_squares fitting.
         """
-        if yerr is not None:
-            yerr = validate_symmetric_yerr(yerr)
+        _validate_spectral_inputs(model, x, y, z, yerr, weights, statistic=statistic)
+        x, y, yerr, weights, valid = _prepare_fit_data(
+            x, y, yerr, weights, kwargs.pop('mask', None),
+            filter_non_finite=kwargs.pop('filter_non_finite', False))
         if yerr is not None and weights is None:
-            weights = 1.0 / np.asarray(yerr)
-        model = model.copy()
+            weights = np.zeros_like(np.asarray(yerr), dtype=float)
+            np.divide(1.0, np.asarray(yerr), out=weights, where=valid)
+        if not inplace:
+            model = model.copy()
         _prime_tied_analytic_jacobian_warning(model)
-        init_values, fit_indices, _ = model_to_fit_params(model)
-        bounds_list = [getattr(model, n).bounds for n in model.param_names]
-        all_bounds = np.array([(b[0] if b[0] is not None else -np.inf,
-                                b[1] if b[1] is not None else np.inf)
-                               for b in bounds_list])
-        param_bounds = all_bounds[fit_indices]
+        problem = _FitProblem(model, x, y, weights, valid)
+        parameters = problem.parameters
+        init_values, fit_indices = parameters.values, parameters.free
+        param_bounds = parameters.bounds
 
         # Reject parameters with equal bounds (lower == upper): scipy requires
         # strict inequality.  Use param.fixed = True instead.
         equal_mask = param_bounds[:, 0] == param_bounds[:, 1]
         if np.any(equal_mask):
-            bad_names = [model.param_names[fi] for fi, m
+            bad_names = [parameters.names[fi] for fi, m
                          in zip(fit_indices, equal_mask) if m]
             raise ValueError(
                 f"Parameters with equal lower and upper bounds: "
                 f"{', '.join(bad_names)}. Use `param.fixed = True` instead."
             )
 
-        tied_info = _get_tied_info(model)
-        params_cache = model.parameters.copy()
-        
-        has_tied = bool(tied_info)
-        
-        # Build residual function
-        def residual(p):
-            params_cache[fit_indices] = p
-            model.parameters = params_cache
-            if has_tied:
-                _apply_tied_fast(model, tied_info, params_cache)
-            diff = model(x) - y
-            if weights is not None:
-                return diff * weights
-            return diff
-        
-        # Prepare final kwargs, merging init and call values
-        # Call kwargs take precedence over init kwargs
+        residual = problem.residual
+
+        if max_nfev is not None:
+            kwargs['max_nfev'] = max_nfev
+        budget = _resolve_max_evaluations(self, kwargs)
+
+        # Call options override constructor options without changing later fits.
         merged_kwargs = self.fit_kwargs.copy()
         merged_kwargs.update(kwargs)
 
         requested_jac = merged_kwargs.pop('jac', 'auto')
 
         # Build Jacobian
-        jac = self._build_jacobian(
-            model,
-            x,
-            fit_indices,
-            tied_info,
-            params_cache,
-            weights,
-            requested_jac,
-        )
-        
+        jac = self._build_jacobian(problem, requested_jac)
+
         # Prepare bounds
         min_vals = param_bounds[:, 0]
         max_vals = param_bounds[:, 1]
@@ -221,8 +191,8 @@ class ScipyFitter(MultiFitMixin, Fitter):
             'jac': jac,
         })
         
-        if max_nfev is not None:
-            fit_kwargs['max_nfev'] = max_nfev
+        if budget is not None:
+            fit_kwargs['max_nfev'] = budget
         
         try:
             result = optimize.least_squares(residual, np.array(init_values), **fit_kwargs)
@@ -257,6 +227,9 @@ class ScipyFitter(MultiFitMixin, Fitter):
                             if self.verbose:
                                 print(f"⚠ Jacobian is ill-conditioned (κ={cond:.2e}), using pseudo-inverse")
                         native_cov = np.linalg.pinv(H)
+                        # The inverse of this symmetric Hessian is symmetric.
+                        # Remove SVD roundoff before downstream covariance sampling.
+                        native_cov = (native_cov + native_cov.T) * 0.5
                     except LinAlgError as e:
                         if self.verbose:
                             print(f"⚠ Covariance calculation failed: {e}")
@@ -265,7 +238,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
                 if self.verbose:
                     print(f"⚠ Failed to calculate covariance: {e}")
         
-        n_data = len(y) if z is None else int(np.prod(np.shape(y)))
+        n_data = problem.ndata
         self.fit_info = {
             'success': result.success,
             'nfev': result.nfev,
@@ -273,7 +246,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
             'native_result': result,
             'param_cov': native_cov,
             'cost': result.cost,
-            'stat': 2.0 * result.cost,
+            'stat': float(np.dot(result.fun, result.fun)),
             'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
             'nfree': len(init_values),
             'ndata': n_data,
@@ -281,11 +254,8 @@ class ScipyFitter(MultiFitMixin, Fitter):
             'optimality': getattr(result, 'optimality', np.nan),
             'status': result.status,
         }
-        params_cache[fit_indices] = result.x
-        model.parameters = params_cache
-        if tied_info:
-            _apply_tied_fast(model, tied_info, params_cache)
-        return model
+        problem.finish(result.x)
+        return _attach_covariance(model, native_cov)
 
 
 class ScipyTRF(ScipyFitter):
