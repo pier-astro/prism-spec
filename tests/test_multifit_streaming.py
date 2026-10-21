@@ -7,15 +7,15 @@ import numpy as np
 import pytest
 from astropy.modeling.models import Const1D
 from prism.modeling import Model
-from prism.modeling.fitting import ScipyTRF
+from prism.modeling.fitting import TRF
 from prism.modeling.fitting.multifit import MultiFitMixin
-import prism.modeling.fitting.multifit as module
+import prism.modeling.fitting.multifit.execution as module
 
 NAMES = ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'OMP_NUM_THREADS')
 
 
 class CompletionProbe(MultiFitMixin):
-    calc_uncertainties = False
+    covariance = False
     verbose = False
 
     def __init__(self, marker):
@@ -32,9 +32,9 @@ class CompletionProbe(MultiFitMixin):
         return idx, np.array([float(idx)]), None, {'success': completed, 'nfev': 1}, None
 
 
-class EnvironmentFitter(ScipyTRF):
-    def __call__(self, *args, **kwargs):
-        model = super().__call__(*args, **kwargs)
+class EnvironmentFitter(TRF):
+    def _fit_single(self, *args, **kwargs):
+        model = super()._fit_single(*args, **kwargs)
         self.fit_info['message'] = json.dumps({name: os.environ.get(name) for name in NAMES})
         return model
 
@@ -90,7 +90,7 @@ def test_single_unique_bin_does_not_start_idle_workers(monkeypatch):
         raise AssertionError('No worker pool needed for one target')
     monkeypatch.setattr(module, '_multifit_pool', unexpected)
     x = np.arange(5.)
-    result = ScipyTRF().multifit(Model.from_astropy(Const1D()), x, np.ones((4, 5))*2.,
+    result = TRF().multifit(Model.from_astropy(Const1D()), x, np.ones((4, 5))*2.,
                                binmap=np.zeros(4, dtype=int), nproc=8, progress=False)
     np.testing.assert_allclose(result.amplitude.value, 2.)
 
@@ -98,9 +98,9 @@ def test_single_unique_bin_does_not_start_idle_workers(monkeypatch):
 @pytest.mark.parametrize('nproc', [0, -1, 1.5])
 def test_invalid_worker_count_is_rejected_before_fitting(nproc):
     with pytest.raises(ValueError, match='positive integer'):
-        ScipyTRF().multifit(Const1D(), np.arange(3.), np.ones((2, 3)), nproc=nproc)
+        TRF().multifit(Const1D(), np.arange(3.), np.ones((2, 3)), nproc=nproc)
 
 
 def test_removed_batch_option_is_rejected_before_fitting():
     with pytest.raises(TypeError, match='no longer accepts batch'):
-        ScipyTRF().multifit(Const1D(), np.arange(3.), np.ones((2, 3)), batch=True)
+        TRF().multifit(Const1D(), np.arange(3.), np.ones((2, 3)), batch=True)

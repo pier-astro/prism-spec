@@ -494,7 +494,7 @@ class InstrumentResponse:
 
     # ---- SAVE & REGISTER ----
     
-    def save_fits(self, filename: str, compress: bool = True) -> None:
+    def save(self, filename: str, compress: bool = True) -> None:
         """Save the wavelength grid and response matrix to a FITS file.
 
         Parameters
@@ -545,7 +545,7 @@ class InstrumentResponse:
         if os.path.exists(archive_filename) and not clobber:
             raise ValueError(f"File '{archive_filename}' exists. Use clobber=True to overwrite.")
         
-        self.save_fits(archive_filename, compress=compress)
+        self.save(archive_filename, compress=compress)
         add_response_to_archive(instrument_name, filename, clobber=clobber, user=True)
         print(f"Saved and registered '{instrument_name}' to {archive_filename}")
 

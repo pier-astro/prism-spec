@@ -184,7 +184,7 @@ class BSpline(Fittable1DModel):
     derivative is computed from SciPy's spline design matrix, so least-squares
     fitters can use an efficient exact Jacobian instead of finite differences.
     Prism also marks every coefficient as a separable linear parameter, so
-    ``prism.modeling.fitting.SeparableTRF`` can solve them exactly inside its
+    ``prism.experimental.SeparableTRF`` can solve them exactly inside its
     inner linear step.
 
     Examples

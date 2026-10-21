@@ -41,7 +41,8 @@ class Model:
     linear = False
 
     def __init__(self, component=None, *, op=None, left=None, right=None, name=None):
-        if op is None and not isinstance(component, AstropyModel):
+        from .component import _Function
+        if op is None and not isinstance(component, (AstropyModel, _Function)):
             raise TypeError('Use Model.from_astropy(component) to construct a leaf.')
         if op is not None and (op not in (*_OPERATIONS, '|') or not isinstance(left, Model)):
             raise ValueError('Invalid native model expression.')
@@ -177,6 +178,29 @@ class Model:
     def n_submodels(self):
         return len(self._components)
 
+    @property
+    def components(self):
+        """Read-only mapping to live components, without expanding the algebra.
+
+        Unique nonempty names are keys; unnamed or duplicate-name components
+        use their integer position. Source leaves are native Model views with
+        the same parameters and the complete parent as evaluation context.
+        Linear operators retain their public operator interface and flux action.
+        """
+        from .operators.matop import LinearOperatorModel
+        names = self.submodel_names
+        components = {}
+        for index, leaf in enumerate(self._components):
+            name = leaf.name
+            key = name if isinstance(name, str) and name and names.count(name) == 1 else index
+            if isinstance(leaf, LinearOperatorModel):
+                view = leaf
+            else:
+                view = Model(component=leaf)
+                view._evaluation_parent = getattr(self, '_evaluation_parent', self)
+            components[key] = view
+        return MappingProxyType(components)
+
     def __getitem__(self, key):
         if isinstance(key, (int, np.integer)):
             return self._components[key]
@@ -184,6 +208,17 @@ class Model:
         if len(matches) != 1:
             raise KeyError(f'Expected one component named {key!r}; found {len(matches)}.')
         return matches[0]
+
+    @property
+    def params(self):
+        """Read-only mapping of names to the live, editable parameters.
+
+        Keys follow ``param_names``, including component suffixes in compound
+        expressions. Values are the same objects exposed by attribute access;
+        edit their ``value``, ``bounds``, ``fixed`` or ``link`` fields.
+        """
+        return MappingProxyType({name: getattr(component, local)
+                                 for name, (component, local) in self._owners.items()})
 
     @property
     def parameters(self):
@@ -222,16 +257,22 @@ class Model:
         self._param_cov = None if value is None else np.asarray(value)
 
     def copy(self):
-        return copy.deepcopy(self)
+        from .parameters import _encode_links, _restore_links
+        links = _encode_links(self)
+        result = copy.deepcopy(self)
+        if links:
+            _restore_links(result, links)
+        return result
 
     def __call__(self, x, flux=None):
+        from .fitting.utils import apply_tied
         if self.op is None and self.component.n_inputs == 2:
             if flux is None:
                 raise TypeError('A profile transform requires x and flux, or source | transform.')
+            apply_tied(getattr(self, '_evaluation_parent', self))
             return self.component(x, flux)
         if flux is not None:
             raise TypeError('A spectral model accepts one coordinate array.')
-        from .fitting.utils import apply_tied
         from .fitting.evaluation import _CompositeEvaluation
         apply_tied(getattr(self, '_evaluation_parent', self))
         scalar = np.ndim(x) == 0

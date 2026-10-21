@@ -28,5 +28,5 @@ binned_cube = cube.apply_binmap(method='mean')
 
 # Extract spectrum
 spec = cube.extract_spectrum(mask=my_aperture)
-spec.plot_spectrum()
+spec.plot()
 ```

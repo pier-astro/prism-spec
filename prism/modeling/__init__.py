@@ -1,11 +1,11 @@
 """
-prism.modeling — spectral models, model-aware analysis, fitters, and I/O.
+prism.modeling — general components, fitting, domain models and I/O.
 
 Submodules
 ----------
 models
     Astropy-compliant spectral models and component factories.
-line_analysis
+lines
     Post-fit line selection, measurement, and uncertainty sampling.
 operators
     Linear operators applied to source models.
@@ -15,8 +15,9 @@ io
     FITS I/O for fitted models and multi-fit results.
 """
 from .composition import Model
-from . import line_analysis
-from .line_analysis import *
+from .component import Component
+from .lines import LineSet
+from .lines.measurements import *
 from .operators.matop import LinearOperatorModel, is_linear_operator_pipe
 from .operators.instrument import InstrumentResponse, SpectralResponse
 from .display import (

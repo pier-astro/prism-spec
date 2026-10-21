@@ -64,8 +64,8 @@ def covar(fitter):
     if cov is None:
         raise CovarianceError(
             "Covariance matrix not found in fit_info. "
-            "Please fit with calc_uncertainties=True:\n"
-            "    fitter = YourFitter(calc_uncertainties=True)\n"
+            "Please fit with covariance=True:\n"
+            "    fitter = YourFitter(covariance=True)\n"
             "    fitted_model = fitter(model, x, y)"
         )
     

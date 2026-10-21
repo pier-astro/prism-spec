@@ -5,7 +5,8 @@ from astropy.modeling import FittableModel, Parameter
 from astropy.modeling.models import Gaussian1D, Const1D
 from scipy.integrate import trapezoid
 from prism.modeling import Model
-from prism.modeling.fitting import LMFitter, SeparableTRF, ScipyTRF, SherpaLM, HAS_SHERPA
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA
+from prism.experimental import LMFitter, SeparableTRF
 
 
 @pytest.mark.parametrize('bounds',[(None,None),(.1,None),(None,8.),(.1,8.)])
@@ -16,7 +17,7 @@ def test_lm_bounds_and_covariance_match_weighted_linear_solution(bounds):
     y=3.*profile+.03*np.sin(4*x)
     model=Model.from_astropy(Gaussian1D(1.,0.,.8,fixed={'mean':True,'stddev':True},bounds={'amplitude':bounds}))
     initial=model.parameters.copy()
-    fitter=LMFitter(calc_uncertainties=True)
+    fitter=LMFitter(covariance=True)
     result=fitter(model,x,y,yerr=error,inplace=False)
     expected=np.sum(profile*y/error**2)/np.sum(profile**2/error**2)
     residual=(expected*profile-y)/error
@@ -75,12 +76,13 @@ def test_lm_incomplete_fit_retains_finite_residual_diagnostics():
     assert fitter.fit_info['param_cov'] is None
 
 
-@pytest.mark.parametrize('engine',[ScipyTRF,LMFitter,SeparableTRF,
+@pytest.mark.parametrize('engine',[TRF,LMFitter,SeparableTRF,
     pytest.param(SherpaLM,marks=pytest.mark.skipif(not HAS_SHERPA,reason='Sherpa unavailable'))])
 def test_least_squares_cost_and_stat_share_convention(engine):
     x=np.arange(5.);y=np.array([1.,2.,4.,2.,1.]);error=np.full(5,.3)
     fitter=engine();result=fitter(Const1D(.5),x,y,yerr=error)
-    expected=np.sum(((result(x)-y)/error)**2)
+    prediction = result.predict(x) if isinstance(fitter, (TRF, SherpaLM)) else result(x)
+    expected=np.sum(((prediction-y)/error)**2)
     assert fitter.fit_info['success']
     assert fitter.fit_info['stat']==pytest.approx(expected)
     assert fitter.fit_info['cost']==pytest.approx(.5*expected)

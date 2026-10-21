@@ -6,11 +6,12 @@ from astropy.modeling import FittableModel, Parameter
 from astropy.modeling.models import Const1D, Gaussian1D
 from scipy.integrate import trapezoid
 from prism.modeling import Model
-from prism.modeling.fitting import (ScipyTRF, SherpaLM, HAS_SHERPA,
-    TRFLSQFitter, LMFitter, SeparableTRF, FittingWithOutlierRemoval)
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA, FittingWithOutlierRemoval
+from prism.experimental import LMFitter, SeparableTRF
+from prism.modeling.interop.astropy import TRFLSQFitter
 from prism.modeling.fitting.data import _prepare_fit_data
 
-ENGINES=[ScipyTRF,pytest.param(SherpaLM,marks=pytest.mark.skipif(not HAS_SHERPA,reason='Sherpa unavailable'))]
+ENGINES=[TRF,pytest.param(SherpaLM,marks=pytest.mark.skipif(not HAS_SHERPA,reason='Sherpa unavailable'))]
 
 
 @pytest.mark.parametrize('engine',ENGINES)
@@ -20,7 +21,7 @@ def test_weighted_mean_uses_errors_through_outlier_wrapper(engine):
     expected=np.sum(y/error**2)/np.sum(1/error**2)
     fitter=FittingWithOutlierRemoval(engine(),niter=0)
     result=fitter(Model.from_astropy(Const1D(0.)),x,y,yerr=error)
-    assert result.amplitude.value==pytest.approx(expected,rel=1e-6)
+    assert result.model.amplitude.value==pytest.approx(expected,rel=1e-6)
 
 
 @pytest.mark.parametrize('engine',ENGINES)
@@ -34,7 +35,7 @@ def test_errors_cannot_reintroduce_rejected_samples(engine,masked):
     fitter=FittingWithOutlierRemoval(engine(),outlier_func=clip,niter=1)
     result=fitter(Model.from_astropy(Const1D(1.)),x,y,yerr=error)
     assert fitter.outlier_mask[-1]
-    assert result.amplitude.value==pytest.approx(2.,rel=1e-6)
+    assert result.model.amplitude.value==pytest.approx(2.,rel=1e-6)
     assert fitter.fit_info['ndata']==3
 
 
@@ -43,7 +44,7 @@ def test_zero_weights_exclude_nan_and_override_errors(engine):
     fitter=engine()
     result=fitter(Model.from_astropy(Const1D(0.)),np.arange(3.),np.array([1.,2.,np.nan]),
                   weights=np.array([1.,2.,0.]),yerr=np.ones(3))
-    assert result.amplitude.value==pytest.approx(1.8,rel=1e-6)
+    assert result.model.amplitude.value==pytest.approx(1.8,rel=1e-6)
     assert fitter.fit_info['ndata']==2
     assert fitter.fit_info['dof']==1
 
@@ -54,7 +55,7 @@ def test_masked_arrays_and_explicit_filter_share_selection(engine):
     y=np.ma.array([1.,2.,100.,100.,np.nan],mask=[False,False,True,False,False])
     fitter=engine()
     result=fitter(Model.from_astropy(Const1D(0.)),x,y,filter_non_finite=True)
-    assert result.amplitude.value==pytest.approx(1.5,rel=1e-6)
+    assert result.model.amplitude.value==pytest.approx(1.5,rel=1e-6)
     assert fitter.fit_info['ndata']==2
 
 
@@ -97,8 +98,8 @@ def test_profile_transform_keeps_full_grid_when_samples_are_masked(engine):
     y=truth.copy();y[~mask]=np.nan
     fitter=engine()
     result=fitter(model,x,y,mask=mask)
-    assert result.norm_1.value==pytest.approx(4.,rel=1e-6)
-    assert trapezoid(result(x),x)==pytest.approx(4.,rel=1e-6)
+    assert result.model.norm_1.value==pytest.approx(4.,rel=1e-6)
+    assert trapezoid(result.predict(x),x)==pytest.approx(4.,rel=1e-6)
     assert fitter.fit_info['ndata']==np.sum(mask)
 
 

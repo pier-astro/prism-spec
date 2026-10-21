@@ -2,12 +2,12 @@
 import numpy as np
 import pytest
 from astropy.modeling.models import Gaussian1D
-from prism.modeling.fitting import ScipyTRF, SherpaLM, HAS_SHERPA
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA
 from prism.modeling.operators.instrument import SpectralResponse
 from scipy.sparse import eye
 
 
-@pytest.mark.parametrize('backend', [ScipyTRF, pytest.param(
+@pytest.mark.parametrize('backend', [TRF, pytest.param(
     SherpaLM, marks=pytest.mark.skipif(not HAS_SHERPA, reason='Sherpa unavailable'))])
 def test_parallel_response_links_masks_covariance_and_overrides(backend):
     x = np.linspace(-4, 4, 81)
@@ -24,11 +24,11 @@ def test_parallel_response_links_masks_covariance_and_overrides(backend):
     mask[12:20, 0, 1] = False
     mask[:, 1, 1] = False
     data[:, 1, 0] = np.nan  # A local failure must not poison the next task.
-    options = dict(yerr=np.full_like(data, .1), mask=mask, spectral_axis=0,
+    options = dict(yerr=np.full_like(data, .1), mask=mask, axis=0,
                    initpars={'amplitude_0': np.full((2, 3), .5)},
                    bounds={'amplitude_0': (np.zeros((2, 3)), 4.)}, progress=False)
-    serial = backend(calc_uncertainties=True).multifit(model, x, data, nproc=1, **options)
-    parallel = backend(calc_uncertainties=True).multifit(model, x, data, nproc=2, **options)
+    serial = backend(covariance=True).multifit(model, x, data, nproc=1, **options)
+    parallel = backend(covariance=True).multifit(model, x, data, nproc=2, **options)
     np.testing.assert_array_equal(model.parameters, original)
     expected = np.array([[True, True, True], [False, False, True]])
     np.testing.assert_array_equal(parallel._success.reshape(2, 3), expected)
@@ -49,8 +49,8 @@ def test_parallel_binmap_fits_representatives_and_preserves_exclusions():
     amplitudes = np.array([[1., 9., 2.], [9., 3., 9.]])
     data = amplitudes[..., None]*np.exp(-.5*(x/.8)**2)
     bins = np.array([[2, 2, 7], [7, 12, -1]])
-    serial = ScipyTRF().multifit(model, x, data, binmap=bins, progress=False)
-    parallel = ScipyTRF().multifit(model, x, data, binmap=bins, nproc=2, progress=False)
+    serial = TRF().multifit(model, x, data, binmap=bins, progress=False)
+    parallel = TRF().multifit(model, x, data, binmap=bins, nproc=2, progress=False)
     expected = np.array([[1., 1., 2.], [2., 3., np.nan]])
     np.testing.assert_allclose(parallel.amplitude.value, expected, atol=1e-7, equal_nan=True)
     np.testing.assert_allclose(parallel.amplitude.value, serial.amplitude.value, equal_nan=True)
@@ -62,7 +62,7 @@ def test_parallel_strict_mask_failure_propagates():
     mask = np.ones_like(data, dtype=bool)
     mask[1] = False
     with pytest.raises(ValueError, match='No valid spectral samples'):
-        ScipyTRF().multifit(Gaussian1D(), x, data, mask=mask,
+        TRF().multifit(Gaussian1D(), x, data, mask=mask,
                            skip_invalid=False, nproc=2, progress=False)
 
 
@@ -79,9 +79,9 @@ def test_shuffled_bin_labels_keep_first_spatial_member_and_its_overrides(nproc):
         first = tuple(np.argwhere(bins == label)[0])
         expected[bins == label] = amplitude[first]
         mask[first[0], :, first[1]] = True
-    result = ScipyTRF(calc_uncertainties=True).multifit(
+    result = TRF(covariance=True).multifit(
         Gaussian1D(.4, 0, .7, fixed={'mean': True, 'stddev': True}),
-        x, data, mask=mask, binmap=bins, spectral_axis=1, nproc=nproc,
+        x, data, mask=mask, binmap=bins, axis=1, nproc=nproc,
         initpars={'amplitude': np.full(bins.shape, .3)},
         bounds={'amplitude': (0., amplitude + .5)}, progress=False)
     np.testing.assert_allclose(result.amplitude.value, expected, atol=1e-7, equal_nan=True)
@@ -91,5 +91,5 @@ def test_shuffled_bin_labels_keep_first_spatial_member_and_its_overrides(nproc):
 def test_binmap_with_no_included_targets_is_rejected():
     x = np.linspace(-3, 3, 21)
     with pytest.raises(ValueError, match='non-negative bin labels'):
-        ScipyTRF().multifit(Gaussian1D(), x, np.ones((2, len(x))),
+        TRF().multifit(Gaussian1D(), x, np.ones((2, len(x))),
                            binmap=np.array([-1, -3]), nproc=2, progress=False)

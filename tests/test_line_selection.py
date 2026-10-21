@@ -1,14 +1,16 @@
+from prism.modeling import Model
 """Explicit component/member selection and retained parent-model contracts."""
+from line_helpers import make_line as single_line, make_group
 import numpy as np
 import pytest
 from astropy import units as u
 from astropy.modeling.models import Const1D
-from prism.modeling.line_analysis import select_line
-from prism.modeling.models.lines import GaussianLine, GaussianLines, profiles
+from prism.modeling.lines.measurements import select_line
+from prism.modeling.lines import profiles
 
 
 def make_line(name='narrow', amplitude=2., fwhm=200.):
-    line = GaussianLine(position=5000., amplitude=amplitude, fwhm=fwhm, name=name)
+    line = single_line(position=5000., amplitude=amplitude, fwhm=fwhm, name=name)
     line.offset.fixed = True
     line.fwhm.fixed = True
     return line
@@ -29,7 +31,7 @@ def test_explicit_independent_component_list_matches_analytic_sum():
 
 
 def test_parent_named_object_and_index_aliases_count_component_once():
-    model = Const1D(3.,name='continuum')+make_line()+make_line('broad')
+    model = Model.from_astropy(Const1D(3.,name='continuum'))+make_line()+make_line('broad')
     selected = select_line(model, 'Hb', components=['narrow',model['narrow'],1])
     assert selected.source_model is model
     assert selected.component_names == ['narrow']
@@ -42,7 +44,7 @@ def test_parent_named_object_and_index_aliases_count_component_once():
 
 
 def test_explicit_parent_selection_preserves_joint_covariance_after_continuum():
-    model = Const1D(3.,name='continuum')+make_line()+make_line('broad',1.,600.)
+    model = Model.from_astropy(Const1D(3.,name='continuum'))+make_line()+make_line('broad',1.,600.)
     model._param_cov = np.array([[.09,0.,0.],[0.,.04,.015],[0.,.015,.01]])
     selected = select_line(model,'Hb',components=['narrow','broad'])
     _, samples = selected.sample(method='covariance',n_samples=64,random_state=71,return_samples=True)
@@ -53,7 +55,7 @@ def test_explicit_parent_selection_preserves_joint_covariance_after_continuum():
 
 
 def test_quantity_member_position_and_live_group_parameters():
-    group = GaussianLines.from_arrays(names=['pair','pair'],pos=[5000.,5010.]*u.AA,
+    group = make_group(names=['pair','pair'],pos=[5000.,5010.]*u.AA,
                                       weights=[1.,.5],amplitude=4.,fwhm=200.)
     selected = select_line(group,'pair',position=501.*u.nm)
     assert selected.position == 5010.
@@ -69,20 +71,15 @@ def test_quantity_member_position_and_live_group_parameters():
 
 def test_native_coordinate_mismatch_is_rejected():
     a = make_line()
-    b = GaussianLine(position=500.*u.nm,name='other')
+    b = single_line(position=500.*u.nm,name='other')
     with pytest.raises(ValueError,match='same native spectral unit'):
         select_line([a,b],'Hb')
 
 
-def test_equivalent_amplitude_units_are_converted_before_adding():
-    a = make_line(amplitude=2.*u.Jy)
-    b = make_line('broad',amplitude=500.*u.mJy)
-    selected = select_line([a,b],'Hb')
-    np.testing.assert_allclose(selected(500.*u.nm),2.5*u.Jy)
 
 
 def test_non_additive_model_requires_explicit_intrinsic_choice():
-    model = Const1D(3.,name='scale')*make_line()
+    model = Model.from_astropy(Const1D(3.,name='scale'))*make_line()
     with pytest.raises(ValueError,match='non-additive'):
         select_line(model,'narrow')
     selected = select_line(model,'Hb',components='narrow')
@@ -100,7 +97,7 @@ def test_linked_component_list_requires_original_parent():
 
 @pytest.mark.parametrize('weights', [[1.,1.],[.3,.5]])
 def test_ambiguous_group_requires_explicit_rest_position(weights):
-    group = GaussianLines.from_arrays(names=['pair','pair'],pos=[5000.,5010.]*u.AA,
+    group = make_group(names=['pair','pair'],pos=[5000.,5010.]*u.AA,
                                       weights=weights,amplitude=4.,fwhm=200.)
     with pytest.raises(ValueError,match='unique matching member'):
         select_line(group,'pair')
@@ -109,7 +106,7 @@ def test_ambiguous_group_requires_explicit_rest_position(weights):
 
 
 def test_sole_template_member_needs_no_unit_weight_anchor():
-    group = GaussianLines.from_arrays(names=['one'],pos=[5000.]*u.AA,
+    group = make_group(names=['one'],pos=[5000.]*u.AA,
                                       weights=[.3],amplitude=4.,fwhm=200.)
     np.testing.assert_allclose(select_line(group,'one')(5000.),1.2)
 

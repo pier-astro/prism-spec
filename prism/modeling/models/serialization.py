@@ -15,10 +15,8 @@ code. Import ``prism.modeling.models`` to register these hooks.
 
 import warnings
 import numpy as np
-import pandas as pd
 import astropy.units as u
 
-from astropy.table import QTable
 
 from astropy.modeling.core import CompoundModel
 
@@ -76,107 +74,6 @@ def _restore_param(model, name, state):
                 setattr(param, attr, float(state[attr]))
             except (TypeError, ValueError):
                 pass
-
-# ---------------------------------------------------------------------------
-# LineModelBase  (GaussianLine, VoigtLine, LorentzianLine)
-# ---------------------------------------------------------------------------
-
-def _linemodel_representer(dumper, obj):
-    state = {pn: _param_state(getattr(obj, pn), dumper) for pn in obj.param_names}
-    state['_velocity_unit'] = obj.velocity_unit.to_string()
-    instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
-    if isinstance(instfwhm_raw, np.ndarray):
-        instfwhm_raw = instfwhm_raw.tolist()
-    state['_instfwhm'] = instfwhm_raw
-    if obj.name:
-        state['_name'] = obj.name
-    return dumper.represent_mapping(f'!prism.{obj.__class__.__name__}', state)
-
-def _linemodel_constructor(loader, node, cls):
-    mapping = loader.construct_mapping(node, deep=True)
-    instfwhm = mapping.pop('_instfwhm', 0.0)
-    mdl_name = mapping.pop('_name', None)
-    velocity_unit = mapping.pop('_velocity_unit', 'km/s')
-    parameters = {name: state['value'] * u.Unit(state['unit'])
-                  for name, state in mapping.items() if state.get('unit') is not None}
-    obj = cls(instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit, **parameters)
-    for pn, state in mapping.items():
-        if hasattr(obj, pn):
-            _restore_param(obj, pn, state)
-    return obj
-
-# ---------------------------------------------------------------------------
-# LineGroupBase  (GaussianLines, LorentzianLines, VoigtLines)
-# ---------------------------------------------------------------------------
-
-def _linegroup_representer(dumper, obj):
-    # Base class name for reconstruction
-    for base in type(obj).__mro__:
-        if base.__name__ in ('GaussianLines', 'LorentzianLines', 'VoigtLines'):
-            base_name = base.__name__
-            break
-    else:
-        base_name = type(obj).__name__
-
-    # Serialise positions in the model's native spectral unit (not forced to AA).
-    pos_unit = getattr(type(obj), '_position_unit', u.AA)
-    pos_unit_str = pos_unit.to_string()
-
-    state = {
-        '_base': base_name,
-        '_velocity_unit': obj.velocity_unit.to_string(),
-        '_position_unit': pos_unit_str,
-        '_linetable': [
-            {
-                'name': str(row['name']),
-                'position': float(row['position'].to(pos_unit, equivalencies=u.spectral()).value),
-                'weight': float(row['weight']),
-            }
-            for row in obj._linetable
-        ],
-    }
-    instfwhm_raw = getattr(obj, '_instfwhm_raw', getattr(obj, 'instfwhm', 0.0))
-    if isinstance(instfwhm_raw, np.ndarray):
-        instfwhm_raw = instfwhm_raw.tolist()
-    state['_instfwhm'] = instfwhm_raw
-    if obj.name:
-        state['_name'] = obj.name
-
-    for pn in obj.param_names:
-        state[pn] = _param_state(getattr(obj, pn), dumper)
-
-    return dumper.represent_mapping('!prism.LineGroup', state)
-
-def _linegroup_constructor(loader, node):
-    from . import lines as _lines_mod
-    mapping = loader.construct_mapping(node, deep=True)
-
-    base_name = mapping.pop('_base')
-    records = mapping.pop('_linetable')
-    instfwhm = mapping.pop('_instfwhm', 0.0)
-    mdl_name = mapping.pop('_name', None)
-    velocity_unit = mapping.pop('_velocity_unit', 'km/s')
-
-    # Restore the native spectral unit (defaults to AA for old files).
-    pos_unit_str = mapping.pop('_position_unit', 'Angstrom')
-    pos_unit = u.Unit(pos_unit_str)
-
-    base_cls = getattr(_lines_mod, base_name)
-    linetable = QTable()
-    linetable['name'] = [record['name'] for record in records]
-    linetable['position'] = [record['position'] for record in records] * pos_unit
-    linetable['weight'] = [record['weight'] for record in records]
-    obj = base_cls.from_templates(
-        linetable, instfwhm=instfwhm, name=mdl_name, velocity_unit=velocity_unit)
-
-    for pn, state in mapping.items():
-        if hasattr(obj, pn):
-            _restore_param(obj, pn, state)
-    return obj
-
-# ---------------------------------------------------------------------------
-# Continuum models  (BalmerContinuum — plain Fittable1DModel)
-# ---------------------------------------------------------------------------
 
 def _continuum_representer(dumper, obj):
     state = {pn: _param_state(getattr(obj, pn), dumper) for pn in obj.param_names}
@@ -240,8 +137,95 @@ def _astropy_model_constructor(loader, node):
 # Compound models
 # ---------------------------------------------------------------------------
 
+
+def _profile_recipe(profile, derivative):
+    """Whitelist built-in numeric profile state; never serialize Python code."""
+    from ..lines.profiles import GaussianProfile, LorentzianProfile, VoigtProfile
+    if type(profile) not in (GaussianProfile, LorentzianProfile, VoigtProfile):
+        return None
+    analytic = derivative is not None
+    if analytic and (getattr(derivative, '__self__', None) is not profile
+                     or getattr(derivative, '__func__', None) is not type(profile).derivative):
+        return None
+    return dict(kind=type(profile).__name__, position_unit=profile.position_unit.to_string(),
+                instfwhm=np.asarray(profile._instfwhm).tolist(), analytic=analytic)
+
+
+def _restore_profile(recipe):
+    from ..lines.profiles import GaussianProfile, LorentzianProfile, VoigtProfile
+    classes = {cls.__name__: cls for cls in (GaussianProfile, LorentzianProfile, VoigtProfile)}
+    if recipe['kind'] not in classes:
+        raise ValueError('Unknown saved line-profile recipe.')
+    profile = classes[recipe['kind']](instfwhm=recipe['instfwhm'], position_unit=recipe['position_unit'])
+    return profile, profile.derivative if recipe['analytic'] else None
+
+
+def _lineset_representer(dumper, obj):
+    if not obj.name:
+        raise ValueError('Name custom line components before saving.')
+    state = dict(name=obj.name, setup=obj._setup, profile=_profile_recipe(obj._profile, obj._derivative), parameters={
+        name: _param_state(getattr(obj, name), dumper) for name in obj.param_names})
+    return dumper.represent_mapping('!prism.LineSet', state)
+
+
+def _lineset_constructor(loader, node):
+    from ..lines.component import LineSet
+    state = loader.construct_mapping(node, deep=True)
+    if state.get('profile') is not None:
+        profile, derivative = _restore_profile(state['profile'])
+    else:
+        definition = getattr(loader, 'components', {}).get(state['name'])
+        if not isinstance(definition, LineSet):
+            raise ValueError(f"Supply the custom LineSet {state['name']!r} through components=... when loading.")
+        profile, derivative = definition.component._profile, definition.component._derivative
+    setup = state['setup']
+    lines = dict(setup['lines'])
+    lines['position'] = np.asarray(lines['position'])*u.Unit(setup['unit'])
+    result = LineSet(profile, lines,
+                           shared=dict(setup['shared']),
+                           parameters={key: dict(value) for key, value in setup['parameters']},
+                           scale=setup['scale'], position=setup['position'],
+                           derivative=derivative, name=state['name']).component
+    if set(result.param_names) != set(state['parameters']):
+        raise ValueError('Saved line parameter names do not match the saved setup.')
+    for name, value in state['parameters'].items():
+        _restore_param(result, name, value)
+    return result
+
+
+def _function_representer(dumper, obj):
+    if not obj.name:
+        raise ValueError('Name custom components before saving, to identify their definitions at loading.')
+    state = {'name': obj.name, 'profile': _profile_recipe(obj._function, obj._derivative), 'parameters': {
+        name: _param_state(getattr(obj, name), dumper) for name in obj.param_names}}
+    return dumper.represent_mapping('!prism.Component', state)
+
+
+def _function_constructor(loader, node):
+    from ..component import Component
+    state = loader.construct_mapping(node, deep=True)
+    if state.get('profile') is not None:
+        import inspect
+        function, derivative = _restore_profile(state['profile'])
+        names = tuple(inspect.signature(function).parameters)[1:]
+    else:
+        definitions = getattr(loader, 'components', {})
+        definition = definitions.get(state['name'])
+        if not isinstance(definition, Component):
+            raise ValueError(f"Supply the custom Component {state['name']!r} through components=... when loading.")
+        leaf = definition.component
+        function, derivative, names = leaf._function, leaf._derivative, leaf.param_names
+    if set(state['parameters']) != set(names):
+        raise ValueError('Saved and supplied custom parameter names must match.')
+    result = Component(function,
+                       {name: state['parameters'][name]['value'] for name in names},
+                       derivative=derivative, name=state['name']).component
+    for name, value in state['parameters'].items():
+        _restore_param(result, name, value)
+    return result
+
 def _native_representer(dumper, obj):
-    if is_linear_operator_pipe(obj):
+    if is_linear_operator_pipe(obj) and not getattr(dumper, 'result_graph', False):
         state = _linear_operator_pipe_representer(dumper, obj)
         return state
     state = {'name': obj.name}
@@ -256,7 +240,7 @@ def _native_constructor(loader, node):
     from ..composition import Model
     state = loader.construct_mapping(node, deep=True)
     if 'component' in state:
-        return Model.from_astropy(state['component'])
+        return Model(component=state['component'])
     result = Model(op=state['op'], left=state['left'], right=state['right'], name=state['name'])
     if result.op not in ('+', '-', '*', '/', '**', '|'):
         raise ValueError('Unsupported native model operation.')
@@ -264,7 +248,7 @@ def _native_constructor(loader, node):
 
 
 def _compound_representer(dumper, obj):
-    if is_linear_operator_pipe(obj):
+    if is_linear_operator_pipe(obj) and not getattr(dumper, 'result_graph', False):
         return _linear_operator_pipe_representer(dumper, obj)
     return dumper.represent_mapping('!prism.CompoundModel',
         {'_op': obj.op, '_left': obj.left, '_right': obj.right, '_name': obj.name})
@@ -358,19 +342,9 @@ def _linear_operator_pipe_constructor(loader, node):
 
 def register():
     """Register all prism models with the Astropy YAML loader/dumper."""
-    from .lines import GaussianLine, VoigtLine, LorentzianLine
-    from .lines import GaussianLines, LorentzianLines, VoigtLines, LineGroupBase
     from .continuum import BalmerContinuum
 
-    line_models = [GaussianLine, VoigtLine, LorentzianLine]
     continuum_models = [BalmerContinuum]
-
-    for cls in line_models:
-        tag = f'!prism.{cls.__name__}'
-        AstropyDumper.add_representer(cls, _linemodel_representer)
-        AstropyLoader.add_constructor(
-            tag, lambda loader, node, cls=cls: _linemodel_constructor(loader, node, cls)
-        )
 
     for cls in continuum_models:
         tag = f'!prism.{cls.__name__}'
@@ -380,19 +354,21 @@ def register():
         )
 
     from ..composition import Model
+    from ..component import Component, _Function
     AstropyDumper.add_representer(Model, _native_representer)
+    AstropyDumper.add_representer(Component, _native_representer)
+    from ..lines.component import LineSet, _LineGroup
+    AstropyDumper.add_representer(LineSet, _native_representer)
+    AstropyDumper.add_representer(_LineGroup, _lineset_representer)
+    AstropyLoader.add_constructor('!prism.LineSet', _lineset_constructor)
+    # Read sessions written under the previous native name; emit LineSet only.
+    AstropyLoader.add_constructor('!prism.LineComponent', _lineset_constructor)
+    AstropyDumper.add_representer(_Function, _function_representer)
+    AstropyLoader.add_constructor('!prism.Component', _function_constructor)
     AstropyLoader.add_constructor('!prism.Model', _native_constructor)
     AstropyDumper.add_representer(CompoundModel, _compound_representer)
     AstropyLoader.add_constructor('!prism.CompoundModel', _compound_constructor)
     AstropyLoader.add_constructor('!prism.LinearOperatorPipe', _linear_operator_pipe_constructor)
-
-    # LineGroup - all dynamic subclasses share a single representer/constructor
-    for cls in [GaussianLines, LorentzianLines, VoigtLines]:
-        AstropyDumper.add_representer(cls, _linegroup_representer)
-
-    # Dynamic subclasses created by LineGroupBase.from_templates inherit from LineGroupBase.
-    AstropyDumper.add_multi_representer(LineGroupBase, _linegroup_representer)
-    AstropyLoader.add_constructor('!prism.LineGroup', _linegroup_constructor)
 
     # Generic fallback for vanilla Astropy Fittable1DModel subclasses that
     # have no prism-specific representer.  Uses add_multi_representer so

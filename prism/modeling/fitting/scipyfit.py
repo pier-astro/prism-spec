@@ -20,17 +20,20 @@ from .extension import (
     get_max_evaluations,
 )
 from .multifit import MultiFitMixin
+from .joint import _JointFitMixin
+from .single import _SingleFitMixin
 from .problem import _FitProblem
-from .data import _prepare_fit_data
+from .constraints import _box_bounds
+from .data import _prepare_fit_data, _resolve_fit_inputs
 from .utils import (
     _analytic_jacobian_parameter_major,
-    _prime_tied_analytic_jacobian_warning,
+
 )
 
-__all__ = ['ScipyFitter', 'ScipyTRF', 'ScipyDogBox']
+__all__ = ['ScipyFitter', 'TRF', 'ScipyDogBox']
 
 
-class ScipyFitter(MultiFitMixin, Fitter):
+class ScipyFitter(_SingleFitMixin, _JointFitMixin, MultiFitMixin, Fitter):
     """
     Wrapper around ``scipy.optimize.least_squares``.
 
@@ -38,9 +41,9 @@ class ScipyFitter(MultiFitMixin, Fitter):
     ----------
     method : {'trf', 'dogbox'}, optional
         ``least_squares`` backend. Default is ``'trf'``.
-    calc_uncertainties : bool, optional
+    covariance : bool, optional
         If ``True``, estimate a parameter covariance matrix from the final
-        Jacobian. Default is ``False``.
+        Jacobian. Default is ``True``.
     verbose : bool, optional
         If ``True``, print fallback and diagnostic messages. Default is ``False``.
     **kwargs
@@ -60,9 +63,9 @@ class ScipyFitter(MultiFitMixin, Fitter):
     stdevs = property(_fitter_stdevs)
     std = property(_fitter_stdevs)
     
-    def __init__(self, method='trf', calc_uncertainties=False, verbose=False, **kwargs):
+    def __init__(self, method='trf', covariance=True, verbose=False, **kwargs):
         self.method = method
-        self.calc_uncertainties = calc_uncertainties
+        self._estimate_covariance = bool(covariance)
         self.verbose = verbose
         self.fit_kwargs = kwargs
         # Normalize constructor controls once; keep optimizer options separate.
@@ -105,9 +108,6 @@ class ScipyFitter(MultiFitMixin, Fitter):
         if callable(requested_jac) or self._is_numeric_jacobian_request(requested_jac):
             return requested_jac
         
-        if not hasattr(model, 'fit_deriv'):
-            return '2-point'
-        
         try:
             # Test if fit_deriv works and check for NaNs/Infs
             test_deriv = _analytic_jacobian_parameter_major(
@@ -130,36 +130,33 @@ class ScipyFitter(MultiFitMixin, Fitter):
                 print(f"Note: Using numeric Jacobian due to: {type(e).__name__}")
             return '2-point'
 
-    def __call__(self, model, x, y, z=None, weights=None, max_nfev=None,
+    def _fit_single(self, model, x, y=None, z=None, weights=None, max_nfev=None,
                  yerr=None, statistic='chi2', inplace=False, **kwargs):
-        """
-        Implement SciPy least_squares fitting.
-        """
+        """Optimize one observation without constructing a public snapshot."""
+        model, x, y, yerr, weights, mask = _resolve_fit_inputs(
+            model, x, y, z, yerr, weights, kwargs.pop('mask', None))
         _validate_spectral_inputs(model, x, y, z, yerr, weights, statistic=statistic)
         x, y, yerr, weights, valid = _prepare_fit_data(
-            x, y, yerr, weights, kwargs.pop('mask', None),
+            x, y, yerr, weights, mask,
             filter_non_finite=kwargs.pop('filter_non_finite', False))
+        self._fit_mask = valid
         if yerr is not None and weights is None:
             weights = np.zeros_like(np.asarray(yerr), dtype=float)
             np.divide(1.0, np.asarray(yerr), out=weights, where=valid)
         if not inplace:
             model = model.copy()
-        _prime_tied_analytic_jacobian_warning(model)
         problem = _FitProblem(model, x, y, weights, valid)
+        return self._fit_problem(problem, statistic=statistic,
+                                 weighted=weights is not None or yerr is not None,
+                                 max_nfev=max_nfev, **kwargs)
+
+    def _fit_problem(self, problem, *, statistic='chi2', weighted=False,
+                     max_nfev=None, **kwargs):
+        """Optimize one prepared problem, independent of its number of datasets."""
+        model = problem.model
         parameters = problem.parameters
         init_values, fit_indices = parameters.values, parameters.free
-        param_bounds = parameters.bounds
-
-        # Reject parameters with equal bounds (lower == upper): scipy requires
-        # strict inequality.  Use param.fixed = True instead.
-        equal_mask = param_bounds[:, 0] == param_bounds[:, 1]
-        if np.any(equal_mask):
-            bad_names = [parameters.names[fi] for fi, m
-                         in zip(fit_indices, equal_mask) if m]
-            raise ValueError(
-                f"Parameters with equal lower and upper bounds: "
-                f"{', '.join(bad_names)}. Use `param.fixed = True` instead."
-            )
+        param_bounds = _box_bounds(problem.model, parameters)
 
         residual = problem.residual
 
@@ -212,7 +209,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
         
         # Compute covariance if requested
         native_cov = None
-        if self.calc_uncertainties:
+        if self._estimate_covariance:
             try:
                 J = result.jac
                 if J is None or J.shape[0] == 0:
@@ -247,7 +244,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
             'param_cov': native_cov,
             'cost': result.cost,
             'stat': float(np.dot(result.fun, result.fun)),
-            'statmethod': statistic if (weights is not None or yerr is not None) else 'leastsq',
+            'statmethod': statistic if weighted else 'leastsq',
             'nfree': len(init_values),
             'ndata': n_data,
             'dof': n_data - len(init_values),
@@ -258,7 +255,7 @@ class ScipyFitter(MultiFitMixin, Fitter):
         return _attach_covariance(model, native_cov)
 
 
-class ScipyTRF(ScipyFitter):
+class TRF(ScipyFitter):
     """SciPy trust-region reflective fitter.
 
     Parameters
@@ -271,11 +268,13 @@ class ScipyTRF(ScipyFitter):
     jac : {'auto', '2-point', '3-point', 'cs'} or callable, optional
         Jacobian strategy. ``'auto'`` uses Prism analytic derivatives when
         available. Default is ``'auto'``.
+    covariance : bool, optional
+        Estimate parameter covariance from the final Jacobian. Default is True.
     **kwargs
         Additional ``least_squares`` keyword arguments.
     """
-    def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='auto', **kwargs):
-        super().__init__(method='trf',
+    def __init__(self, ftol=1e-10, xtol=1e-10, gtol=1e-10, loss='linear', jac='auto', covariance=True, **kwargs):
+        super().__init__(method='trf', covariance=covariance,
         ftol=ftol,     # Force stricter gradient/cost progression
         xtol=xtol,
         gtol=gtol,
@@ -296,7 +295,7 @@ class ScipyDogBox(ScipyFitter):
     -----
     ``dogbox`` can be effective for tightly box-constrained problems with a modest
     number of free parameters. Prism keeps the same diagnostics and covariance
-    handling as :class:`ScipyTRF`.
+    handling as :class:`TRF`.
     """
     def __init__(self, **kwargs):
         super().__init__(method='dogbox', **kwargs)

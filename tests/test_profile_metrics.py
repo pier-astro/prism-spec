@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 from astropy import units as u
-from prism.modeling.line_analysis import profile_metrics
+from prism.modeling.lines.measurements import profile_metrics
 
 
 def test_sampled_gaussian_mixture_moments_and_units():

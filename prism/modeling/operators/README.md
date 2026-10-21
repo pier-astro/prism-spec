@@ -14,8 +14,7 @@ still depend on parameters: their matrix must be evaluated with those parameters
 
 ## Native expression nodes
 
-Use `Model.from_astropy(source) | operator` to apply an operator without Astropy
-compound-model evaluation. Each application evaluates its source on the operator's
+Use `source | operator` to apply an operator to a native model expression. Each application evaluates its source on the operator's
 input grid, applies it, then samples its output on the requested coordinates.
 Nested operators retain their own grids. Multiplicative factors before and after
 an operator describe different expressions and are never reordered.
@@ -26,15 +25,18 @@ an operator describe different expressions and are never reordered.
 - A custom `LinearOperatorModel.get_matrix(x, *parameters)` is evaluated on
   every call. Parameterized operators use a numerical Jacobian of the complete
   expression, including changes in both source and matrix.
-- A general grid-preserving profile transform can be adapted from an Astropy
+- There is no native function-backed interface for arbitrary whole-profile
+  transformations yet. Matrix operators are linear in the incoming values, even
+  when their matrices depend on coordinates or fitted parameters.
+- For interoperability, a general grid-preserving profile transform can be adapted from an Astropy
   model with `evaluate(x, flux, *parameters)`, then applied with `|`. It receives
   the whole upstream profile. Such a transform need not be linear; its parameter
   derivatives alone do not describe its response to the input flux. The complete
   expression therefore uses a numerical Jacobian. Custom transforms require a
   reconstruction rule to save a session.
 
-This separates convolution-like transformations from ordinary multiplicative
-spectral factors without assuming every profile transformation is linear.
+Processing an upstream profile differs from multiplying it by a function of
+coordinates. Neither operation requires a convolution interpretation.
 It does not add OGIP response handling, bin integration of the source model or
 a general custom-transform serialization protocol.
 
@@ -129,7 +131,7 @@ removed intervals; FITS round-trips preserve them in a BINWIDTH extension.
 
 ## Storage
 
-`InstrumentResponse.save_fits()` stores the grid and matrix. Compressed output uses
+`InstrumentResponse.save()` stores the grid and matrix. Compressed output uses
 lossless GZIP compression; floating values are not quantized. This FITS format
 still materializes the matrix densely during storage/loading.
 

@@ -1,26 +1,25 @@
 """Scientific residual/Jacobian contracts of the prepared numerical problem."""
+from line_helpers import make_line
 import numpy as np
 import pytest
 from scipy.sparse import diags
 from astropy.modeling.models import Gaussian1D
 
 from prism.modeling import Model, LinearOperatorModel
-from prism.modeling.models import GaussianLine
 from prism.modeling.fitting.problem import _FitProblem
 
 
-@pytest.mark.parametrize('native', [False, True])
-def test_linked_residual_and_jacobian_with_response_and_selected_samples(native):
+def test_linked_residual_and_jacobian_with_response_and_selected_samples():
     x = np.linspace(4970., 5030., 401)
     selected = x[12:-12:3]
-    a = GaussianLine(amplitude=1., position=5000., fwhm=200.)
-    b = GaussianLine(amplitude=.4, position=5000., fwhm=300.)
+    a = make_line(amplitude=1., position=5000., fwhm=200.)
+    b = make_line(amplitude=.4, position=5000., fwhm=300.)
     a.offset.fixed = True
     b.offset.link = a.offset
     b.amplitude.link = .4*a.amplitude
     b.fwhm.link = 1.5*a.fwhm
     matrix = diags([.25, .5, .25], [-1, 0, 1], shape=(len(x), len(x)), format='csr')
-    source = Model.from_astropy(a) + b if native else a + b
+    source = a + b
     model = source | LinearOperatorModel(matrix, x=x)
     weights = np.linspace(.5, 1.5, len(selected))
     data = np.full(len(selected), .1)

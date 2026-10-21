@@ -1,20 +1,10 @@
 """Utility functions for prism.modeling.fitting."""
 
-import warnings
-
 import numpy as np
 
 _TIE_DERIV_REL_STEP = 1e-7
 _TIE_DERIV_ABS_STEP = 1e-10
 _TIE_DERIV_ZERO_TOL = 1e-12
-_TIED_ANALYTIC_JACOBIAN_MESSAGE = (
-    "\nPrism detected tied parameters together with analytic derivatives available.\n"
-    "If analytic derivatives are being used, tie sensitivities are being estimated\n"
-    "numerically to reduce the Jacobian to the free parameters.\n"
-    "This is usually reliable for smooth ties, but can be inaccurate near non-smooth\n"
-    "links or active bounds. If the fit looks suspicious, retry with a numeric Jacobian\n"
-    "in the fitter settings, e.g. prism.modeling.fitting.ScipyTRF(jac='2-point')"
-)
 
 def _parameter_slices(model):
     """Map public parameter names/sizes to the flattened model vector."""
@@ -72,8 +62,9 @@ def _get_tied_info(model):
     if not model.has_tied:
         return []
     from ..parameters import _ordered_ties
-    items = [(model.tied[name], section, getattr(model, name))
-             for name, section in _parameter_slices(model).items() if model.tied[name]]
+    tied = model.tied
+    items = [(tied[name], section, getattr(model, name))
+             for name, section in _parameter_slices(model).items() if tied[name]]
     return _ordered_ties(model, items)
 
 
@@ -84,26 +75,6 @@ def _apply_tied_fast(model, tied_info, parameters_cache):
         values = _coerce_tied_value_array(tied_func(model), size)
         parameters_cache[section] = values
         parameter.value = values.reshape(parameter.shape)
-
-
-def _prime_tied_analytic_jacobian_warning(model):
-    """Reset the per-fit warning state for tied analytic Jacobians."""
-    model._prism_warn_tied_analytic_jacobian = True
-    model._prism_tied_analytic_jacobian_warned = False
-
-
-def _warn_tied_analytic_jacobian(model, *, stacklevel=3):
-    """Warn once per fit when tie sensitivities are estimated numerically."""
-    if not getattr(model, '_prism_warn_tied_analytic_jacobian', False):
-        return
-    if getattr(model, '_prism_tied_analytic_jacobian_warned', False):
-        return
-    warnings.warn(
-        _TIED_ANALYTIC_JACOBIAN_MESSAGE,
-        UserWarning,
-        stacklevel=stacklevel,
-    )
-    model._prism_tied_analytic_jacobian_warned = True
 
 
 def _coerce_tied_value_array(value, size):
@@ -129,8 +100,9 @@ def _parameter_index_array(model, name):
 def _free_parameter_indices(model):
     """Return flattened free indices in the canonical model parameter order."""
     indices = []
+    fixed, tied = model.fixed, model.tied
     for name, section in _parameter_slices(model).items():
-        if model.fixed[name] or model.tied[name]:
+        if fixed[name] or tied[name]:
             continue
         indices.extend(range(section.start, section.stop))
     return np.asarray(indices, dtype=int)
@@ -144,14 +116,11 @@ def _analytic_jacobian_parameter_major(model, jacobian):
     return derivs.reshape((derivs.shape[0], -1))
 
 
-def _reduce_tied_analytic_jacobian(model, jacobian, *, warn=False, stacklevel=3):
+def _reduce_tied_analytic_jacobian(model, jacobian):
     """Apply the tie-function chain rule to a full analytic Jacobian."""
     full = _analytic_jacobian_parameter_major(model, jacobian).astype(float, copy=True)
     if not model.has_tied:
         return full
-
-    if warn:
-        _warn_tied_analytic_jacobian(model, stacklevel=stacklevel)
 
     original = model.parameters.copy()
     tied_info = _get_tied_info(model)

@@ -1,204 +1,78 @@
+"""Native line components seeded from Prism's packaged AGN transition tables.
+
+Amplitudes are profile peaks, weights multiply each template amplitude once,
+and shared offsets/widths use km/s. Further constraints belong to the caller.
 """
-prism.modeling.models.agn — AGN component factory functions.
-
-Provides convenience constructors that return pre-configured
-``GaussianLines`` (or related) models for the most common AGN emission
-components. Each factory internally calls ``GaussianLines.from_csv()``
-with the appropriate ECSV line list from the package resources.
-
-Factory functions
------------------
-nlr()
-    Narrow Line Region — ``narrow_basic.ecsv``.
-blr()
-    Broad Line Region — hydrogen + helium line lists.
-fe()
-    Optical/UV Fe ˳˳ pseudo-continuum — ``feII_model.ecsv``.
-fe_uv()
-    UV Fe ˳˳ emission — ``uvfe.ecsv``.
-balmer()
-    Balmer series with tied relative amplitudes — ``balmer.ecsv``.
-
-All factories forward extra keyword arguments to ``GaussianLines.from_csv()``
-(e.g. ``instfwhm``, ``bounds``, ``amplitude``).
-"""
-from .lines import GaussianLines
-from . import lines as lines_module
+from pathlib import Path
+from astropy import units as u
+from ..lines import GaussianLines
+from ..lines import tables
 
 __all__ = ['nlr', 'blr', 'fe', 'fe_uv', 'balmer']
 
 
-def _from_builtin(csv_files, *, name, dirpath=None, **kwargs):
-    """Build a ``GaussianLines`` model from Prism's packaged AGN line lists.
+def _from_builtin(files, *, name, dirpath=None, amplitude=1., offset=0.,
+                  fwhm=1000., redshift=0., instfwhm=0., bounds=None):
+    directory = Path(tables.linetable_path if dirpath is None else dirpath)
+    files = [files] if isinstance(files, str) else files
+    table = tables.stack_linetables([tables.read_linetable(directory/path) for path in files])
+    if tables._wmin is not None or tables._wmax is not None:
+        wavelength = table['position'].to_value(u.AA, equivalencies=u.spectral())
+        mask = wavelength == wavelength
+        if tables._wmin is not None:
+            mask &= wavelength >= tables._wmin
+        if tables._wmax is not None:
+            mask &= wavelength <= tables._wmax
+        table = table[mask]
+    return GaussianLines(table, amplitude=amplitude, offset=offset, fwhm=fwhm,
+                         redshift=redshift, instfwhm=instfwhm, bounds=bounds, name=name)
 
-    Parameters
-    ----------
-    csv_files : str or sequence of str
-        Built-in line-table filename or filenames.
-    name : str
-        Model name assigned to the returned component.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's current line
-        table path.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`.
-
-    Returns
-    -------
-    GaussianLines
-        Pre-configured line-group model built from the requested templates.
-    """
-    base_dir = lines_module.linetable_path if dirpath is None else dirpath
-    return GaussianLines.from_csv(csv_files, name=name, dirpath=base_dir, **kwargs)
 
 def nlr(name='nlr', dirpath=None, **kwargs):
-    """Return the default narrow-line-region emission model.
+    """Create a native narrow-line-region component from ``narrow_basic.ecsv``.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name assigned to the returned model. Default is ``'nlr'``.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's packaged line
-        resources.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`, such as
-        ``amplitude``, ``offset``, ``fwhm``, ``instfwhm``, or ``bounds``.
-
-    Returns
-    -------
-    GaussianLines
-        Gaussian line-group model built from ``narrow_basic.ecsv``.
-
-    Notes
-    -----
-    This helper is the compact starting point for classical narrow forbidden and
-    recombination features. It uses Prism's curated narrow-line template with one
-    shared kinematic solution across all included transitions.
-
-    Examples
-    --------
-    >>> narrow = nlr(amplitude=1.0, fwhm=250.0, instfwhm=120.0)
-    >>> narrow.name
-    'nlr'
+    Keyword arguments set peak amplitude, shared offset/FWHM (km/s), redshift,
+    instrumental FWHM and parameter bounds. ``amplitude`` bounds apply to every
+    template; redshift starts fixed. The current line-table directory is used.
     """
     return _from_builtin('narrow_basic.ecsv', name=name, dirpath=dirpath, **kwargs)
 
+
 def blr(name='blr', dirpath=None, **kwargs):
-    """Return the default broad-line-region emission model.
+    """Create a native broad-line component from hydrogen and helium tables.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name assigned to the returned model. Default is ``'blr'``.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's packaged line
-        resources.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`.
-
-    Returns
-    -------
-    GaussianLines
-        Gaussian line-group model built from the packaged hydrogen and helium
-        broad-line templates.
-
-    Notes
-    -----
-    The broad-line-region template combines the main hydrogen and helium series so
-    one helper can seed the high-velocity permitted-line component of an AGN fit.
-    Relative wavelengths remain fixed by the underlying line lists, while widths
-    and offsets are fitted globally.
+    Positions and relative weights come from the tables; templates have separate
+    peak amplitudes and one shared offset and width in km/s. See ``nlr`` for the
+    initialization options. Redshift starts fixed.
     """
     return _from_builtin(['hydrogen.ecsv', 'helium.ecsv'], name=name, dirpath=dirpath, **kwargs)
 
+
 def fe(name='fe', dirpath=None, **kwargs):
-    """Return the default optical Fe II pseudo-continuum model.
+    """Create the optical Fe II component from ``feII_model.ecsv``.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name assigned to the returned model. Default is ``'fe'``.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's packaged line
-        resources.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`.
-
-    Returns
-    -------
-    GaussianLines
-        Gaussian line-group model built from ``feII_model.ecsv``.
-
-    Notes
-    -----
-    The optical Fe II forest is represented as a dense template group. Repeated
-    template names are tied automatically by ``GaussianLines``, which keeps the
-    parameter count compact while preserving the physically tabulated multiplet
-    structure.
+    The returned native LineSet shares kinematics across the tabulated
+    multiplets. Each template retains its own amplitude. See ``nlr`` for peak,
+    width, instrumental broadening and bounds options.
     """
     return _from_builtin('feII_model.ecsv', name=name, dirpath=dirpath, **kwargs)
 
+
 def fe_uv(name='fe_uv', dirpath=None, **kwargs):
-    """Return the default ultraviolet Fe II emission model.
+    """Create the native UV Fe II component from ``uvfe.ecsv``.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name assigned to the returned model. Default is ``'fe_uv'``.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's packaged line
-        resources.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`.
-
-    Returns
-    -------
-    GaussianLines
-        Gaussian line-group model built from ``uvfe.ecsv``.
-
-    Notes
-    -----
-    This helper targets the UV Fe II complexes with the same tied-template logic
-    used for the optical Fe II component, but with a dedicated ultraviolet line
-    list.
+    Tabulated relative weights multiply template peak amplitudes. Kinematics are
+    shared within this component. See ``nlr`` for initialization, instrumental
+    broadening and parameter-bound options.
     """
     return _from_builtin('uvfe.ecsv', name=name, dirpath=dirpath, **kwargs)
 
+
 def balmer(name='balmer', dirpath=None, **kwargs):
-    """Return the default Balmer-series line-group model.
+    """Create the native Balmer-series component from ``balmer.ecsv``.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name assigned to the returned model. Default is ``'balmer'``.
-    dirpath : str, optional
-        Directory containing the line tables. Default uses Prism's packaged line
-        resources.
-    **kwargs
-        Additional keyword arguments forwarded to
-        :meth:`prism.modeling.models.GaussianLines.from_csv`.
-
-    Returns
-    -------
-    GaussianLines
-        Gaussian line-group model built from ``balmer.ecsv``.
-
-    Notes
-    -----
-    The Balmer helper is useful when the relative series structure should remain
-    tied while one kinematic component describes the whole Balmer blend. This is a
-    good starting point for pseudo-continuum or recombination-line submodels.
-
-    Examples
-    --------
-    >>> bal = balmer(amplitude=1.0, fwhm=800.0)
-    >>> 'balmer' in bal.name
-    True
+    The tabulated transitions preserve their relative weights and template
+    membership, with common kinematics. See ``nlr`` for initialization,
+    instrumental broadening and parameter-bound options.
     """
     return _from_builtin('balmer.ecsv', name=name, dirpath=dirpath, **kwargs)

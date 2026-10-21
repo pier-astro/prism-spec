@@ -1,35 +1,16 @@
 # Models
 
-`prism.modeling.models` contains Prism spectral model classes built on top of Astropy's modeling framework.
+This collection contains specialized continuum, empirical and spatial models,
+and AGN factories. The generic component architecture, parameter graph and fitting
+engines are native Prism infrastructure. External Astropy models enter it through
+`Model.from_astropy`; optional display extensions require explicit activation.
 
-## Core Principle
+Line profiles, transition tables and native `LineSet` live in `modeling.lines`.
+The `nlr`, `blr`, `fe`, `fe_uv` and `balmer` factories build native components from
+those tables and profiles. Historical Astropy line subclasses are removed.
 
-Prism models are Astropy-style models first.
-
-That means:
-
-- Prism line, continuum, and empirical models subclass Astropy modeling base classes
-- parameters, units, composition, and fitter interaction stay as close as possible to Astropy behavior
-- native Astropy models can still be mixed with Prism models in compound expressions
-
-## What Prism Adds
-
-Prism adds domain-specific behavior around:
-
-- spectral line families and tied templates
-- component extraction and display helpers
-- serialization metadata for fitted models
-- uncertainty metadata attached to fitted model instances
-
-Those additions are intended to stay explicit and readable rather than replacing Astropy with a hidden parallel model system.
-
-## Display And Transparency
-
-Prism enables enhanced model display at import time so that models print cleanly in terminals and notebooks.
-
-This is a convenience patch, not a structural compatibility patch. It can be disabled when needed, but it is enabled by default because inspecting fitted models is a central Prism workflow.
-
-The underlying model objects remain Astropy-compatible models.
+Existing continuum, empirical and spatial Astropy models remain interoperable;
+their own migration is independent of removing the duplicate line infrastructure.
 
 ## Spatial PSF models
 
@@ -41,4 +22,4 @@ It remains centrosymmetric; axis labels do not impose major/minor ordering.
 
 Native Astropy Gaussian2D remains supported (its `x_fwhm` and `y_fwhm`
 properties already expose the derived FWHM). The chromatic workflow and
-compact model persistence are documented under `prism.modeling.psf`.
+compact model persistence are documented under `prism.psf`.

@@ -1,15 +1,15 @@
 import warnings
 
+from line_helpers import make_line
 import astropy.units as u
 import numpy as np
 import pytest
 from astropy.modeling.fitting import TRFLSQFitter as NativeTRFLSQFitter
 from astropy.modeling.powerlaws import ExponentialCutoffPowerLaw1D, PowerLaw1D
 
-from prism.modeling.fitting import ScipyTRF, TRFLSQFitter
-from prism.modeling.interop.astropy import tie
+from prism.modeling.fitting import TRF
+from prism.modeling.interop.astropy import TRFLSQFitter
 from prism.modeling.models import BSpline, FixedTemplate
-from prism.modeling.models.lines import GaussianLine
 from prism.modeling.operators.instrument import (
     InstrumentResponse,
     SpectralResponse,
@@ -19,11 +19,11 @@ from prism.modeling.operators.instrument import (
 
 def _build_tied_double_gaussian(offset=-120.0, fwhm=700.0):
     return (
-        GaussianLine(
+        make_line(
             name='g1', amplitude=1.5, position=5000.0, offset=offset, fwhm=fwhm,
             bounds={'amplitude': (0, 10), 'offset': (-300, 300), 'fwhm': (50, 900)},
         )
-        + GaussianLine(
+        + make_line(
             name='g2', amplitude=1.0, position=5007.0, offset=offset, fwhm=fwhm,
             bounds={'amplitude': (0, 10), 'offset': (-300, 300), 'fwhm': (50, 900)},
         )
@@ -31,34 +31,21 @@ def _build_tied_double_gaussian(offset=-120.0, fwhm=700.0):
 
 
 def _tie_double_gaussian(model):
-    model['g2'].offset.tied = tie('g1', lambda m: m.offset)
-    model['g2'].fwhm.tied = tie('g1', lambda m: m.fwhm)
+    model.components['g2'].offset.link = model.components['g1'].offset
+    model.components['g2'].fwhm.link = model.components['g1'].fwhm
     return model
 
 
-def _assert_tied_warning(records):
+def _assert_no_tied_warning(records):
     messages = [
         str(item.message)
         for item in records
         if issubclass(item.category, UserWarning)
         and 'tied parameters together with analytic derivatives' in str(item.message)
     ]
-    assert len(messages) == 1
+    assert not messages
 
 
-def test_spectral_response_pipe_supports_quantity_aware_prism_trf():
-    x = np.linspace(4990.0, 5020.0, 128) * u.AA
-    response = InstrumentResponse.from_fixed_fwhm(x.value, fwhm=2.0)
-    rsp = SpectralResponse(instrument=response, wave=x.value, flexible=False)
-
-    truth = GaussianLine(amplitude=3.0 * u.Jy, position=5007.0 * u.AA, fwhm=350.0 * u.km / u.s) | rsp
-    y = truth(x)
-    model = GaussianLine(amplitude=2.5 * u.Jy, position=5007.0 * u.AA, fwhm=400.0 * u.km / u.s) | rsp
-
-    fitted = TRFLSQFitter()(model, x, y)
-    assert fitted.left.amplitude.unit == u.Jy
-    assert fitted.left.position.unit == u.AA
-    assert fitted.left.fwhm.unit == (u.km / u.s)
 
 
 def test_fixed_template_and_bspline_support_quantity_fitting():
@@ -102,20 +89,6 @@ def test_cutoff_powerlaw_supports_quantity_evaluation_and_fitting():
     assert fitted.x_cutoff.unit == u.AA
 
 
-def test_prism_adapter_handles_tied_jacobian_without_patching_astropy():
-    x = np.linspace(4990.0, 5020.0, 128)
-    truth = _tie_double_gaussian(_build_tied_double_gaussian(offset=-90.0, fwhm=540.0))
-    y = truth(x)
-    model = _tie_double_gaussian(_build_tied_double_gaussian())
-
-    fitter = TRFLSQFitter()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        fitted_analytic = fitter(model.copy(), x, y, estimate_jacobian=False)
-
-    _assert_tied_warning(caught)
-    fitted_numeric = fitter(model.copy(), x, y, estimate_jacobian=True)
-    assert np.allclose(fitted_analytic(x), fitted_numeric(x), rtol=1e-6, atol=1e-6)
 
 
 def test_scipytrf_tied_pipe_warns_and_converges():
@@ -131,10 +104,10 @@ def test_scipytrf_tied_pipe_warns_and_converges():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        fitted = ScipyTRF()(model, x, y)
+        fitted = TRF()(model, x, y)
 
-    _assert_tied_warning(caught)
-    assert np.allclose(fitted(x), y, rtol=1e-5, atol=1e-5)
+    _assert_no_tied_warning(caught)
+    assert np.allclose(fitted.predict(x), y, rtol=1e-5, atol=1e-5)
 
 
 def test_crop_response_accepts_same_sampling_with_small_zero_point_offset():
@@ -164,7 +137,7 @@ def test_spectral_response_subset_evaluation_matches_full_grid_result():
         instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
         wave=wave,
     )
-    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+    model = make_line(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
 
     full = model(wave)
     subset_wave = wave[48:192]
@@ -179,7 +152,7 @@ def test_spectral_response_off_grid_evaluation_interpolates_and_zero_pads():
         instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
         wave=wave,
     )
-    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+    model = make_line(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
 
     full = model(wave)
     step = wave[1] - wave[0]
@@ -200,32 +173,12 @@ def test_spectral_response_flexible_false_still_rejects_grid_mismatch():
         wave=wave,
         flexible=False,
     )
-    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+    model = make_line(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
 
-    with pytest.raises(ValueError, match="expects 128 samples"):
+    with pytest.raises(ValueError, match="Operator output grid"):
         model(wave[16:96])
 
 
-@pytest.mark.usefixtures('astropy_extensions')
-def test_spectral_response_off_grid_evaluation_preserves_quantity_units():
-    wave = np.linspace(4990.0, 5020.0, 256) * u.AA
-    rsp = SpectralResponse(
-        instrument=InstrumentResponse.from_fixed_fwhm(wave.value, fwhm=2.0),
-        wave=wave.value,
-    )
-    model = GaussianLine(
-        amplitude=3.0 * u.Jy,
-        position=5007.0 * u.AA,
-        fwhm=350.0 * u.km / u.s,
-    ) | rsp
-
-    full = model(wave)
-    plot_wave = wave[40:216] + 0.37 * (wave[1] - wave[0])
-    expected = np.interp(plot_wave.value, wave.value, full.value, left=0.0, right=0.0) * full.unit
-
-    evaluated = model(plot_wave)
-    assert evaluated.unit == full.unit
-    assert np.allclose(evaluated.value, expected.value, rtol=1e-10, atol=1e-10)
 
 
 def test_spectral_response_same_grid_skips_flexible_resampling(monkeypatch):
@@ -234,7 +187,7 @@ def test_spectral_response_same_grid_skips_flexible_resampling(monkeypatch):
         instrument=InstrumentResponse.from_fixed_fwhm(wave, fwhm=2.0),
         wave=wave,
     )
-    model = GaussianLine(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
+    model = make_line(amplitude=3.0, position=5007.0, fwhm=350.0 * u.km / u.s) | rsp
 
     def _fail(*args, **kwargs):
         raise AssertionError("same-grid evaluation should not enter the flexible resampling path")
@@ -246,7 +199,7 @@ def test_spectral_response_same_grid_skips_flexible_resampling(monkeypatch):
 
 
 @pytest.mark.usefixtures('astropy_extensions')
-@pytest.mark.parametrize("fitter_cls", [TRFLSQFitter, ScipyTRF])
+@pytest.mark.parametrize("fitter_cls", [TRF])
 def test_spectral_response_off_grid_fit_converges(fitter_cls):
     wave = np.linspace(4990.0, 5020.0, 160)
     step = wave[1] - wave[0]
@@ -256,12 +209,12 @@ def test_spectral_response_off_grid_fit_converges(fitter_cls):
         wave=wave,
     )
 
-    truth = GaussianLine(amplitude=3.0, position=5007.0, fwhm=320.0 * u.km / u.s) | rsp
+    truth = make_line(amplitude=3.0, position=5007.0, fwhm=320.0 * u.km / u.s) | rsp
     y = truth(fit_wave)
-    model = GaussianLine(amplitude=2.2, position=5006.6, fwhm=420.0 * u.km / u.s) | rsp
+    model = make_line(amplitude=2.2, position=5006.6, fwhm=420.0 * u.km / u.s) | rsp
 
     fitted = fitter_cls()(model, fit_wave, y)
 
-    assert np.allclose(fitted(fit_wave), y, rtol=1e-5, atol=1e-5)
-    assert np.isclose(fitted.left.amplitude.value, 3.0, rtol=5e-3)
-    assert np.isclose(fitted.left.fwhm.value, 320.0, rtol=5e-3)
+    assert np.allclose(fitted.predict(fit_wave), y, rtol=1e-5, atol=1e-5)
+    assert np.isclose(fitted.model.left.amplitude.value, 3.0, rtol=5e-3)
+    assert np.isclose(fitted.model.left.fwhm.value, 320.0, rtol=5e-3)

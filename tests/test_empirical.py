@@ -1,7 +1,7 @@
 import numpy as np
 from astropy.stats import sigma_clip
 
-from prism.modeling.fitting import FittingWithOutlierRemoval, ScipyTRF
+from prism.modeling.fitting import FittingWithOutlierRemoval, TRF
 from prism.modeling.models import BSpline, FixedTemplate, get_components
 
 
@@ -60,7 +60,7 @@ def test_empirical_subtraction_multifit_workflow():
     cube[1, 0, 70] += 0.7
 
     fitter = FittingWithOutlierRemoval(
-        ScipyTRF(calc_uncertainties=True),
+        TRF(covariance=True),
         outlier_func=sigma_clip,
         niter=2,
         sigma_lower=3.0,

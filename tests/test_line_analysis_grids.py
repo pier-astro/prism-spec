@@ -1,13 +1,14 @@
 """Independent finite-window Gaussian moments and grid contracts."""
+from line_helpers import make_line
 import numpy as np
 import pytest
 from astropy import units as u
-from prism.modeling.models.lines import GaussianLine, profiles
-from prism.modeling.line_analysis import select_line
+from prism.modeling.lines import profiles
+from prism.modeling.lines.measurements import select_line
 
 
 def test_gaussian_moments_and_descending_quantity_grid():
-    line = GaussianLine(position=5000., amplitude=2., fwhm=200., name="line")
+    line = make_line(position=5000., amplitude=2., fwhm=200., name="line")
     selected = select_line(line, "line")
     sigma = 5000. * 200. / profiles.C_KMS / profiles.SIGMA2FWHM
     x = np.linspace(5000. - 10*sigma, 5000. + 10*sigma, 10001)
@@ -28,14 +29,14 @@ def test_gaussian_moments_and_descending_quantity_grid():
 @pytest.mark.parametrize('x', [[1.,2.], [1.,2.,2.], [1.,3.,2.], [1.,np.nan,3.], [1.,2.,np.inf]])
 @pytest.mark.parametrize('sample', [False, True])
 def test_measurement_and_sampling_reject_invalid_grid_before_sampling(x, sample):
-    selected = select_line(GaussianLine(name="line"), "line")
+    selected = select_line(make_line(name="line"), "line")
     operation = selected.sample if sample else selected.measure
     with pytest.raises(ValueError, match='spectral grid|monotonic'):
         operation(x=x)
 
 
 def test_sampling_uses_same_grid_orientation_and_leaves_model_unchanged():
-    line = GaussianLine(position=5000., amplitude=2., fwhm=200., name="line")
+    line = make_line(position=5000., amplitude=2., fwhm=200., name="line")
     line.amplitude.std = .1
     selected = select_line(line, "line")
     x = np.linspace(4980., 5020., 1001)

@@ -12,7 +12,7 @@ def test_response_fits_roundtrip_is_lossless(tmp_path, compress):
     x = np.linspace(4990., 5010., 151)
     response = InstrumentResponse.from_fixed_sigma(x, .6)
     target = tmp_path/'response.fits'
-    response.save_fits(target, compress=compress)
+    response.save(target, compress=compress)
     restored = InstrumentResponse.from_fits(target)
     np.testing.assert_array_equal(restored.wavelength_grid, x)
     np.testing.assert_array_equal(restored.response_matrix.toarray(), response.response_matrix.toarray())
@@ -153,7 +153,7 @@ def test_direct_response_model_fits_roundtrip(tmp_path):
 def test_parameter_dependent_operator_is_not_frozen():
     from astropy.modeling import Parameter
     from prism.modeling.operators import LinearOperatorModel
-    from prism.modeling.fitting import ScipyTRF
+    from prism.modeling.fitting import TRF
     from prism.modeling.fitting.evaluation import _ModelEvaluation
 
     class Gain(LinearOperatorModel):
@@ -173,8 +173,8 @@ def test_parameter_dependent_operator_is_not_frozen():
     model = source | Gain(matrix=csr_matrix(np.eye(len(x))), x=x)
     assert not _ModelEvaluation(model, x).stateless
     y = 6*np.exp(-.5*((x-.2)/.8)**2)
-    fitted = ScipyTRF()(model, x, y)
-    np.testing.assert_allclose(fitted.right.gain.value, 3., atol=1e-9)
+    fitted = TRF()(model, x, y)
+    np.testing.assert_allclose(fitted.model.right.gain.value, 3., atol=1e-9)
 
 
 @pytest.mark.parametrize('recipe', [{'type': 'direct'}, {'type': 'unsupported'},

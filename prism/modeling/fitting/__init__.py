@@ -1,44 +1,19 @@
+"""Numerical single/joint fits, rejection, uncertainties and independent batches.
+
+SciPy and Sherpa use Prism's common numerical problem. Astropy fitter adapters
+are available in modeling.interop.astropy; experimental solvers in prism.experimental.
 """
-prism.modeling.fitting — fitter backends, Astropy-style wrappers, and batch fitting utilities.
-
-This package exposes Prism-native fitters together with Prism-owned wrappers
-around selected Astropy fitters. Native ``astropy.modeling.fitting`` classes
-are no longer patched broadly.
-
-Main classes
-------------
-ScipyFitter / ScipyTRF / ScipyDogBox
-	Wrappers around ``scipy.optimize.least_squares``.
-LMFitter
-	Classic Levenberg–Marquardt with internal parameter transforms for bounds.
-SherpaFitter / SherpaLM / SherpaSimplex / SherpaMonCar
-	Sherpa backend fitters (when Sherpa is installed).
-FittingWithOutlierRemoval
-	Iterative sigma-clipping wrapper around any fitter.
-
-Batch objects
--------------
-MultiFitResult, SpectrumFitResult, MultiFitParameter
-	Structured outputs for batched fits across cubes/maps.
-"""
-
-from . import astropyfitters, utils, lmfit, scipyfit, sherpafit, outremoval, multifit, uncertainty, separable
-from .astropyfitters import *
+from . import utils, scipyfit, sherpafit, outremoval, multifit, uncertainty
 from .utils import apply_tied
+from .data import Dataset
+from .results import FitResult
 from .scipyfit import *
 from .sherpafit import *
-from .lmfit import *
 from .multifit import *
 from .outremoval import *
-from .separable import *
 
+__all__ = ['Dataset', 'FitResult', 'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter']
+__all__ += scipyfit.__all__ + sherpafit.__all__ + outremoval.__all__
 
-__all__ = [
-    'apply_tied', 'MultiFitResult', 'SpectrumFitResult', 'MultiFitParameter'
-]
-__all__.extend(astropyfitters.__all__)
-__all__.extend(scipyfit.__all__)
-__all__.extend(sherpafit.__all__)
-__all__.extend(lmfit.__all__)
-__all__.extend(outremoval.__all__)
-__all__.extend(separable.__all__)
+from .extension import get_max_evaluations, set_max_evaluations
+__all__ += ['get_max_evaluations', 'set_max_evaluations']

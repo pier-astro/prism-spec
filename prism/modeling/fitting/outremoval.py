@@ -5,10 +5,12 @@ from astropy.modeling.fitting import Fitter
 from .extension import _fitter_covariance, _fitter_stdevs, _validate_native_inputs
 from .data import _prepare_fit_data
 from .multifit import MultiFitMixin
+from .single import _SingleFitMixin
+from .data import _resolve_fit_inputs
 
 __all__ = ['FittingWithOutlierRemoval']
 
-class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
+class FittingWithOutlierRemoval(_SingleFitMixin, MultiFitMixin, Fitter):
     """
     Iterative outlier-rejection wrapper around any Prism fitter.
 
@@ -47,12 +49,9 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
         self.outlier_mask = None
 
     @property
-    def calc_uncertainties(self):
-        return getattr(self._fitter, 'calc_uncertainties', False)
+    def _estimate_covariance(self):
+        return getattr(self._fitter, '_estimate_covariance', getattr(self._fitter, 'calc_uncertainties', False))
 
-    @calc_uncertainties.setter
-    def calc_uncertainties(self, value):
-        self._fitter.calc_uncertainties = value
 
     @property
     def verbose(self):
@@ -80,11 +79,13 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
             worker_fitter._fitter = copy.copy(self._fitter)
         return worker_fitter
 
-    def __call__(self, model, x, y, z=None, weights=None, **kwargs):
+    def _fit_single(self, model, x, y=None, z=None, weights=None, **kwargs):
         yerr = kwargs.pop('yerr', None)
+        model, x, y, yerr, weights, mask = _resolve_fit_inputs(
+            model, x, y, z, yerr, weights, kwargs.pop('mask', None))
         _validate_native_inputs(model, x, y, z, yerr, weights)
         x, y, yerr, weights, valid = _prepare_fit_data(
-            x, y, yerr, weights, kwargs.pop('mask', None),
+            x, y, yerr, weights, mask,
             filter_non_finite=kwargs.pop('filter_non_finite', False))
         if self.niter < 0:
             raise ValueError('niter must be nonnegative.')
@@ -100,7 +101,8 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
 
         for iteration in range(self.niter + 1):
             # Pass one effective weighting, so errors cannot undo rejection.
-            best_model = self._fitter(model, x, y, z=z, weights=weights.copy(), **kwargs)
+            fit = getattr(self._fitter, '_fit_single', self._fitter)
+            best_model = fit(model, x, y, z=z, weights=weights.copy(), **kwargs)
             self.fit_info = getattr(self._fitter, 'fit_info', {})
             if not self.fit_info.get('success', False) or iteration == self.niter:
                 break
@@ -127,4 +129,5 @@ class FittingWithOutlierRemoval(MultiFitMixin, Fitter):
             weights[rejected] = 0.
 
         self.outlier_mask = rejected
+        self._fit_mask = ~rejected
         return best_model

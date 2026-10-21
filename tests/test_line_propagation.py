@@ -1,13 +1,15 @@
+from prism.modeling import Model
 """Independent propagation checks for covariance, links and equivalent width."""
+from line_helpers import make_line, make_group
 import numpy as np
 import pytest
 from astropy.modeling.models import Const1D
-from prism.modeling.models.lines import GaussianLine, profiles
-from prism.modeling.line_analysis import select_line
+from prism.modeling.lines import profiles
+from prism.modeling.lines.measurements import select_line
 
 
 def line_model():
-    line = GaussianLine(position=5000., amplitude=4., fwhm=200., name='line')
+    line = make_line(position=5000., amplitude=4., fwhm=200., name='line')
     line.offset.fixed = True
     line.fwhm.fixed = True
     return line
@@ -102,8 +104,7 @@ def test_expanded_cube_covariance_uses_explicit_free_indices():
 
 
 def test_sampled_eqw_keeps_explicit_member_of_tied_template():
-    from prism.modeling.models.lines import GaussianLines
-    group = GaussianLines.from_arrays(names=['pair','pair'], pos=[5000.,5010.],
+    group = make_group(names=['pair','pair'], pos=[5000.,5010.],
                                       weights=[1.,.5], amplitude=4., fwhm=200., position_unit='AA')
     group.offset.fixed = True
     group.fwhm.fixed = True
@@ -160,7 +161,7 @@ def test_explicit_response_selection_retains_driver_covariance_and_intrinsic_flu
 
 
 def test_sampling_uses_ordered_nonlinear_link_chain_from_shared_mapping():
-    model = Const1D(2., name='driver') + Const1D(4., name='middle') + line_model()
+    model = Model.from_astropy(Const1D(2., name='driver') + Const1D(4., name='middle')) + line_model()
     model.amplitude_1.tied = lambda m: m.amplitude_0**2
     model.amplitude_2.tied = lambda m: 3*m.amplitude_1
     model.amplitude_2 = 12.

@@ -11,7 +11,7 @@ from astropy.wcs import WCS
 warnings.filterwarnings('ignore', message=r'scipy\.misc is deprecated.*', category=DeprecationWarning)
 
 from prism.data import Cube, Image, RegionMeasurement, Spectrum
-from prism.modeling.fitting import ScipyTRF
+from prism.modeling.fitting import TRF
 from prism.modeling.fitting.uncertainty.resample import ResampleError, bootstrap
 
 
@@ -73,12 +73,12 @@ def test_single_spectrum_fit_workflow():
     )
 
     init = models.Const1D(0.1, name='cont') + models.Gaussian1D(1.0, 4999.0, 1.8, name='line')
-    fitter = ScipyTRF(calc_uncertainties=True)
+    fitter = TRF(covariance=True)
     fitted = fitter(init, x=spec.x, y=spec.y, yerr=spec.yerr, inplace=False)
 
-    assert np.isfinite(fitted.amplitude_1.value)
-    assert abs(fitted.mean_1.value - 5000.0) < 0.5
-    assert fitted.stddev_1.value > 0.0
+    assert np.isfinite(fitted.model.amplitude_1.value)
+    assert abs(fitted.model.mean_1.value - 5000.0) < 0.5
+    assert fitted.model.stddev_1.value > 0.0
 
 
 def test_cube_image_workflow_and_native_fits_units(tmp_path):
@@ -166,7 +166,7 @@ def test_cube_image_workflow_and_native_fits_units(tmp_path):
         _ = loaded.wave
 
     written = tmp_path / 'cube_written_units.fits'
-    loaded.write(written, overwrite=True)
+    loaded.save(written, overwrite=True)
     with fits.open(written) as hdul:
         assert hdul['DATA'].header['CUNIT3'] == 'nm'
     written_loaded = Cube.from_fits(written)
@@ -496,7 +496,7 @@ def test_multifit_uses_binmap_representatives():
             slope, intercept = params[int(binmap[j, i])]
             true_cube[j, i] = intercept + slope * x
 
-    fitter = ScipyTRF()
+    fitter = TRF()
     init = models.Linear1D(slope=0.0, intercept=0.0)
     result = fitter.multifit(init, x, true_cube, binmap=binmap, nproc=1, progress=False)
 
@@ -516,7 +516,7 @@ def test_bootstrap_uncertainty_boundaries():
     sym = np.full_like(x, 0.1)
     asym = np.vstack([np.full_like(x, 0.08), np.full_like(x, 0.12)])
 
-    fitter = ScipyTRF()
+    fitter = TRF()
     model = models.Linear1D(slope=0.3, intercept=1.8)
 
     with pytest.raises(ValueError, match='Asymmetric yerr'):

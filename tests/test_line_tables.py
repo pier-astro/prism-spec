@@ -1,10 +1,12 @@
 import numpy as np
+from line_helpers import make_line, make_group
 import pytest
 import astropy.units as u
 from astropy.table import QTable
 
-from prism.modeling.models.lines import GaussianLine, GaussianLines, profiles, setup_local_lines, trim_line_lists
-from prism.modeling.models.lines import tables as line_tables
+from prism.modeling.lines import profiles
+from prism.modeling.lines import setup_local_lines, trim_line_lists
+from prism.modeling.lines import tables as line_tables
 from prism.utils.tools import air_to_vac
 
 
@@ -101,7 +103,7 @@ def test_plain_csv_requires_explicit_position_unit(tmp_path):
 def test_from_arrays_requires_explicit_position_unit_for_plain_arrays():
     """Bare float arrays must always come with an explicit position_unit."""
     line_tables.set_wavelength_range(wmin=0.0, wmax=1.0e9)
-    model = GaussianLines.from_arrays(
+    model = make_group(
         names=['HeII1640'],
         pos=[1640.42],
         amplitude=1.0,
@@ -109,14 +111,14 @@ def test_from_arrays_requires_explicit_position_unit_for_plain_arrays():
         position_unit=u.AA,
     )
 
-    np.testing.assert_allclose(model.lines['position'].to_value(u.AA), [1640.42])
-    assert model.lines['position'].unit == u.AA
+    np.testing.assert_allclose(np.asarray(model.component._setup['lines']['position']), [1640.42])
+    assert model.component._setup['unit'] == u.AA.to_string()
 
 
 def test_from_arrays_raises_without_position_unit():
     """Passing bare floats without position_unit must raise a clear error."""
     with pytest.raises(ValueError, match='position_unit'):
-        GaussianLines.from_arrays(
+        make_group(
             names=['HeII1640'],
             pos=[1640.42],
             amplitude=1.0,
@@ -171,13 +173,13 @@ def test_native_kinematics_linear_vs_wavelength_domain():
     ev_grid = (lam * u.AA).to_value(u.eV, equivalencies=u.spectral())
 
     # domain_family is inferred from the unit on position
-    wavelength_model = GaussianLine(
+    wavelength_model = make_line(
         amplitude=3.0,
         position=pos_aa * u.AA,      # length unit -> 'wavelength' kinematics
         fwhm=fwhm_kms * u.km / u.s,
         redshift=z,
     )
-    linear_model = GaussianLine(
+    linear_model = make_line(
         amplitude=3.0,
         position=pos_ev * u.eV,      # energy unit -> 'linear' kinematics
         fwhm=fwhm_kms * u.km / u.s,
@@ -196,12 +198,35 @@ def test_native_kinematics_linear_vs_wavelength_domain():
 
 
 def test_agn_factory_uses_current_local_line_table_path(tmp_path,monkeypatch):
-    from prism.modeling.models import agn,lines
-    from prism.modeling.models.lines import tables
+    from prism.modeling.models import agn
+    from prism.modeling.lines import tables
     for name in ('linetable_path','_wmin','_wmax'):
         monkeypatch.setattr(tables,name,getattr(tables,name))
     setup_local_lines(min=4700,max=7000,dirpath=str(tmp_path/'lines'))
-    assert lines.linetable_path==str(tmp_path/'lines')
-    assert lines._wmin==4700 and lines._wmax==7000
+    assert tables.linetable_path==str(tmp_path/'lines')
+    assert tables._wmin==4700 and tables._wmax==7000
     iron=agn.fe(name='iron',fwhm=1200)
-    assert iron.name=='iron' and len(iron.lines)>0
+    assert iron.name=='iron' and len(iron.component._setup['lines']['name'])>0
+
+
+@pytest.mark.parametrize("conversion", ["domain", "medium"])
+@pytest.mark.parametrize("selection", ["file", "directory", "sequence"])
+def test_table_converters_accept_path_objects(tmp_path, conversion, selection):
+    source = tmp_path / "source"
+    source.mkdir()
+    path = source / "lines.ecsv"
+    _write_ecsv(path, [4958.911, 5006.843, 6562.8])
+    output = tmp_path / "converted"
+    paths = {"file": path, "directory": source, "sequence": [path]}[selection]
+    if conversion == "domain":
+        line_tables.convert_domain_csv(paths, u.eV, output_dir=output)
+    else:
+        line_tables.convert_medium_csv(paths, "vacuum", output_dir=output)
+    result = QTable.read(output / "lines.ecsv", format="ascii.ecsv")
+    if conversion == "domain":
+        expected = (np.array([4958.911, 5006.843, 6562.8])*u.AA).to_value(
+            u.eV, equivalencies=u.spectral())
+        np.testing.assert_allclose(result["position"].to_value(u.eV), expected)
+    else:
+        assert result.meta["medium"] == "vacuum"
+        assert np.all(result["position"].to_value(u.AA) > [4958.911, 5006.843, 6562.8])

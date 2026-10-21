@@ -1003,7 +1003,7 @@ class Image:
 
         return cls(values=values, err=err, var=var, x=x, y=y, mask=loaded_mask, wcs=wcs, header=headers, unit=unit, binmap=loaded_binmap, dtype=dtype)
 
-    def write(self, filename, overwrite=False, err=True, mask=False, cd_matrix=False, is_var=None, binmap=False):
+    def save(self, filename, overwrite=False, err=True, mask=False, cd_matrix=False, is_var=None, binmap=False):
         """Write the image data to a FITS file.
 
         Parameters
@@ -1027,7 +1027,7 @@ class Image:
             
         Examples
         --------
-        >>> image.write('output_image.fits', overwrite=True, err=True)
+        >>> image.save('output_image.fits', overwrite=True, err=True)
         """
         from prism.data.cube import wcs_to_cd_matrix
 

@@ -93,7 +93,7 @@ def _format_value(value):
 
 def _format_unit(unit):
     if unit in (None, ''):
-        return '—'
+        return ''
     try:
         return u.Unit(unit).to_string()
     except Exception:
@@ -172,6 +172,17 @@ def _iter_rows(model):
     else:
         index_to_name = {}
 
+    from .lines.profiles import GaussianProfile, LorentzianProfile, VoigtProfile
+    # Display known numeric profile conventions without changing parameter/link units.
+    display_units = {}
+    leaves = ModelComponents(model, additive=False)
+    for index in leaves.indices:
+        leaf = leaves[index]
+        if isinstance(getattr(leaf, '_profile', None), (GaussianProfile, LorentzianProfile, VoigtProfile)):
+            for name in ('offset', 'fwhm', 'fwhm_G', 'fwhm_L'):
+                if name in leaf.param_names:
+                    display_units[id(getattr(leaf, name))] = u.km/u.s
+
     for param_name in model.param_names:
         param = getattr(model, param_name)
         component_index = _component_index(param_name) if _is_compound(model) else None
@@ -181,7 +192,7 @@ def _iter_rows(model):
             'component': component,
             'parameter': param_name,
             'value': _format_value(getattr(param, 'value', param)),
-            'unit': _format_unit(getattr(param, 'unit', None)),
+            'unit': _format_unit(getattr(param, 'unit', None) or display_units.get(id(param))),
             'fixed': bool(getattr(param, 'fixed', False)),
             'tied': tied not in (False, None),
             'bounds': _format_bounds(getattr(param, 'bounds', None)),

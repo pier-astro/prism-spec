@@ -1,9 +1,11 @@
+from prism.modeling.lines import LineSet, GaussianProfile
 from pathlib import Path
 import inspect
 
 from prism.data import Cube, Image, RegionMeasurement, Spectrum
-from prism.modeling.fitting import FittingWithOutlierRemoval, LMFitter, ScipyDogBox, ScipyTRF
-from prism.modeling.line_analysis import (
+from prism.modeling.fitting import FittingWithOutlierRemoval, ScipyDogBox, TRF
+from prism.experimental import LMFitter
+from prism.modeling.lines.measurements import (
     LineResult,
     MultiLineMeasurements,
     measure_line,
@@ -12,10 +14,6 @@ from prism.modeling.line_analysis import (
 from prism.modeling.models import (
     BSpline,
     FixedTemplate,
-    GaussianLine,
-    GaussianLines,
-    LorentzianLine,
-    VoigtLine,
     balmer,
     blr,
     fe,
@@ -26,6 +24,8 @@ from prism.modeling.models import (
 
 def test_core_public_api_docstrings_are_substantive():
     objects = [
+        LineSet,
+        GaussianProfile,
         Spectrum,
         Cube,
         Image,
@@ -35,13 +35,9 @@ def test_core_public_api_docstrings_are_substantive():
         fe,
         fe_uv,
         balmer,
-        GaussianLine,
-        GaussianLines,
-        LorentzianLine,
-        VoigtLine,
-        FixedTemplate,
+                        FixedTemplate,
         BSpline,
-        ScipyTRF,
+        TRF,
         ScipyDogBox,
         LMFitter,
         FittingWithOutlierRemoval,
@@ -64,5 +60,5 @@ def test_readme_uses_current_public_names():
     for stale_name in ('AstroTRF', 'zcorrect', 'wbounds', 'ResponseModel', 'ConvolvedModel'):
         assert stale_name not in text
 
-    for current_name in ('ScipyTRF', 'TRFLSQFitter', 'select_line', 'measure_line', 'InstrumentResponse'):
+    for current_name in ('TRF', 'TRFLSQFitter', 'select_line', 'measure_line', 'InstrumentResponse'):
         assert current_name in text

@@ -102,6 +102,11 @@ def _serialize_model(model, operator_files=None):
     from .parameters import _encode_links
     from .fitting.utils import _get_tied_info
     _get_tied_info(model)  # validate dependencies before saving
+    from .component import _Function
+    leaves = getattr(model, '_components', ())
+    names = [leaf.name for leaf in leaves if isinstance(leaf, _Function)]
+    if len(names) != len(set(names)):
+        raise ValueError('Custom components require unique names for explicit restoration.')
     links = _encode_links(model)
     SessionDumper.operator_files = {} if operator_files is None else operator_files
     SessionDumper.declarative_links = True
@@ -405,6 +410,8 @@ def load_params(filename: str) -> dict:
     """
     params = {}
     with fits.open(filename) as hdul:
+        if hdul[0].header.get('FORMAT') == 'PRISMFIT':
+            raise ValueError('This file stores a FitResult; use FitResult.load(...).')
         ext_names = [hdu.name.upper() for hdu in hdul]
 
         if EXT_PARS in ext_names:
@@ -423,9 +430,12 @@ def load_params(filename: str) -> dict:
     return params
 
 
-def load_model(filename: str):
+def load_model(filename: str, *, components=None):
     """
     Deserialize the model and declarative links stored in a Prism FITS file.
+
+    Custom functions are supplied explicitly as named Component definitions through
+    ``components={name: component}``. Definitions are not mutated.
 
     Requires the file to contain a ``MODEL_DEF`` extension written by
     ``to_fits(model=True)`` (the default).
@@ -436,6 +446,8 @@ def load_model(filename: str):
     except ImportError:
         pass
     with fits.open(filename) as hdul:
+        if hdul[0].header.get('FORMAT') == 'PRISMFIT':
+            raise ValueError('This file stores a FitResult; use FitResult.load(...).')
         if EXT_MODEL not in [h.name.upper() for h in hdul]:
             raise ValueError(
                 f"'{filename}' does not contain a '{EXT_MODEL}' extension. "
@@ -445,6 +457,7 @@ def load_model(filename: str):
         class SessionLoader(astropy_yaml.AstropyLoader):
             pass
         SessionLoader.base_path = Path(filename).resolve().parent
+        SessionLoader.components = {} if components is None else components
         model = yaml.load(yaml_str, Loader=SessionLoader)
         if isinstance(model, dict) and '_prism_links' in model:
             if model['_prism_links'] != 1 or set(model) != {'_prism_links', 'model', 'links'}:

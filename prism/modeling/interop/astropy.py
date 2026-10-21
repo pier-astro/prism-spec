@@ -422,3 +422,9 @@ def install_pipe_patch():
     CompoundModel._prism_linear_operator_patch = True
 
 
+
+
+# Fitters adapt Astropy model/parameter conventions, including 2D fits.
+from .astropyfitters import *
+from .astropyfitters import __all__ as _fitter_exports
+__all__ += _fitter_exports

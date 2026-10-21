@@ -5,7 +5,7 @@ import pytest
 from astropy.modeling import Fittable1DModel, Parameter
 from astropy.modeling.models import Gaussian1D
 
-from prism.modeling.fitting import ScipyTRF, SherpaLM, HAS_SHERPA, apply_tied
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA, apply_tied
 from prism.modeling.fitting.utils import _ParameterMap, _reduce_tied_analytic_jacobian
 
 
@@ -34,20 +34,20 @@ def test_parameter_map_has_one_flattened_order():
     np.testing.assert_array_equal(parameters.free, [2])
 
 
-@pytest.mark.parametrize('fitter_class', [ScipyTRF, pytest.param(
+@pytest.mark.parametrize('fitter_class', [TRF, pytest.param(
     SherpaLM, marks=pytest.mark.skipif(not HAS_SHERPA, reason='Sherpa unavailable'))])
 def test_array_parameter_fit_and_covariance_order(fitter_class):
     x = np.linspace(-1, 1, 51)
     y = 3. + 4.*x + 2.
     model = VectorModel(bias=2., fixed={'bias': True})
-    fitter = fitter_class(calc_uncertainties=True)
+    fitter = fitter_class(covariance=True)
     result = fitter(model, x, y, yerr=np.full(x.size, .1), inplace=False)
     np.testing.assert_allclose(result.parameters, [3., 4., 2.], atol=1e-6)
     np.testing.assert_array_equal(model.parameters, [1., 2., 2.])
     assert fitter.fit_info['nfree'] == 2
     assert fitter.fit_info['dof'] == 49
     assert fitter.fit_info['param_cov'].shape == (2, 2)
-    np.testing.assert_allclose(result.coefficients.std, np.sqrt(np.diag(fitter.fit_info['param_cov'])))
+    np.testing.assert_allclose(result.params['coefficients'].std, np.sqrt(np.diag(fitter.fit_info['param_cov'])))
 
 
 def chained_model():
@@ -79,12 +79,8 @@ def test_chained_link_fit_recovers_known_input(jac):
     x = np.linspace(-4, 4, 81)
     amplitude = 2.1
     y = (3*amplitude + 4*amplitude**2)*np.exp(-.5*x**2)
-    fitter = ScipyTRF(jac=jac, calc_uncertainties=True)
-    if jac == 'auto':
-        with pytest.warns(UserWarning, match='tied parameters together'):
-            result = fitter(chained_model(), x, y)
-    else:
-        result = fitter(chained_model(), x, y)
+    fitter = TRF(jac=jac, covariance=True)
+    result = fitter(chained_model(), x, y)
     np.testing.assert_allclose(result.parameters[[0, 3, 6]],
                                [amplitude, 2*amplitude, 4*amplitude**2], atol=1e-7)
     assert fitter.fit_info['param_cov'].shape == (1, 1)

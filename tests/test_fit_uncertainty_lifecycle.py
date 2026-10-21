@@ -3,14 +3,13 @@ import numpy as np
 import pytest
 from astropy.modeling.models import Gaussian1D, Linear1D
 from prism.modeling import Model
-from prism.modeling.fitting import (
-    ScipyTRF, LMFitter, SeparableTRF, SherpaLM, HAS_SHERPA,
-    TRFLSQFitter, LinearLSQFitter,
-)
+from prism.modeling.fitting import FitResult, TRF, SherpaLM, HAS_SHERPA
+from prism.experimental import LMFitter, SeparableTRF
+from prism.modeling.interop.astropy import TRFLSQFitter, LinearLSQFitter
 from prism.modeling.fitting.extension import _attach_covariance
 from prism.modeling.fitting.multifit import MultiFitResult
 
-ENGINES = [ScipyTRF, LMFitter, SeparableTRF, TRFLSQFitter,
+ENGINES = [TRF, LMFitter, SeparableTRF, TRFLSQFitter,
            pytest.param(SherpaLM, marks=pytest.mark.skipif(not HAS_SHERPA, reason='Sherpa unavailable'))]
 
 
@@ -30,24 +29,32 @@ def seed(model):
 def test_refit_replaces_estimates_and_preserves_input(engine):
     x = np.linspace(-3, 3, 101)
     model = seed(Gaussian1D(1., 0., .8, fixed={'mean': True, 'stddev': True}))
-    fitter = engine(calc_uncertainties=False)
+    fitter = engine(**({'calc_uncertainties': False} if engine is TRFLSQFitter else {'covariance': False}))
     options = {'linear_params': ['amplitude']} if engine is SeparableTRF else {}
     fitted = fitter(model, x, 3*np.exp(-.5*(x/.8)**2), inplace=False, **options)
-    assert fitted.amplitude.value == pytest.approx(3., rel=1e-6)
-    current = fitter.fit_info.get('param_cov')
-    if current is None:
-        assert fitted.covariance is None
-        assert not hasattr(fitted, '_fit_indices')
-        assert fitted.amplitude.std is None
+    if isinstance(fitted, FitResult):
+        assert fitted.params['amplitude'].value == pytest.approx(3., rel=1e-6)
+        assert fitted.covariance is fitter.fit_info.get('param_cov') or np.array_equal(fitted.covariance, fitter.fit_info.get('param_cov'))
+        for name in fitted.param_names:
+            assert getattr(getattr(fitted.model, name), 'std', None) is None
+        assert fitted.params['mean'].std is None
+        assert fitted.params['stddev'].std is None
     else:
-        np.testing.assert_array_equal(fitted.covariance, current)
-        assert current.shape == (1, 1)
-        np.testing.assert_array_equal(fitted._fit_indices, [0])
-    assert fitted.mean.std is None
-    assert fitted.stddev.std is None
-    for name in fitted.param_names:
-        for attribute in ('median', 'samples'):
-            assert getattr(getattr(fitted, name), attribute, None) is None
+        assert fitted.amplitude.value == pytest.approx(3., rel=1e-6)
+        current = fitter.fit_info.get('param_cov')
+        if current is None:
+            assert fitted.covariance is None
+            assert not hasattr(fitted, '_fit_indices')
+            assert fitted.amplitude.std is None
+        else:
+            np.testing.assert_array_equal(fitted.covariance, current)
+            assert current.shape == (1, 1)
+            np.testing.assert_array_equal(fitted._fit_indices, [0])
+        assert fitted.mean.std is None
+        assert fitted.stddev.std is None
+        for name in fitted.param_names:
+            for attribute in ('median', 'samples'):
+                assert getattr(getattr(fitted, name), attribute, None) is None
     assert model.amplitude.std == 9.
     np.testing.assert_array_equal(model._param_cov, np.eye(3)*99)
 
@@ -61,15 +68,17 @@ def test_new_covariance_uses_current_free_order_and_analytic_variance(native):
     if native:
         model = Model.from_astropy(model)
         seed(model)
-    fitted = ScipyTRF(calc_uncertainties=True)(model, x, 3*profile, yerr=np.full_like(x, .2), inplace=True)
-    assert fitted is model
+    fitted = TRF(covariance=True)(model, x, 3*profile, yerr=np.full_like(x, .2), inplace=True)
+    assert isinstance(fitted, FitResult)
     variance = .2**2/np.dot(profile, profile)
     np.testing.assert_allclose(fitted.covariance, [[variance]], rtol=1e-12)
-    np.testing.assert_array_equal(fitted._fit_indices, [0])
-    assert fitted.amplitude.std == pytest.approx(np.sqrt(variance))
-    assert fitted.mean.std is None
-    assert fitted.stddev.std is None
-    assert getattr(fitted.amplitude, 'samples', None) is None
+    np.testing.assert_array_equal(fitted.fit_indices, [0])
+    assert fitted.params['amplitude'].std == pytest.approx(np.sqrt(variance))
+    assert fitted.params['mean'].std is None
+    assert fitted.params['stddev'].std is None
+    assert getattr(model.amplitude, 'std', None) is None
+    assert getattr(model.amplitude, 'samples', None) is None
+    assert getattr(model, '_param_cov', None) is None
 
 
 def test_invalid_attachment_does_not_destroy_current_estimates():

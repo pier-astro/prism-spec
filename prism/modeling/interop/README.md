@@ -31,3 +31,9 @@ available for supported Astropy models. For the native path, convert with
 `Model.from_astropy(source)` before composing an operator; native `.save()` and
 `.covariance` require no class extensions. This namespace is an extraction boundary,
 not yet a standalone distribution independent of Prism.
+
+
+Astropy fitter adapters are available from `interop.astropy`, with their
+implementation in `astropyfitters.py`. This includes TRF, DogBox, LevMar, linear,
+Simplex and SLSQP adapters; their existing spatial 2D and constraint support is
+retained. Importing Prism still does not install global Astropy patches.

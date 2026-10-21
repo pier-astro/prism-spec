@@ -1,3 +1,6 @@
+from prism.modeling import Model
+from prism.modeling.lines import measurements as line_measurements
+from line_helpers import make_group
 import pytest
 import os
 import tempfile
@@ -10,20 +13,20 @@ from astropy.modeling import models
 import prism
 from prism.modeling import (
     LineResult,
-    line_analysis,
     measure_line,
     sample_line_measurements,
     select_line,
 )
-from prism.modeling.fitting import ScipyTRF, TRFLSQFitter
+from prism.modeling.fitting import TRF
+from prism.modeling.interop.astropy import TRFLSQFitter
 from prism.modeling.fitting.uncertainty import covar_attach
 from prism.modeling.io import load_model
-from prism.modeling.line_analysis import _draw_selection_samples
-from prism.modeling.models import GaussianLine, GaussianLines, get_components
+from prism.modeling.lines.measurements import _draw_selection_samples
+from prism.modeling.models import get_components
 
 
 def _build_selection_model():
-    hb_narrow = GaussianLines.from_arrays(
+    hb_narrow = make_group(
         names=['Hb4861'],
         pos=[4861.333],
         name='hb_narrow',
@@ -32,7 +35,7 @@ def _build_selection_model():
         fwhm=300.0,
         position_unit=u.AA,
     )
-    hb_broad = GaussianLines.from_arrays(
+    hb_broad = make_group(
         names=['Hb4861'],
         pos=[4861.333],
         name='hb_broad',
@@ -41,7 +44,7 @@ def _build_selection_model():
         fwhm=1800.0,
         position_unit=u.AA,
     )
-    oiii = GaussianLines.from_arrays(
+    oiii = make_group(
         names=['[OIII]5007'],
         pos=[5006.803],
         name='oiii',
@@ -57,11 +60,11 @@ def _build_selection_model():
 
 def _build_fitted_model():
     wave = np.linspace(4820.0, 4930.0, 600)
-    hb_narrow = GaussianLines.from_arrays(
+    hb_narrow = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
         position_unit=u.AA,
         amplitude=1.0, offset=0.0, fwhm=300.0)
-    hb_broad = GaussianLines.from_arrays(
+    hb_broad = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
         position_unit=u.AA,
         amplitude=0.7, offset=60.0, fwhm=1600.0)
@@ -71,30 +74,31 @@ def _build_fitted_model():
     flux = true_model(wave) + rng.normal(0.0, 0.03, wave.size)
     yerr = np.full_like(wave, 0.03)
 
-    init_narrow = GaussianLines.from_arrays(
+    init_narrow = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
         amplitude=0.8, offset=10.0, fwhm=420.0,
         position_unit=u.AA,
         bounds={'amplitude': (0, 5), 'offset': (-200, 200), 'fwhm': (80, 800)})
-    init_broad = GaussianLines.from_arrays(
+    init_broad = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
         amplitude=0.5, offset=30.0, fwhm=1200.0,
         position_unit=u.AA,
         bounds={'amplitude': (0, 5), 'offset': (-400, 400), 'fwhm': (700, 4000)})
 
-    fitter = ScipyTRF(calc_uncertainties=True)
-    fitted = fitter(init_narrow + init_broad, x=wave, y=flux, weights=1.0 / yerr)
-    covar_attach(fitted, fitter)
+    fitter = TRF(covariance=True)
+    result = fitter(init_narrow + init_broad, x=wave, y=flux, weights=1.0 / yerr)
+    fitted = result.model
+    covar_attach(fitted, result)
     return fitted, wave
 
 
 def _build_multifit_cube(wave):
-    continuum = models.Const1D(amplitude=0.12, name='continuum')
-    hb_narrow = GaussianLines.from_arrays(
+    continuum = Model.from_astropy(models.Const1D(amplitude=0.12, name='continuum'))
+    hb_narrow = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_narrow',
         position_unit=u.AA,
         amplitude=1.2, offset=0.0, fwhm=300.0)
-    hb_broad = GaussianLines.from_arrays(
+    hb_broad = make_group(
         names=['Hb4861'], pos=[4861.333], name='hb_broad',
         position_unit=u.AA,
         amplitude=0.8, offset=85.0, fwhm=1700.0)
@@ -112,12 +116,12 @@ def _build_multifit_cube(wave):
             cube[j, i] = model(wave) + rng.normal(0.0, yerr[j, i], wave.size)
 
     init_model = (
-        models.Const1D(amplitude=0.10, name='continuum')
-        + GaussianLines.from_arrays(
+        Model.from_astropy(models.Const1D(amplitude=0.10, name='continuum'))
+        + make_group(
             names=['Hb4861'], pos=[4861.333], name='hb_narrow',
             position_unit=u.AA,
             amplitude=1.0, offset=15.0, fwhm=420.0)
-        + GaussianLines.from_arrays(
+        + make_group(
             names=['Hb4861'], pos=[4861.333], name='hb_broad',
             position_unit=u.AA,
             amplitude=0.6, offset=40.0, fwhm=1400.0)
@@ -145,9 +149,9 @@ def test_line_selection_and_measurement_workflow():
     assert 4860.0 < measurements.peak_position.value < 4864.0
     assert np.isfinite(measurements.fw10m.value)
     assert prism.modeling.select_line is select_line
-    assert line_analysis.select_line is select_line
+    assert line_measurements.select_line is select_line
 
-    component = select_line(model['hb_broad'], 'Hb4861')
+    component = select_line(model, 'Hb4861', components='hb_broad')
     component_measurements = measure_line(component, x=wave)
     assert component_measurements.flux.value > 0.0
 
@@ -228,7 +232,7 @@ def test_line_analysis_multifit_collection_workflow():
     wave = np.linspace(4820.0, 4905.0, 700)
     cube, yerr, init_model = _build_multifit_cube(wave)
 
-    fitter = ScipyTRF(calc_uncertainties=True)
+    fitter = TRF(covariance=True)
     result = fitter.multifit(init_model, wave, cube, weights=1.0 / yerr, nproc=1, progress=False)
 
     selected = select_line(result, 'Hb4861')

@@ -1,22 +1,6 @@
 """
 prism.modeling.models — Astropy-compliant spectral and spatial models.
 
-Single-line models
-------------------
-``GaussianLine``, ``LorentzianLine``, ``VoigtLine``
-    Fittable1DModel subclasses parameterised by amplitude, rest-frame
-    position (fixed), velocity offset [km s⁻¹], width [km s⁻¹], and
-    redshift (fixed).  Instrument broadening is accepted via ``instfwhm``.
-
-Line-group models
------------------
-``GaussianLines``, ``LorentzianLines``, ``VoigtLines``
-    Dynamically generated multi-line Fittable1DModel, built from line-table
-    files (preferably ECSV with ``name``, ``position``, ``weight`` columns;
-    plain CSV requires an explicit ``position_unit``). Lines sharing the same
-    ``name`` are amplitude-tied through a single parameter.  Constructed
-    via ``from_csv()``, ``from_arrays()``, or ``from_templates()``.
-
 Continuum models
 ----------------
 ``BalmerContinuum``
@@ -52,7 +36,6 @@ Utilities
 ``count_free(model)``
     Count the number of free (unfixed, untied) parameters.
 """
-from .lines import *
 from .continuum import *
 from .components import get_components, ModelComponents
 
@@ -73,3 +56,6 @@ from ..display import (
 )
 
 from ..composition import Model
+
+# Explicit YAML hooks for native components and supported external models.
+from . import serialization as _serialization

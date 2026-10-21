@@ -1,6 +1,6 @@
 """Projection must use the physical profile span, not arbitrary QR columns."""
 import numpy as np
-from prism.modeling.fitting.separable import _project_from_linear_span
+from prism.experimental.separable import _project_from_linear_span
 
 
 def test_degenerate_profiles_keep_orthogonal_kinematic_direction():

@@ -2,6 +2,7 @@
 Sherpa-based fitters for prism.modeling.fitting
 """
 
+from importlib.util import find_spec
 import numpy as np
 from .extension import _validate_spectral_inputs
 from astropy.modeling.fitting import Fitter
@@ -14,35 +15,33 @@ from .extension import (
     get_max_evaluations,
 )
 from .multifit import MultiFitMixin
+from .joint import _JointFitMixin
+from .single import _SingleFitMixin
 from .problem import _FitProblem
-from .data import _prepare_fit_data
+from .constraints import _box_bounds
+from .data import _prepare_fit_data, _resolve_fit_inputs
 
-# Try to import Sherpa
-try:
-    import sherpa.optmethods
-    import sherpa.stats
-    HAS_SHERPA = True
-except ImportError:
-    HAS_SHERPA = False
+# Availability probe only; import the optional backend when a fitter is chosen.
+HAS_SHERPA = find_spec("sherpa") is not None
 
 __all__ = ['SherpaFitter', 'SherpaLM', 'SherpaSimplex', 'SherpaMonCar', 'HAS_SHERPA']
 
 
-class SherpaFitter(MultiFitMixin, Fitter):
+class SherpaFitter(_SingleFitMixin, _JointFitMixin, MultiFitMixin, Fitter):
     """Wrapper around Sherpa optimizers with Sherpa statistics."""
 
     covariance = property(_fitter_covariance)
     stdevs = property(_fitter_stdevs)
     std = property(_fitter_stdevs)
     
-    def __init__(self, method='levmar', calc_uncertainties=False, verbose=False, **kwargs):
+    def __init__(self, method='levmar', covariance=True, verbose=False, **kwargs):
         """
         Parameters
         ----------
         method : {'levmar', 'neldermead', 'moncar'}, optional
             The Sherpa optimization method to use. Default is ``'levmar'``.
-        calc_uncertainties : bool, optional
-            Compute parameter uncertainties after fitting. Default is ``False``.
+        covariance : bool, optional
+            Compute parameter uncertainties after fitting. Default is ``True``.
         verbose : bool, optional
             Enable verbose output from the Sherpa optimizer. Default is ``False``.
         **kwargs
@@ -51,17 +50,19 @@ class SherpaFitter(MultiFitMixin, Fitter):
         if not HAS_SHERPA:
             raise ImportError("Sherpa is not installed. Install with: pip install sherpa")
         
+        from sherpa import optmethods
+
         self.method = method.lower()
-        self.calc_uncertainties = calc_uncertainties
+        self._estimate_covariance = bool(covariance)
         self.verbose = verbose
         self.fit_kwargs = kwargs
         
         if self.method == 'levmar':
-            self.opt = sherpa.optmethods.LevMar()
+            self.opt = optmethods.LevMar()
         elif self.method == 'neldermead':
-            self.opt = sherpa.optmethods.NelderMead()
+            self.opt = optmethods.NelderMead()
         elif self.method == 'moncar':
-            self.opt = sherpa.optmethods.MonCar()
+            self.opt = optmethods.MonCar()
         else:
             raise ValueError(f"Unknown method: {method}. Options: levmar, neldermead, moncar")
 
@@ -82,43 +83,19 @@ class SherpaFitter(MultiFitMixin, Fitter):
         else:
             self.fit_kwargs['maxfev'] = coerced
 
-    def __call__(self, model, x, y, z=None, weights=None, statistic='chi2', yerr=None,
-                 inplace=True, **kwargs):
-        """Perform the fit.
-
-        Parameters
-        ----------
-        model : astropy.modeling.core.Model
-            The model to fit to the data.
-        x, y : array-like
-            Independent and dependent data arrays.
-        z : array-like, optional
-            Secondary independent data array for 2D models. Default is ``None``.
-        weights : array-like, optional
-            Residual weights (1 / yerr). Explicit weights take precedence over `yerr`.
-        statistic : str, optional
-            The fit statistic to minimize. Sherpa wrappers typically use a chi-square
-            equivalent when errors/weights are provided, or least-squares otherwise.
-            Poisson is not yet supported. Default is ``'chi2'``.
-        yerr : array-like, optional
-            1-sigma uncertainties on `y`. Default is ``None``.
-        inplace : bool, optional
-            Update the model in place. Default is ``True``.
-        **kwargs
-            Extra optimization arguments to merge with those provided at initialization.
-
-        Returns
-        -------
-        astropy.modeling.core.Model
-            The fitted model. If `inplace=False`, a new copy is returned.
-        """
+    def _fit_single(self, model, x, y=None, z=None, weights=None, statistic='chi2', yerr=None,
+                 inplace=False, **kwargs):
+        """Optimize one observation without constructing a public snapshot."""
+        model, x, y, yerr, weights, mask = _resolve_fit_inputs(
+            model, x, y, z, yerr, weights, kwargs.pop('mask', None))
         _validate_spectral_inputs(model, x, y, z, yerr, weights, statistic=statistic)
         if 'uncertainties' in kwargs:
             raise TypeError("The 'uncertainties' parameter is no longer supported.")
         
         x, y, yerr, weights, valid = _prepare_fit_data(
-            x, y, yerr, weights, kwargs.pop('mask', None),
+            x, y, yerr, weights, mask,
             filter_non_finite=kwargs.pop('filter_non_finite', False))
+        self._fit_mask = valid
         weighted = weights is not None or yerr is not None
         # Explicit residual weights take precedence, including rejection masks.
         # Preserve the previous Sherpa arithmetic on ordinary valid samples.
@@ -128,14 +105,20 @@ class SherpaFitter(MultiFitMixin, Fitter):
             elif yerr is not None:
                 staterr = np.where(valid, yerr, np.inf)
             else:
-                staterr = sherpa.stats.LeastSq().calc_staterror(y)
+                from sherpa.stats import LeastSq
+                staterr = LeastSq().calc_staterror(y)
             residual_weights = np.sqrt(1.0 / (staterr ** 2))
 
         fit_model = model if inplace else model.copy()
         problem = _FitProblem(fit_model, x, y, residual_weights, valid)
+        return self._fit_problem(problem, statistic=statistic, weighted=weighted, **kwargs)
+
+    def _fit_problem(self, problem, *, statistic='chi2', weighted=False, **kwargs):
+        """Optimize one prepared problem with the configured Sherpa optimizer."""
+        fit_model = problem.model
         parameters = problem.parameters
         init_values = parameters.values
-        param_bounds = parameters.bounds
+        param_bounds = _box_bounds(problem.model, parameters)
         huge = np.finfo(float).max
         min_vals = np.where(np.isinf(param_bounds[:, 0]), -huge, param_bounds[:, 0])
         max_vals = np.where(np.isinf(param_bounds[:, 1]), huge, param_bounds[:, 1])
@@ -178,7 +161,7 @@ class SherpaFitter(MultiFitMixin, Fitter):
         
         sherpa_info = sherpa_result[4] if len(sherpa_result) > 4 and isinstance(sherpa_result[4], dict) else {}
         nfev = sherpa_info.get('nfev', None)
-        native_cov = sherpa_info.get('covar')
+        native_cov = sherpa_info.get('covar') if self._estimate_covariance else None
 
         # Some Sherpa versions map MINPACK budget exhaustion to success.
         # Reaching an explicit budget is conservatively reported as incomplete.

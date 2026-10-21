@@ -36,9 +36,9 @@ def test_global_budget_and_constructor_override():
         limited(model.copy(), x, y)
         assert not limited.fit_info['success']
         fitter = SherpaLM(maxfev=1000)
-        fitter(model, x, y)
+        result = fitter(model, x, y)
         assert fitter.fit_info['success']
-        np.testing.assert_allclose(model.parameters, [3, .4, .7], atol=1e-7)
+        np.testing.assert_allclose(result.parameters, [3, .4, .7], atol=1e-7)
     finally:
         set_max_evaluations(previous)
 

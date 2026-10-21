@@ -1,14 +1,15 @@
+from prism.modeling import Model
 import warnings
 
+from line_helpers import make_group
 import numpy as np
 from astropy.modeling import models
 from astropy.modeling.powerlaws import PowerLaw1D
 
 import astropy.units as u
 from prism.modeling.interop import astropy as model_display
-from prism.modeling.fitting import TRFLSQFitter
+from prism.modeling.interop.astropy import TRFLSQFitter
 from prism.modeling.interop.astropy import tie
-from prism.modeling.models import GaussianLines
 from prism.modeling.models.components import get_components
 from prism.modeling.display import (
     format_fit_html,
@@ -74,17 +75,17 @@ def test_model_display_workflow():
         assert 'colspan="2"' in fit_html
         assert get_model_expression(models.Const1D(1.0, name='a') + models.Const1D(2.0, name='b')) == 'a + b'
 
-        tied_lines = GaussianLines.from_arrays(
+        tied_lines = make_group(
             names=['Hb4861'], pos=[4861.333], name='nlr', amplitude=2.0, offset=0.0, fwhm=300.0,
             position_unit=u.AA,
-        ) + GaussianLines.from_arrays(
+        ) + make_group(
             names=['OIII5007'], pos=[5006.803], name='hhe_nlr', amplitude=1.0, offset=0.0, fwhm=300.0,
             position_unit=u.AA,
         )
         tied_lines.offset_1.tied = tie('nlr', lambda m: m.offset)
         assert '= offset_0' in format_fit_text(tied_lines)
 
-        prism_model = PowerLaw1D(name='pl') + GaussianLines.from_arrays(
+        prism_model = Model.from_astropy(PowerLaw1D(name='pl')) + make_group(
             names=['Hb4861'], pos=[4861.333], name='hb', amplitude=2.0, offset=0.0, fwhm=300.0,
             position_unit=u.AA,
         )
@@ -138,9 +139,9 @@ def test_multifit_component_accessors():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        result = fitter.multifit(model.copy(), x, cube, inplace=True, nproc=1, progress=False)
+        result = fitter.multifit(model.copy(), x, cube, nproc=1, progress=False)
 
-    assert any('inplace=True' in str(w.message) and 'multifit mode' in str(w.message) for w in caught)
+    assert not any('inplace' in str(w.message) for w in caught)
     assert set(result.comps.names) == {'g1', 'g2', 'c0'}
 
     comp_cube = result.comps['g1'](x)

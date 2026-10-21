@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 from astropy.modeling.models import Const1D
 from prism.modeling import Model
-from prism.modeling.fitting import ScipyTRF
+from prism.modeling.fitting import TRF
 from prism.modeling.fitting.extension import get_max_evaluations, set_max_evaluations
-import prism.modeling.fitting.multifit as module
+import prism.modeling.fitting.multifit.execution as module
 
 
 def track_directories(monkeypatch, tmp_path):
@@ -35,7 +35,7 @@ def test_one_snapshot_cleaned_after_success_or_fit_failure(tmp_path, monkeypatch
     mask = np.ones_like(data, dtype=bool)
     if invalid:
         mask[1] = False
-    fitter = ScipyTRF()
+    fitter = TRF()
     model = Model.from_astropy(Const1D(1.))
     if invalid:
         with pytest.raises(ValueError, match='No valid spectral samples'):
@@ -56,8 +56,8 @@ def test_global_budget_is_preserved_across_spawn():
         x = np.arange(5.)
         y = np.ones((2, 5))*3.
         model = Model.from_astropy(Const1D(1.))
-        serial = ScipyTRF().multifit(model, x, y, progress=False)
-        parallel = ScipyTRF().multifit(model, x, y, nproc=2, progress=False)
+        serial = TRF().multifit(model, x, y, progress=False)
+        parallel = TRF().multifit(model, x, y, nproc=2, progress=False)
         np.testing.assert_array_equal(parallel.nfev, [1, 1])
         np.testing.assert_array_equal(parallel._success, serial._success)
         assert not parallel._success.any()
@@ -74,7 +74,7 @@ def test_serialization_failure_is_cleaned_before_starting_workers(tmp_path, monk
     def unexpected_pool(*args, **kwargs):
         raise AssertionError('Pool must not start after failed serialization')
     monkeypatch.setattr(module, '_multifit_pool', unexpected_pool)
-    fitter = ScipyTRF()
+    fitter = TRF()
     fitter.extra = Unserializable()
     with pytest.raises(TypeError, match='cannot serialize config'):
         fitter.multifit(Const1D(), np.arange(3.), np.ones((2, 3)), nproc=2, progress=False)
@@ -87,7 +87,7 @@ def test_explicit_astropy_pipe_extension_is_preserved_in_workers():
     from astropy.modeling.models import Gaussian1D
     from scipy.sparse import eye
     from prism.modeling import LinearOperatorModel
-    from prism.modeling.fitting import TRFLSQFitter
+    from prism.modeling.interop.astropy import TRFLSQFitter
     native = np.linspace(-3., 3., 81)
     x = native[::2]
     source = Gaussian1D(1., 0., .8, fixed={'mean': True, 'stddev': True})

@@ -2,7 +2,7 @@ import warnings
 import numpy as np
 import pytest
 from astropy.modeling.models import Const1D, Linear1D
-from prism.modeling.fitting import ScipyTRF
+from prism.modeling.fitting import TRF
 from prism.modeling.fitting.uncertainty.resample import bootstrap, prepare_noise_and_weights, ResampleError
 
 @pytest.mark.parametrize("statistic", ["gauss", "poisson"])
@@ -16,7 +16,7 @@ def test_resampling_recovers_independent_weighted_mean(statistic, weights_only):
     expected = (draws / errors**2).sum(axis=1) / (1 / errors**2).sum()
     kwargs = {"weights": 1 / errors} if weights_only else {"yerr": errors}
     with warnings.catch_warnings(record=True) as caught:
-        samples = bootstrap(Const1D(-30.), ScipyTRF(), x=x, y=y, n_samples=16,
+        samples = bootstrap(Const1D(-30.), TRF(), x=x, y=y, n_samples=16,
                             seed=81, statistic=statistic, inplace=False, **kwargs)
     np.testing.assert_allclose(samples["amplitude"], expected, rtol=1e-7, atol=1e-7)
     assert not any("barely" in str(item.message) or "reoptimiz" in str(item.message) for item in caught)
@@ -25,7 +25,7 @@ def test_excluded_values_and_errors_do_not_enter_noise():
     raw, effective, weights = prepare_noise_and_weights([2., np.nan], [0.3, np.nan], [2., 0.], "gauss")
     np.testing.assert_equal(raw, [0.3, 0.])
     np.testing.assert_equal(weights, [2., 0.])
-    samples = bootstrap(Const1D(-10), ScipyTRF(), x=[0., 1.], y=[2., np.nan],
+    samples = bootstrap(Const1D(-10), TRF(), x=[0., 1.], y=[2., np.nan],
                         yerr=[0.3, np.nan], weights=[2., 0.], n_samples=8, seed=7, inplace=False)
     expected = np.random.default_rng(7).normal([2., 0.], [0.3, 0.], size=(8, 2))[:, 0]
     np.testing.assert_allclose(samples["amplitude"], expected, atol=1e-7)
@@ -40,7 +40,7 @@ def test_poisson_rejects_negative_counts():
         prepare_noise_and_weights([-1., 2.], None, None, "poisson")
 
 def test_numerical_fit_rejects_unsupported_dimension_and_statistic():
-    fitter = ScipyTRF()
+    fitter = TRF()
     with pytest.raises(NotImplementedError):
         fitter(Const1D(), [0., 1.], [1., 2.], z=[1., 2.])
     with pytest.raises(NotImplementedError):
@@ -50,9 +50,9 @@ def test_robust_stat_is_squared_residual_not_robust_cost():
     x = np.arange(10.)
     y = 2 * x + 1
     y[-1] += 40
-    fitter = ScipyTRF()
+    fitter = TRF()
     fitted = fitter(Linear1D(), x, y, loss="soft_l1")
-    expected = np.sum((fitted(x) - y)**2)
+    expected = np.sum((fitted.predict(x) - y)**2)
     assert fitter.fit_info["stat"] == pytest.approx(expected)
     assert fitter.fit_info["stat"] != pytest.approx(2 * fitter.fit_info["cost"])
 

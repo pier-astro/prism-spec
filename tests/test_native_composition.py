@@ -1,6 +1,7 @@
 """Native expression semantics, operators, fitting and portable sessions."""
 from contextlib import ExitStack
 from unittest.mock import patch
+from line_helpers import make_line
 import numpy as np
 import pytest
 from astropy import units as u
@@ -9,14 +10,15 @@ from astropy.modeling.models import Gaussian1D, Const1D, Planar2D
 from scipy.sparse import csr_matrix, eye
 from scipy.integrate import trapezoid
 from prism.modeling import Model, LinearOperatorModel
-from prism.modeling.models import GaussianLine, get_components, format_model_text
-from prism.modeling.fitting import ScipyTRF, SherpaLM, SeparableTRF, FittingWithOutlierRemoval, HAS_SHERPA
+from prism.modeling.models import get_components, format_model_text
+from prism.modeling.fitting import TRF, SherpaLM, FittingWithOutlierRemoval, HAS_SHERPA
+from prism.experimental import SeparableTRF
 from prism.modeling.fitting.evaluation import _ModelEvaluation
 from prism.modeling.io import load_model
-from prism.modeling.line_analysis import select_line
+from prism.modeling.lines.measurements import select_line
 
 
-_ENGINES = [ScipyTRF, pytest.param(SherpaLM, marks=pytest.mark.skipif(
+_ENGINES = [TRF, pytest.param(SherpaLM, marks=pytest.mark.skipif(
     not HAS_SHERPA, reason='Sherpa unavailable'))]
 
 
@@ -41,8 +43,8 @@ def response(x):
 
 
 def lines():
-    a=GaussianLine(amplitude=2.,position=5000.,fwhm=250.,name='narrow')
-    b=GaussianLine(amplitude=.7,position=5000.,fwhm=500.,name='broad')
+    a=make_line(amplitude=2.,position=5000.,fwhm=250.,name='narrow')
+    b=make_line(amplitude=.7,position=5000.,fwhm=500.,name='broad')
     b.offset.link=a.offset
     b.amplitude.link=.4*a.amplitude
     return a,b
@@ -74,7 +76,7 @@ def test_negative_base_integer_power_evaluates_without_fake_log_derivative():
 
 def test_model_preserves_reference_identity_complete_copy_and_constraints():
     a,b=lines();model=Model.from_astropy(a)+b
-    assert model['narrow'] is a
+    assert model['narrow'] is a.component
     a.amplitude.value=4
     assert model.amplitude_1.value==1.6
     model['narrow'].name='renamed'
@@ -123,17 +125,20 @@ def test_cold_fit_linked_source_and_response_with_covariance(engine,tmp_path):
     y=truth(x)
     start=truth.copy();start.amplitude_0.value=1.5;start.fwhm_0.value=200.
     start.amplitude_0.bounds=(.01,10);start.fwhm_0.bounds=(100,700)
-    fitter=engine(calc_uncertainties=True)
+    fitter=engine(covariance=True)
     result=fitter(start,x,y,yerr=np.full(len(x),.02),inplace=False)
-    assert isinstance(result,Model)
-    np.testing.assert_allclose(result(x),y,atol=1e-6)
-    assert result.amplitude_0.value==pytest.approx(4.,rel=1e-5)
+    assert isinstance(result.model,Model)
+    np.testing.assert_allclose(result.predict(x),y,atol=1e-6)
+    assert result.model.amplitude_0.value==pytest.approx(4.,rel=1e-5)
     assert start.amplitude_0.value==1.5
     assert result.covariance.shape==(2,2)
-    result.save(tmp_path/'fit.fits')
+    fitted = result.model
+    from prism.modeling.fitting.uncertainty import covar_attach
+    covar_attach(fitted, result)
+    fitted.save(tmp_path/'fit.fits')
     loaded=load_model(tmp_path/'fit.fits')
     assert isinstance(loaded,Model)
-    np.testing.assert_array_equal(loaded(x),result(x))
+    np.testing.assert_array_equal(loaded(x),result.predict(x))
     np.testing.assert_array_equal(loaded.covariance,result.covariance)
     loaded.amplitude_0.value=6
     assert loaded.amplitude_1.value==pytest.approx(2.4)
@@ -147,8 +152,8 @@ def test_parameterized_linear_operator_is_not_frozen_and_includes_its_sensitivit
     y=3.2*2*np.exp(-.5*((x-.1)/.7)**2)
     assert model.fit_deriv is None
     result=engine()(model,x,y,yerr=np.full(len(x),.02),inplace=False)
-    assert result.gain_1.value==pytest.approx(3.2,rel=1e-6)
-    np.testing.assert_allclose(result(x),y,atol=1e-6)
+    assert result.model.gain_1.value==pytest.approx(3.2,rel=1e-6)
+    np.testing.assert_allclose(result.predict(x),y,atol=1e-6)
 
 
 @pytest.mark.parametrize('engine',_ENGINES)
@@ -160,11 +165,11 @@ def test_nonlinear_flux_transform_and_instrument_response(engine):
     assert trapezoid(y,x)==pytest.approx(4.)
     start=model.copy();start.stddev_0.value=1.1;start.norm_1.value=2.
     result=engine()(start,x,y,yerr=np.full(len(x),.02),inplace=False)
-    np.testing.assert_allclose(result(x),y,atol=1e-6)
-    assert result.stddev_0.value==pytest.approx(.7,rel=1e-5)
-    assert result.norm_1.value==pytest.approx(4.,rel=1e-5)
+    np.testing.assert_allclose(result.predict(x),y,atol=1e-6)
+    assert result.model.stddev_0.value==pytest.approx(.7,rel=1e-5)
+    assert result.model.norm_1.value==pytest.approx(4.,rel=1e-5)
     with pytest.raises(ValueError,match='reconstruction rule'):
-        result.save('/private/tmp/unsupported-custom-transform-prism.fits',overwrite=True)
+        result.model.save('/private/tmp/unsupported-custom-transform-prism.fits',overwrite=True)
 
 
 def test_builtin_general_transform_roundtrips_without_assuming_linearity(tmp_path):
@@ -180,14 +185,14 @@ def test_builtin_general_transform_roundtrips_without_assuming_linearity(tmp_pat
 
 def test_unit_aware_ordinary_evaluation_and_native_operator_coordinates():
     x=np.linspace(4990,5010,101)*u.AA
-    source=GaussianLine(amplitude=2*u.Jy,position=5000*u.AA,fwhm=250.)
+    source=Gaussian1D(amplitude=2*u.Jy,mean=5000*u.AA,stddev=2*u.AA)
     model=Model.from_astropy(source)|LinearOperatorModel(eye(len(x)),x=x.to(u.nm))
     np.testing.assert_allclose(model(x).to_value(u.Jy),source(x).to_value(u.Jy))
     # Numeric kernels convert the declared native coordinate grid once.
     expected=source(x).to_value(u.Jy)
     np.testing.assert_allclose(_ModelEvaluation(model,x.to_value(u.nm))(model.parameters),expected)
     with pytest.raises(TypeError,match='numeric data'):
-        ScipyTRF()(model,x,expected,yerr=np.ones(len(x)))
+        TRF()(model,x,expected,yerr=np.ones(len(x)))
 
 
 def test_selected_intrinsic_lines_preserve_parent_covariance_and_saved_links(tmp_path):
@@ -198,7 +203,7 @@ def test_selected_intrinsic_lines_preserve_parent_covariance_and_saved_links(tmp
     model._fit_indices=np.array([0])
     selected=select_line(model,'Hb',components=['narrow','broad'])
     assert selected.source_model is model
-    np.testing.assert_allclose(selected(x),a(x)+b(x))
+    np.testing.assert_allclose(selected(x),(a+b)(x))
     _,samples=selected.sample(method='covariance',n_samples=16,random_state=12,return_samples=True)
     assert np.all(np.isfinite(samples['flux']))
     assert np.std(samples['flux'])>0
@@ -213,10 +218,10 @@ def test_separable_fit_and_outlier_rejection_use_the_native_expression():
     fitted=SeparableTRF(linear_params=['amplitude'])(model,x,y,inplace=False)
     np.testing.assert_allclose(fitted(x),y,atol=1e-7)
     corrupted=y.copy();corrupted[30]+=20
-    fitter=FittingWithOutlierRemoval(ScipyTRF(),niter=3,sigma=3)
+    fitter=FittingWithOutlierRemoval(TRF(),niter=3,sigma=3)
     result=fitter(model,x,corrupted,yerr=np.full(len(x),.05),inplace=False)
     assert fitter.outlier_mask[30]
-    assert result.amplitude.value==pytest.approx(3.,rel=1e-5)
+    assert result.model.amplitude.value==pytest.approx(3.,rel=1e-5)
 
 
 def test_reused_fixed_operator_on_distinct_branches_and_duplicate_parameterized_leaf():
@@ -262,9 +267,9 @@ def test_native_cube_serial_and_spawn_agree(engine):
     mask=np.ones_like(y,dtype=bool)
     mask[20:30,0,1]=False
     mask[:,1,1]=False
-    options=dict(yerr=np.full_like(y,.1),mask=mask,spectral_axis=0,progress=False)
-    serial=engine(calc_uncertainties=True).multifit(model,x,y,nproc=1,**options)
-    parallel=engine(calc_uncertainties=True).multifit(model,x,y,nproc=2,**options)
+    options=dict(yerr=np.full_like(y,.1),mask=mask,axis=0,progress=False)
+    serial=engine(covariance=True).multifit(model,x,y,nproc=1,**options)
+    parallel=engine(covariance=True).multifit(model,x,y,nproc=2,**options)
     np.testing.assert_allclose(serial._params['amplitude_0'].reshape(2,2),[[1.,2.],[3.,np.nan]],rtol=1e-5,equal_nan=True)
     np.testing.assert_allclose(serial.covariance,parallel.covariance,rtol=1e-10,atol=1e-10,equal_nan=True)
     for name in model.param_names:
@@ -275,7 +280,7 @@ def test_scipy_covariance_is_symmetric_for_correlated_profile_parameters():
     x=np.linspace(-4.,4.,151)
     source=Model.from_astropy(Gaussian1D(1.,0.,.8))
     y=2.*np.exp(-.5*((x-.3)/.9)**2)
-    fitted=ScipyTRF(calc_uncertainties=True)(source,x,y,yerr=np.full(len(x),.1),inplace=False)
+    fitted=TRF(covariance=True)(source,x,y,yerr=np.full(len(x),.1),inplace=False)
     covariance=fitted.covariance
     np.testing.assert_array_equal(covariance,covariance.T)
     assert np.all(np.isfinite(covariance))

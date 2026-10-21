@@ -3,11 +3,11 @@
 import inspect
 import warnings
 import numpy as np
-from .data import _prepare_fit_data
+from .data import _prepare_fit_data, _prepare_spatial_data
 
 from .utils import (
     _free_parameter_indices,
-    _prime_tied_analytic_jacobian_warning,
+
 )
 
 
@@ -134,33 +134,9 @@ def _wrap_fitter_call(original_call):
                 yerr = None if yerr is None else yerr[valid]
                 weights = None if weights is None else weights[valid]
         else:
-            if yerr is not None:
-                yerr = validate_symmetric_yerr(yerr)
-        
-            # 1. Handle non-finite
-            if filter_non_finite:
-                finite = np.isfinite(y)
-                if weights is not None:
-                    finite &= np.isfinite(np.asarray(weights))
-                elif yerr is not None:
-                    finite &= np.isfinite(np.asarray(yerr))
-            
-                x = np.asarray(x)[finite]
-                y = np.asarray(y)[finite]
-                if z is not None:
-                    z = np.asarray(z)[finite]
-                if weights is not None:
-                    weights = np.asarray(weights)[finite]
-                if yerr is not None:
-                    yerr = np.asarray(yerr)[finite]
-            else:
-                # Check inputs
-                if not np.all(np.isfinite(y)):
-                    raise ValueError("Non-finite values detected in the data. Set filter_non_finite=True.")
-                if weights is not None and not np.all(np.isfinite(np.asarray(weights))):
-                    raise ValueError("Non-finite values detected in the weights. Set filter_non_finite=True.")
-                if yerr is not None and not np.all(np.isfinite(np.asarray(yerr))):
-                    raise ValueError("Non-finite values detected in the uncertainties. Set filter_non_finite=True.")
+            x, y, z, yerr, weights = _prepare_spatial_data(
+                x, y, z, yerr, weights, kwargs.pop('mask', None),
+                filter_non_finite=filter_non_finite)
 
         # 2. Compute weights
         if weights is None and yerr is not None:
@@ -174,7 +150,6 @@ def _wrap_fitter_call(original_call):
         prepare_links = getattr(self, '_prepare_links', None)
         if prepare_links is not None:
             prepare_links(eval_model, x, y, z)
-        _prime_tied_analytic_jacobian_warning(eval_model)
 
         # 3. Build call kwargs
         call_kwargs = kwargs.copy()

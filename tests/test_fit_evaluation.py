@@ -1,11 +1,12 @@
 """Independent checks of source evaluation followed by a fixed response."""
 
+from line_helpers import make_group
 import numpy as np
 import pytest
 from astropy.modeling.models import Gaussian1D
 from scipy.sparse import csr_matrix
 
-from prism.modeling.fitting import ScipyTRF, SherpaLM, HAS_SHERPA
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA
 from prism.modeling.fitting.evaluation import _ModelEvaluation
 from prism.modeling.operators.instrument import SpectralResponse
 
@@ -39,7 +40,7 @@ def test_prepared_response_jacobian_and_sampling():
     np.testing.assert_array_equal(model.parameters, original)
 
 
-@pytest.mark.parametrize('fitter_class', [ScipyTRF, pytest.param(
+@pytest.mark.parametrize('fitter_class', [TRF, pytest.param(
     SherpaLM, marks=pytest.mark.skipif(not HAS_SHERPA, reason='Sherpa unavailable'))])
 def test_response_known_input_recovery(fitter_class):
     native, matrix, response = setup_response()
@@ -49,7 +50,7 @@ def test_response_known_input_recovery(fitter_class):
     y = np.interp(observed, native, matrix @ flux)
     model = Gaussian1D(1.4, .4, 1.5, bounds={'amplitude': (.1, 8), 'stddev': (.2, 4)}) | response
     before = model.parameters.copy()
-    fitter = fitter_class(calc_uncertainties=True)
+    fitter = fitter_class(covariance=True)
     result = fitter(model, observed, y, yerr=np.full(len(y), .03), inplace=False)
     np.testing.assert_allclose(result.parameters, truth, atol=2e-5)
     np.testing.assert_array_equal(model.parameters, before)
@@ -75,11 +76,10 @@ def test_response_strict_grid_and_custom_operator_preserved():
 
 def test_response_velocity_units_are_not_discarded():
     import astropy.units as u
-    from prism.modeling.models.lines import GaussianLines
 
     native = np.linspace(4980., 5020., 161)
     response = SpectralResponse(response_matrix=csr_matrix(np.eye(len(native))), wave=native)
-    group = GaussianLines.from_arrays(
+    group = make_group(
         names=['line'], pos=[5000.]*u.AA, amplitude=2.,
         offset=30.*u.km/u.s, fwhm=300.*u.km/u.s)
     model = group | response
@@ -100,8 +100,10 @@ def test_response_with_frozen_and_linked_parameters():
     source.mean_0.fixed = source.mean_1.fixed = True
     source.amplitude_1.tied = lambda model: 2*model.amplitude_0
     source.stddev_1.tied = lambda model: model.stddev_0
-    fitter = ScipyTRF(calc_uncertainties=True)
-    with pytest.warns(UserWarning, match='tied parameters together'):
-        result = fitter(source | response, observed, y, yerr=np.full(len(y), .03))
+    # Equality inherits the positive driver domain; remove the redundant target
+    # bound explicitly because an opaque Astropy callable cannot be compiled.
+    source.stddev_1.bounds = (None, None)
+    fitter = TRF(covariance=True)
+    result = fitter(source | response, observed, y, yerr=np.full(len(y), .03))
     np.testing.assert_allclose(result.parameters, [2., -1., .7, 4., 1., .7], atol=1e-7)
     assert fitter.fit_info['param_cov'].shape == (2, 2)

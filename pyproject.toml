@@ -10,7 +10,7 @@ authors = [
     { name = "Pierpaolo", email = "pierpaolo.condo@gmail.com" }
     ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -22,8 +22,8 @@ keywords = ["science", "astronomy", "astrophysics", "AGN", "spectra", "spectrosc
 
 
 dependencies = [
-    "numpy>=2.0,<2.4",
-    "scipy>=1.7",
+    "numpy>=1.23.2",
+    "scipy>=1.10",
     "matplotlib>=3.5",
     "PyYAML>=5.0",
     "pandas>=1.3",
@@ -54,7 +54,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["examples*"]
+exclude = ["examples*", "tests*"]
 
 [tool.setuptools]
 include-package-data = true

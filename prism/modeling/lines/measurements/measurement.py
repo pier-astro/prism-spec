@@ -1,0 +1,224 @@
+"""Model-selection adapters for deterministic line measurements."""
+import numpy as np
+import astropy.units as u
+from ...metrics import Metric
+from .selection import SelectedLineProfile, SelectedLineCollection, select_line
+from .results import LineResult, MultiLineMeasurements, _METRIC_NAMES, _metric_units
+from .numerical import _compute_profile_metrics, _compute_ew_numerical
+
+def _measurement_grid(selection, x, window, num):
+    """Normalize spectral units and orient a valid integration grid."""
+    if x is None:
+        if window is None:
+            window = selection.infer_window()
+        if any(isinstance(bound, u.Quantity) for bound in window):
+            window = u.Quantity(window)
+        window = selection._coerce_domain_axis(window)
+        if window.size != 2:
+            raise ValueError("window must contain exactly two spectral coordinates.")
+        x_arr = np.linspace(float(window[0]), float(window[1]), int(num))
+    else:
+        x_arr = selection._coerce_domain_axis(x)
+    if x_arr.ndim != 1 or x_arr.size < 3 or not np.all(np.isfinite(x_arr)):
+        raise ValueError('x must be a finite 1-D spectral grid with at least three samples.')
+    if np.all(np.diff(x_arr) < 0):
+        x_arr = x_arr[::-1]
+    elif not np.all(np.diff(x_arr) > 0):
+        raise ValueError('x must be strictly monotonic with no repeated coordinates.')
+    return x_arr
+
+
+def _resolve_selection(model_or_selection, selector=None,
+                       components=None, additive=True, index=None):
+    if isinstance(model_or_selection, (SelectedLineProfile, SelectedLineCollection)):
+        return model_or_selection
+    return select_line(
+        model_or_selection, selector=selector,
+        components=components, additive=additive, index=index)
+
+# ---------------------------------------------------------------------------
+# measure_line
+# ---------------------------------------------------------------------------
+
+def measure_line(model_or_selection, selector=None,
+                 components=None, additive=True, x=None, window=None,
+                 num=4096, index=None) -> LineResult:
+    """Measure geometric and moment-based properties of a selected line.
+
+    Parameters
+    ----------
+    model_or_selection : astropy.modeling.Model or SelectedLineProfile or SelectedLineCollection
+        Source model or precomputed line selection.
+    selector : str, optional
+        Line tag resolved by :func:`select_line`. Default is ``None`` when a
+        ``SelectedLineProfile`` is passed directly.
+    components : str, int, Model, or sequence, optional
+        Explicit parent-model leaves, identified by name, index or identity.
+        Default is ``None`` for simple automatic discovery.
+    additive : bool, optional
+        Retained for existing calls. Selection extracts intrinsic leaves;
+        use explicit components for non-additive models.
+    x : array-like or astropy.units.Quantity, optional
+        Explicit spectral grid used for the measurement. Default is ``None``.
+    window : tuple of float, optional
+        Spectral interval used to build an internal grid when ``x`` is omitted.
+        Default is ``None``, in which case Prism infers a window from the line
+        centers and widths.
+    num : int, optional
+        Number of samples for the internally generated grid. Default is ``4096``.
+    index : int or tuple of int, optional
+        Spatial index used when ``model_or_selection`` is a ``MultiFitResult``.
+        Default is ``None``.
+
+    Returns
+    -------
+    LineResult or MultiLineMeasurements
+        Scalar measurement for a single profile, or spatial maps for a selected
+        line collection.
+
+    Notes
+    -----
+    The selected profile is evaluated on a 1-D grid and summarized numerically.
+    Flux is integrated with the trapezoidal rule. Widths such as FWHM and FW10M
+    come from linear interpolation at fixed fractions of the peak height. The
+    first four central moments are then used to derive centroid, variance,
+    skewness, and kurtosis in a way that remains agnostic to the analytic model
+    family once the profile has been selected.
+
+    Examples
+    --------
+    >>> selected = select_line(model, 'Hb4861')
+    >>> result = measure_line(selected, x=wave)
+    >>> result.peak_position.value
+    >>> result.fwhm.value
+    """
+    selection = _resolve_selection(
+        model_or_selection, selector=selector,
+        components=components, additive=additive, index=index)
+
+    if isinstance(selection, SelectedLineCollection):
+        arrays = {name: np.full(selection.shape, np.nan, dtype=float)
+                  for name in _METRIC_NAMES}
+        wave_min = np.full(selection.shape, np.nan, dtype=float)
+        wave_max = np.full(selection.shape, np.nan, dtype=float)
+        n_grid = np.zeros(selection.shape, dtype=int)
+        reference = selection._reference_profile()
+        metric_units = _metric_units(reference.axis_unit, reference.output_unit)
+        axis_unit = reference.axis_unit
+        for fi in range(selection.source_result.n_spaxels):
+            if not selection._has_values(fi):
+                continue
+            si = np.unravel_index(fi, selection.shape)
+            m = selection.get_profile(fi).measure(x=x, window=window, num=num)
+            for name in _METRIC_NAMES:
+                arrays[name][si] = getattr(m, name).value
+            wave_min[si] = m.wave_min
+            wave_max[si] = m.wave_max
+            n_grid[si] = m.n_grid
+            if metric_units is None:
+                metric_units = m.metric_units
+                axis_unit = m.axis_unit
+        return MultiLineMeasurements(
+            selector=selection.selector, mode='auto',
+            shape=selection.shape,
+            metric_units=metric_units, axis_unit=axis_unit,
+            wave_min=wave_min, wave_max=wave_max, n_grid=n_grid, **arrays)
+
+    x_arr = _measurement_grid(selection, x, window, num)
+
+    y_arr = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
+    return _profile_result(x_arr, y_arr, selection.axis_unit, selection.output_unit,
+                           selector=selection.selector, mode='auto')
+
+
+def _profile_result(x_arr, y_arr, axis_unit, output_unit, selector, mode):
+    raw_metrics = _compute_profile_metrics(x_arr, y_arr)
+    units = _metric_units(axis_unit, output_unit)
+    return LineResult(
+        selector=selector, mode=mode, wave_min=x_arr[0], wave_max=x_arr[-1],
+        n_grid=x_arr.size, metrics=raw_metrics, metric_units=units, axis_unit=axis_unit)
+
+
+def profile_metrics(x, y):
+    """Measure a sampled line profile independently of a model or fitter.
+
+    Parameters
+    ----------
+    x : array-like or astropy.units.Quantity
+        Finite, strictly monotonic spectral coordinates, with at least three
+        samples. Descending coordinates are accepted and oriented internally.
+    y : array-like or astropy.units.Quantity
+        Finite line-only spectral density at each coordinate. Subtract the
+        continuum before calling this function. The shape must match ``x``.
+
+    Returns
+    -------
+    LineResult
+        Finite-window flux, peak, crossing widths and moments. Input Quantity
+        units are preserved; plain arrays do not imply physical units.
+
+    Notes
+    -----
+    This function performs no model selection, continuum inference, uncertainty
+    propagation, or instrumental correction. Widths are in the input coordinate
+    unit. Moments depend on the chosen finite window; crossing widths refer to
+    the nearest crossings about the highest positive peak. Negative-only
+    profiles have signed flux and moments but undefined crossing widths.
+
+    Examples
+    --------
+    >>> metrics = profile_metrics(wave, line_flux)
+    >>> metrics.flux.value
+    >>> metrics.fwhm.value
+    """
+    axis_unit = x.unit if isinstance(x, u.Quantity) else None
+    output_unit = y.unit if isinstance(y, u.Quantity) else None
+    x_arr = np.asarray(x.value if axis_unit is not None else x, dtype=float)
+    y_arr = np.asarray(y.value if output_unit is not None else y, dtype=float)
+    if x_arr.ndim != 1 or x_arr.size < 3 or y_arr.shape != x_arr.shape:
+        raise ValueError('x and y must be matching 1-D arrays with at least three samples.')
+    if not np.all(np.isfinite(x_arr)) or not np.all(np.isfinite(y_arr)):
+        raise ValueError('x and y must contain only finite samples.')
+    if np.all(np.diff(x_arr) < 0):
+        x_arr, y_arr = x_arr[::-1], y_arr[::-1]
+    elif not np.all(np.diff(x_arr) > 0):
+        raise ValueError('x must be strictly monotonic with no repeated coordinates.')
+    return _profile_result(x_arr, y_arr, axis_unit, output_unit, 'profile', 'profile')
+
+
+
+def _continuum_grid(selection, window):
+    """Legacy local continuum probe; an explicit continuum avoids this policy."""
+    if window is None:
+        window = selection.infer_window()
+    if any(isinstance(bound, u.Quantity) for bound in window):
+        window = u.Quantity(window)
+    bounds = selection._coerce_domain_axis(window)
+    sigma_est = abs(bounds[1]-bounds[0]) / (12.0*2.3548)
+    centroid = float(selection.position)
+    return np.linspace(centroid-sigma_est, centroid+sigma_est, 17)
+
+
+def _continuum_level(selection, x):
+    from ...operators.matop import is_linear_operator_pipe
+    if is_linear_operator_pipe(selection.source_model):
+        raise ValueError('Pass an explicit intrinsic continuum for equivalent widths from response-pipe selections.')
+    model = selection._coerce_output_array(selection.source_model(x), name='continuum model')
+    line = selection._coerce_output_array(selection.evaluate(x), name='line profile')
+    continuum = model-line
+    finite = continuum[np.isfinite(continuum)]
+    level = float(np.median(finite)) if finite.size else float('nan')
+    return level if level > 0. else float('nan')
+
+
+def _measure_eqw(selection, continuum, x, window, num):
+    x_arr = _measurement_grid(selection, x, window, num)
+    line = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
+    if continuum is None:
+        x_cont = _continuum_grid(selection, window)
+        values = _continuum_level(selection, x_cont)
+    elif callable(continuum):
+        values = selection._coerce_output_array(continuum(x_arr), name='continuum')
+    else:
+        values = selection._coerce_output_scalar(continuum, name='continuum')
+    return Metric(value=_compute_ew_numerical(x_arr, line, values), unit=selection.eqw_unit)

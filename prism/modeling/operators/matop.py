@@ -6,6 +6,7 @@ Astropy CompoundModel pipes lives separately in interop.astropy.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 import numpy as np
 
 from astropy.modeling import CompoundModel, Fittable1DModel
@@ -126,6 +127,11 @@ class LinearOperatorModel(Fittable1DModel):
         if cls is not LinearOperatorModel and not isinstance(result, cls):
             raise ValueError(f'The file does not contain a {cls.__name__}.')
         return result
+
+    @property
+    def params(self):
+        """Read-only mapping to the operator's live parameter objects."""
+        return MappingProxyType({name: getattr(self, name) for name in self.param_names})
 
     @property
     def matrix(self):

@@ -5,7 +5,6 @@ from astropy.modeling import CompoundModel
 
 from ..operators.instrument import SpectralResponse, _sample_response
 from ..operators.matop import LinearOperatorModel, _apply_matrix
-from ..models.lines.base import LineModelBase
 from .utils import _analytic_jacobian_parameter_major
 
 
@@ -48,7 +47,6 @@ class _ModelEvaluation:
 
         leaves = model.left.traverse_postorder() if isinstance(model.left, CompoundModel) else [model.left]
         if any(not isinstance(leaf, CompoundModel)
-               and not isinstance(leaf, LineModelBase)
                and not type(leaf).__module__.startswith(('astropy.modeling.', 'prism.modeling.'))
                for leaf in leaves):
             return

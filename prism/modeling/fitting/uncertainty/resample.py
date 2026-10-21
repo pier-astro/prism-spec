@@ -139,8 +139,8 @@ class Bootstrap:
         self._initial_model = model.copy()
         self.model = model
         if fitter is None:
-            from ..scipyfit import ScipyTRF
-            fitter = ScipyTRF()
+            from ..scipyfit import TRF
+            fitter = TRF()
         self.fitter = fitter
         self.x = np.asarray(x)
         self.y = np.asarray(y)
@@ -294,7 +294,8 @@ class Bootstrap:
         else:
             for i in range(self.n_samples):
                 try:
-                    fitted_model = self.fitter(
+                    fit = getattr(self.fitter, '_fit_single', self.fitter)
+                    fitted_model = fit(
                         model=self._initial_model.copy(),
                         x=x_synth[i],
                         y=y_synth[i],
@@ -464,10 +465,9 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
     model : Astropy model
         Fitted model whose parameters carry the starting values.
     fitter : Fitter, optional
-        Fitter for each iteration. Defaults to ``ScipyTRF()``, which uses a
-        numeric Jacobian and native bounds — robust for complex/degenerate
-        models. Astropy's ``TRFLSQFitter`` can converge prematurely on
-        high-dimensional compound models.
+        Fitter for each iteration. Defaults to ``TRF()``, which uses analytic
+        derivatives when available and otherwise finite differences. Every
+        realization starts from the same supplied model state.
     x, y, yerr : array-like
         Observed wavelengths, fluxes, and 1-sigma uncertainties.
     n_samples : int

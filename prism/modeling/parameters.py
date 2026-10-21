@@ -28,9 +28,27 @@ class _Arithmetic:
     def __rpow__(self, other): return _Expression('pow', other, self)
     def __neg__(self): return _Expression('neg', self)
 
+    @property
+    def link(self):
+        return self.tied if isinstance(self.tied, _Expression) else None
+
+    @link.setter
+    def link(self, value):
+        if value is None:
+            current = self.value
+            self.tied = False
+            self.value = current
+            return
+        expression = _Expression('ref', value)
+        expression.target = self
+        _check_cycle(self, expression)
+        _linked_value(self, expression)  # validate before changing the constraint
+        self.tied = expression
+
+
 
 def _operand(value):
-    if isinstance(value, (_Expression, AstropyParameter)):
+    if isinstance(value, (_Expression, AstropyParameter, _Scalar)):
         return value
     if isinstance(value, u.Quantity):
         if not value.isscalar or not np.isfinite(value.value):
@@ -44,7 +62,7 @@ def _operand(value):
 def _value(value):
     if isinstance(value, _Expression):
         return value.value
-    if isinstance(value, AstropyParameter):
+    if isinstance(value, (AstropyParameter, _Scalar)):
         unit = value.unit or getattr(value, '_prism_evaluation_unit', None)
         return value.value * unit if unit is not None else value.value
     return value
@@ -64,7 +82,7 @@ class _Expression(_Arithmetic):
 
     def __repr__(self):
         def label(value):
-            return value.name if isinstance(value, AstropyParameter) else repr(value)
+            return value.name if isinstance(value, (AstropyParameter, _Scalar)) else repr(value)
         if self.operation == 'ref':
             return label(self.operands[0])
         if self.operation == 'neg':
@@ -75,7 +93,7 @@ class _Expression(_Arithmetic):
 
     def references(self):
         for value in self.operands:
-            if isinstance(value, AstropyParameter):
+            if isinstance(value, (AstropyParameter, _Scalar)):
                 yield value
             elif isinstance(value, _Expression):
                 yield from value.references()
@@ -122,23 +140,6 @@ class _Parameter(_Arithmetic, AstropyParameter):
     its current value. Arbitrary callable constraints remain available via tied.
     """
     @property
-    def link(self):
-        return self.tied if isinstance(self.tied, _Expression) else None
-
-    @link.setter
-    def link(self, value):
-        if value is None:
-            current = self.value
-            self.tied = False
-            self.value = current
-            return
-        expression = _Expression('ref', value)
-        expression.target = self
-        _check_cycle(self, expression)
-        _linked_value(self, expression)  # validate before changing the constraint
-        self.tied = expression
-
-    @property
     def value(self):
         if isinstance(self.tied, _Expression):
             return _linked_value(self, self.tied)
@@ -181,7 +182,7 @@ def _ordered_ties(model, items):
 def _encode_links(model):
     names = {id(getattr(model, name)): name for name in model.param_names}
     def encode(value):
-        if isinstance(value, AstropyParameter):
+        if isinstance(value, (AstropyParameter, _Scalar)):
             if id(value) not in names:
                 raise ValueError('Cannot save a link to a parameter outside the assembled model.')
             return {'parameter': names[id(value)]}
@@ -227,3 +228,41 @@ def _restore_links(model, links):
     for expression, _, parameter in _ordered_ties(model, items):
         if isinstance(expression, _Expression):
             parameter.value = _linked_value(parameter, expression)
+
+
+class _Scalar(_Arithmetic):
+    """Native scalar state; shares link expressions with the Astropy adapter."""
+
+    size = 1
+    shape = ()
+    unit = None
+
+    def __init__(self, name, value):
+        self.name = name
+        self.fixed = False
+        self.tied = False
+        self.bounds = (None, None)
+        self.value = value
+
+    @property
+    def value(self):
+        if isinstance(self.tied, _Expression):
+            return _linked_value(self, self.tied)
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        if isinstance(value, u.Quantity):
+            raise TypeError('Native parameters require numeric values in explicit, consistent units.')
+        array = np.asarray(value, dtype=float)
+        if array.shape != () or not np.isfinite(array):
+            raise ValueError('A native parameter requires one finite scalar value.')
+        self._value = float(array)
+
+    @property
+    def min(self):
+        return self.bounds[0]
+
+    @property
+    def max(self):
+        return self.bounds[1]

@@ -10,20 +10,26 @@ Typical usage
 -------------
 Covariance-based uncertainties:
 
-        from prism.modeling.fitting import TRFLSQFitter
+        from prism.modeling.fitting import TRF
         from prism.modeling.fitting.uncertainty import covar_attach
 
-        fitter = TRFLSQFitter(calc_uncertainties=True)
-        fitted = fitter(model, x, y, yerr=yerr)
-        covar_attach(fitted, fitter)
+        fitter = TRF(covariance=True)
+        result = fitter(model, x, y, yerr=yerr)
+        result.params
+        result.covariance
+
+        # Optional attachment for a model-only export.
+        fitted = result.model
+        covar_attach(fitted, result)
 
 Bootstrap intervals:
 
-        from prism.modeling.fitting import TRFLSQFitter
+        from prism.modeling.fitting import TRF
         from prism.modeling.fitting.uncertainty import bootstrap, resample_attach
 
-        fitter = TRFLSQFitter()
-        fitted = fitter(model, x, y, yerr=yerr)
+        fitter = TRF()
+        result = fitter(model, x, y, yerr=yerr)
+        fitted = result.model
         samples = bootstrap(fitted, fitter, x, y, yerr, n_samples=500)
         resample_attach(fitted, samples)
 """

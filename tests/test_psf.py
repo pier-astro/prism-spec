@@ -7,7 +7,7 @@ from astropy.table import Table
 from scipy.integrate import quad
 from scipy.special import erf
 
-from prism.modeling.psf import ChromaticPSF, fitbands, fittrends
+from prism.psf import ChromaticPSF, fitbands, fittrends
 
 
 def test_profile_normalization_and_domain():
@@ -31,7 +31,7 @@ def test_profile_normalization_and_domain():
 
 def test_explicit_trends_and_unphysical_predictions():
     model = Moffat2D(gamma=2, alpha=2.5, fixed={'x_0': True, 'y_0': True})
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     bands = Table({'wave': [5000., 6000., 7000.], 'success': [True]*3,
                    'gamma': [1., 2., 3.], 'gamma_err': [.1]*3,
                    'alpha': [2.5]*3, 'alpha_err': [.1]*3})
@@ -87,9 +87,9 @@ def test_gaussian_recovery_masks_and_fits_roundtrip(tmp_path):
                             'y_stddev': 0}, basis='polynomial', display=False, save=tmp_path/'trends.pdf')
     assert (tmp_path/'trends.pdf').stat().st_size > 0
     path = tmp_path/'psf.fits'
-    psf.write(path)
+    psf.save(path)
     with pytest.raises(OSError):
-        psf.write(path)
+        psf.save(path)
     loaded = ChromaticPSF.from_fits(path)
     np.testing.assert_array_equal(loaded.bands['channels'], bands['channels'])
     np.testing.assert_allclose(loaded.bands['covariance'], bands['covariance'], equal_nan=True)
@@ -146,7 +146,7 @@ def test_moffat_recovery_and_fixed_background(tmp_path):
     np.testing.assert_allclose(bands['background_err'], 0)
     psf = fittrends(bands, {'gamma': 0, 'x_0': 0, 'y_0': 0}, basis='polynomial', display=False)
     assert psf(5200).alpha.value == 2.6
-    psf.write(tmp_path/'moffat.fits')
+    psf.save(tmp_path/'moffat.fits')
     loaded = ChromaticPSF.from_fits(tmp_path/'moffat.fits')
     assert loaded.model.alpha.fixed
     assert loaded.model.alpha.bounds == psf.model.alpha.bounds
@@ -170,7 +170,7 @@ def test_invalid_bands_models_and_constraints():
 
 
 def test_manual_band_selection_and_unweighted_trends():
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model = Moffat2D(fixed={'alpha': True, 'x_0': True, 'y_0': True})
     model.alpha = 2.5
     bands = Table({'wave': [5000., 6000., 7000.], 'success': [True]*3,
@@ -184,7 +184,7 @@ def test_manual_band_selection_and_unweighted_trends():
 
 def test_diagnostic_display_controls(tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model = Moffat2D(alpha=2.5, fixed={'alpha': True, 'x_0': True, 'y_0': True})
     bands = Table({'wave': [5000., 6000., 7000.], 'success': [True]*3,
                    'gamma': [1., 2., 3.], 'gamma_err': [.1]*3})
@@ -219,14 +219,14 @@ def test_band_edges_units_and_partial_masks():
 
 
 def test_all_fixed_profile_and_bounds(tmp_path):
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model = Moffat2D(alpha=2.5)
     for name in model.param_names:
         model.fixed[name] = True
     bands = Table({'wave': [5000., 7000.], 'success': [True, True]})
     bands.meta = {'profile': _state(model), 'waveunit': 'Angstrom'}
     psf = fittrends(bands, {}, basis='polynomial', display=False)
-    psf.write(tmp_path/'fixed.fits')
+    psf.save(tmp_path/'fixed.fits')
     loaded = ChromaticPSF.from_fits(tmp_path/'fixed.fits')
     np.testing.assert_array_equal(loaded.get_image(6000, (5, 5)), psf.get_image(6000, (5, 5)))
     with pytest.raises(ValueError, match='bounds'):
@@ -252,7 +252,7 @@ def test_planar_background_recovery_and_roundtrip(tmp_path):
     np.testing.assert_allclose(bands['slope_y_err'], 0)
     assert bands['covariance'].shape == (3, 8, 8)
     psf = fittrends(bands, {'x_0': 0, 'y_0': 0, 'gamma': 0, 'alpha': 0}, basis='polynomial', display=False)
-    psf.write(tmp_path/'plane.fits')
+    psf.save(tmp_path/'plane.fits')
     loaded = ChromaticPSF.from_fits(tmp_path/'plane.fits')
     assert loaded.bands.meta['background']['class'] == 'Planar2D'
     assert loaded.bands['slope_x'].unit == u.pix**-1
@@ -299,7 +299,7 @@ def test_elliptical_moffat_recovery_and_resolution(tmp_path):
     np.testing.assert_allclose(psf.fwhm([5000,6000,7000]).value, [[3.2,2.5]]*3, atol=1e-5)
     assert psf.fwhm(6000).unit == u.pix
     path = tmp_path/'ellipse.fits'
-    psf.write(path)
+    psf.save(path)
     loaded = ChromaticPSF.from_fits(path)
     assert isinstance(loaded.model, EllipticalMoffatPSF)
     np.testing.assert_array_equal(loaded.get_image(6000,(19,19)), psf.get_image(6000,(19,19)))
@@ -316,7 +316,7 @@ def test_elliptical_moffat_recovery_and_resolution(tmp_path):
 
 def test_bspline_exact_recovery_and_equal_parameter_budget(tmp_path):
     from prism.modeling.models.spatial import MoffatPSF
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model=MoffatPSF(fwhm=2,fixed={'beta':True,'x_0':True,'y_0':True})
     x=np.linspace(-1,1,25)
     values=2+.2*x+.3*np.maximum(0,x)**3
@@ -330,7 +330,7 @@ def test_bspline_exact_recovery_and_equal_parameter_budget(tmp_path):
     grid=np.linspace(-1,1,101)
     expected=2+.2*grid+.3*np.maximum(0,grid)**3
     np.testing.assert_allclose(spline.fwhm(6000+1000*grid).value[:,0],expected,atol=1e-12)
-    spline.write(tmp_path/'spline.fits')
+    spline.save(tmp_path/'spline.fits')
     loaded=ChromaticPSF.from_fits(tmp_path/'spline.fits')
     np.testing.assert_array_equal(loaded.fwhm(6000+1000*grid),spline.fwhm(6000+1000*grid))
     with pytest.raises(ValueError,match='integer'):
@@ -341,7 +341,7 @@ def test_bspline_physical_bounds_and_legacy_fits(tmp_path):
     import json,warnings
     from astropy.io import fits
     from prism.modeling.models.spatial import MoffatPSF
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model=MoffatPSF(fwhm=.8,bounds={'fwhm':(.1,1.5)},fixed={'beta':True,'x_0':True,'y_0':True})
     x=np.linspace(-1,1,25)
     bands=Table({'wave':6000+1000*x,'success':np.ones(25,dtype=bool),
@@ -368,7 +368,7 @@ def test_bspline_physical_bounds_and_legacy_fits(tmp_path):
 
 def test_bspline_domain_reaches_band_edges_smoothly(tmp_path):
     from prism.modeling.models.spatial import MoffatPSF
-    from prism.modeling.psf import _state
+    from prism.psf.psf import _state
     model=MoffatPSF(fwhm=2,fixed={'beta':True,'x_0':True,'y_0':True})
     bands=Table({'wave':[5100.,6000.,6900.], 'success':[True]*3,
                  'fwhm':[1.,2.,3.], 'fwhm_err':[.1]*3,
@@ -382,14 +382,14 @@ def test_bspline_domain_reaches_band_edges_smoothly(tmp_path):
     wave=np.array([5000., 5099., 5100., 5101., 6000., 6899., 6900., 6901., 7000.])
     expected=2+(wave-6000)/900
     np.testing.assert_allclose(psf.fwhm(wave).value[:,0],expected,atol=1e-12)
-    psf.write(tmp_path/'edges.fits')
+    psf.save(tmp_path/'edges.fits')
     loaded=ChromaticPSF.from_fits(tmp_path/'edges.fits')
     np.testing.assert_allclose(loaded.fwhm(wave).value[:,0],expected,atol=1e-12)
     # Existing saved laws with constant padding keep their original meaning.
     legacy=dict(psf.trends['fwhm'], knots=[-.9,-.9,.9,.9],
                 coefficients=[1.,3.], extension='constant')
     old=ChromaticPSF(model, {'fwhm':legacy}, psf.domain, unit=psf.unit)
-    old.write(tmp_path/'legacy-padding.fits')
+    old.save(tmp_path/'legacy-padding.fits')
     old=ChromaticPSF.from_fits(tmp_path/'legacy-padding.fits')
     np.testing.assert_allclose(old.fwhm(5000),old.fwhm(5100))
     np.testing.assert_allclose(old.fwhm(7000),old.fwhm(6900))
@@ -399,7 +399,7 @@ def test_bspline_domain_reaches_band_edges_smoothly(tmp_path):
 
 def test_fitimage_recovery_masks_and_local_coordinates():
     from prism.data import Image
-    from prism.modeling.psf import fitimage
+    from prism.psf import fitimage
     from astropy.modeling.models import Planar2D
     cube = _gaussian_cube()
     y, x = np.indices(cube.shape[1:])
@@ -429,7 +429,7 @@ def test_fitimage_recovery_masks_and_local_coordinates():
 
 def test_fitimage_absolute_covariance_matches_linear_solution():
     from prism.data import Image
-    from prism.modeling.psf import fitimage
+    from prism.psf import fitimage
     y,x=np.indices((11,11))
     profile=Gaussian2D(amplitude=1,x_mean=5.2,y_mean=4.8,x_stddev=1.2,y_stddev=1.4)
     shape=profile(x,y)
@@ -445,7 +445,7 @@ def test_fitimage_absolute_covariance_matches_linear_solution():
 
 def test_fitimage_peak_is_optional_masked_and_respects_fixed_bounds():
     from prism.data import Image
-    from prism.modeling.psf import fitimage
+    from prism.psf import fitimage
     y,x=np.indices((11,11))
     truth=Gaussian2D(amplitude=30,x_mean=6,y_mean=5,x_stddev=1,y_stddev=1)
     values=truth(x,y)+2
@@ -474,7 +474,7 @@ def test_fitimage_peak_is_optional_masked_and_respects_fixed_bounds():
 
 def test_fitimage_empty_support_and_validation():
     from prism.data import Image
-    from prism.modeling.psf import fitimage
+    from prism.psf import fitimage
     image=Image(np.ones((5,5)),err=np.ones((5,5)))
     result=fitimage(image,Gaussian2D(),mask=np.zeros((5,5),bool),init='peak')
     assert not result['success'] and result['npix']==0

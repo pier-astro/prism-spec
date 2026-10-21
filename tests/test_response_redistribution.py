@@ -107,7 +107,7 @@ def test_crop_preserves_bin_widths_across_gaps_and_io(tmp_path):
     np.testing.assert_array_equal(cropped._bin_widths, np.diff(edges(x))[selected])
     np.testing.assert_array_equal(cropped.response_matrix.toarray(), response.response_matrix.toarray()[np.ix_(selected, selected)])
     target = tmp_path/'cropped.fits'
-    cropped.save_fits(target)
+    cropped.save(target)
     restored = InstrumentResponse.from_fits(target)
     np.testing.assert_array_equal(restored._bin_widths, cropped._bin_widths)
     np.testing.assert_array_equal(restored.response_matrix.toarray(), cropped.response_matrix.toarray())
@@ -126,7 +126,7 @@ def test_invalid_resolution_table_rejected():
 
 @pytest.mark.parametrize('backend', ['scipy', 'sherpa'])
 def test_physical_response_fit_against_analytic_convolution(backend):
-    from prism.modeling.fitting import ScipyTRF, SherpaLM, HAS_SHERPA
+    from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA
     if backend == 'sherpa' and not HAS_SHERPA:
         pytest.skip('Sherpa unavailable')
     native = np.linspace(-8., 8., 401)
@@ -141,10 +141,10 @@ def test_physical_response_fit_against_analytic_convolution(backend):
     truth = total*np.diff(ndtr((bounds-.2)/np.hypot(.5,.8)))/widths
     model = Gaussian1D(.7, -.4, 1.4, bounds={'amplitude': (.1, 5.), 'stddev': (.1, 3.)})
     model = model | SpectralResponse(instrument=response, wave=observed)
-    fitter = ScipyTRF(calc_uncertainties=True) if backend == 'scipy' else SherpaLM(calc_uncertainties=True)
+    fitter = TRF(covariance=True) if backend == 'scipy' else SherpaLM(covariance=True)
     fitted = fitter(model, observed, truth[indices], yerr=np.full(len(observed), .02))
     assert fitter.fit_info['success']
-    np.testing.assert_allclose(fitted.left.parameters, [1.7, .2, .5], atol=2e-5)
+    np.testing.assert_allclose(fitted.model.left.parameters, [1.7, .2, .5], atol=2e-5)
     assert fitter.fit_info['param_cov'].shape == (3, 3)
 
 

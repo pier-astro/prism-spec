@@ -16,7 +16,7 @@ names = {AstropyModel: ('save', 'to_fits', 'covariance'),
          CompoundModel: ('_evaluate', 'evaluate', 'fit_deriv')}
 original = {(cls, name): getattr(cls, name, None) for cls in names for name in names[cls]}
 from prism.modeling import Model, LinearOperatorModel
-from prism.modeling.fitting import ScipyTRF
+from prism.modeling.fitting import TRF
 from prism.modeling.io import load_model, model_to_fits
 from prism.modeling.interop.astropy import install_model_io_methods, install_pipe_patch
 x = np.linspace(-3., 3., 81)
@@ -24,12 +24,12 @@ source = Gaussian1D(1., 0., .8, fixed={'mean': True, 'stddev': True})
 response = LinearOperatorModel(np.eye(len(x))*.5, x=x)
 model = Model.from_astropy(source) | response
 expected = 1.5*np.exp(-.5*(x/.8)**2)
-fitted = ScipyTRF(calc_uncertainties=True)(model, x, expected)
-assert np.allclose(fitted(x), expected)
+fitted = TRF(covariance=True)(model, x, expected)
+assert np.allclose(fitted.predict(x), expected)
 assert fitted.covariance.shape == (1, 1)
 with tempfile.TemporaryDirectory() as directory:
     filename = Path(directory)/'fit.fits'
-    fitted.save(filename)
+    fitted.model.save(filename)
     restored = load_model(filename)
     assert np.allclose(restored(x), expected)
     model_to_fits(source, Path(directory)/'astropy.fits')

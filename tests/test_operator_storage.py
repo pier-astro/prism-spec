@@ -9,7 +9,7 @@ from astropy.modeling import Parameter
 from astropy.modeling.models import Gaussian1D
 from scipy.sparse import csr_matrix
 from prism.modeling.operators import LinearOperatorModel, SpectralResponse, InstrumentResponse
-from prism.modeling.fitting import ScipyTRF, SherpaLM, HAS_SHERPA
+from prism.modeling.fitting import TRF, SherpaLM, HAS_SHERPA
 from prism.modeling.io import load_model
 
 
@@ -23,7 +23,7 @@ def rectangular():
 
 
 @pytest.mark.usefixtures('astropy_extensions')
-@pytest.mark.parametrize('backend', [ScipyTRF, pytest.param(SherpaLM,
+@pytest.mark.parametrize('backend', [TRF, pytest.param(SherpaLM,
     marks=pytest.mark.skipif(not HAS_SHERPA, reason='Sherpa unavailable'))])
 def test_rectangular_projection_derivatives_and_known_input_fit(backend):
     x, xout, matrix = rectangular()
@@ -172,7 +172,7 @@ def test_cube_and_individual_spectrum_store_the_same_operator(tmp_path):
     initial = Gaussian1D(.8,0.,.7,fixed={'mean': True,'stddev': True})
     model = initial | LinearOperatorModel(np.eye(len(x)),x=x)
     data = np.array([2.,3.])[:,None]*np.exp(-.5*(x/.7)**2)
-    result = ScipyTRF(calc_uncertainties=True).multifit(model,x,data,progress=False)
+    result = TRF(covariance=True).multifit(model,x,data,progress=False)
     result.save(tmp_path/'cube.fits',operator_file='response.fits')
     np.testing.assert_array_equal(load_model(tmp_path/'cube.fits').right.matrix.toarray(),np.eye(len(x)))
     path = tmp_path/'spectrum.fits';result[1].save(path,operator_file='response.fits')

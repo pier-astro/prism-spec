@@ -1440,7 +1440,7 @@ class Cube:
             except Exception as e:
                 warnings.warn(f'Could not update WCS CUNIT3: {e}', UserWarning)
 
-    def write(self, filename, overwrite=False, err=True, mask=False, binmap=False, cd_matrix=False, is_var=None, keep_keywords='default'):
+    def save(self, filename, overwrite=False, err=True, mask=False, binmap=False, cd_matrix=False, is_var=None, keep_keywords='default'):
         """Write the cube data to a FITS file.
 
         Parameters
@@ -1464,11 +1464,11 @@ class Cube:
 
         Examples
         --------
-        >>> cube.write('output.fits', overwrite=True, err=True, mask=True)
+        >>> cube.save('output.fits', overwrite=True, err=True, mask=True)
         >>> # Convert spectral axis to nm and save again
         >>> cube.z = (cube.z * cube.zunit).to_value('nm')
         >>> cube.zunit = u.nm
-        >>> cube.write('output_nm.fits', overwrite=True)
+        >>> cube.save('output_nm.fits', overwrite=True)
         """
         wcs_header = self.wcs.to_header() if self.wcs else fits.Header()
         if self.wcs is not None and self.wcs.naxis >= 3:

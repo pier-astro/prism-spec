@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import warnings
 
 import matplotlib.pyplot as plt
@@ -572,7 +573,83 @@ class Spectrum(Data1D):
         )
         return values
 
-    def plot_spectrum(self, ax=None):
+    def save(self, filename, overwrite=False):
+        """Save active arrays, units and metadata as a FITS spectrum snapshot.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Output FITS snapshot.
+        overwrite : bool, optional
+            Replace an existing file. Default is False.
+
+        Notes
+        -----
+        Coordinate errors may have lower/upper rows; flux errors are symmetric.
+        Only active samples are stored; cutout/reset history is not persisted.
+        Metadata must be JSON-compatible; paths and NumPy scalars are converted
+        explicitly. Use :meth:`load` for this format and :meth:`from_fits` for
+        external files.
+        """
+        def encode(value):
+            if isinstance(value, os.PathLike):
+                return os.fspath(value)
+            if isinstance(value, np.generic):
+                return value.item()
+            raise TypeError(f'Unsupported spectrum metadata: {type(value).__name__}')
+
+        state = dict(name=self.name, ra=self.ra, dec=self.dec, redshift=self.redshift,
+                     xtype=self.xtype, ytype=self.ytype, dtype=self.dtype.str, meta=self.meta)
+        payload = json.dumps(state, default=encode, allow_nan=False).encode('utf-8')
+        columns = []
+        for name, values, unit in (('X', self.x, self.xunit), ('Y', self.y, self.yunit),
+                                   ('XERR', self.xerr, self.xunit), ('YERR', self.yerr, self.yunit)):
+            if values is None:
+                continue
+            values = np.asarray(values)
+            repeat = 2 if values.ndim == 2 else 1
+            columns.append(fits.Column(name=name, format=f'{repeat}D',
+                array=values.T if repeat == 2 else values,
+                unit=None if unit is None else unit.to_string('fits')))
+        primary = fits.PrimaryHDU()
+        primary.header['PRISMSP'] = 1
+        fits.HDUList([primary, fits.BinTableHDU.from_columns(columns, name='SPECTRUM'),
+            fits.ImageHDU(np.frombuffer(payload, dtype=np.uint8), name='METADATA')]).writeto(
+                filename, overwrite=overwrite)
+
+    @classmethod
+    def load(cls, filename):
+        """Restore a snapshot written by :meth:`save`, including units and errors.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Snapshot written by :meth:`save`.
+
+        Returns
+        -------
+        Spectrum
+            Independent active spectrum with its saved units, errors and metadata.
+
+        Notes
+        -----
+        The loaded active spectrum becomes the new reset baseline. Use
+        :meth:`from_fits` for external spectra.
+        """
+        with fits.open(filename) as hdus:
+            if hdus[0].header.get('PRISMSP') != 1:
+                raise ValueError('Not a Prism spectrum snapshot; use Spectrum.from_fits for external files.')
+            state = json.loads(hdus['METADATA'].data.tobytes().decode('utf-8'))
+            table = hdus['SPECTRUM']
+            def values(name):
+                if name not in table.columns.names:
+                    return None
+                array = np.array(table.data[name], copy=True)
+                return array.T if array.ndim == 2 else array
+            return cls(values('X'), values('Y'), xerr=values('XERR'), yerr=values('YERR'),
+                       xunit=table.columns['X'].unit, yunit=table.columns['Y'].unit, **state)
+
+    def plot(self, ax=None):
         """Render the 1-D spectrum using Matplotlib.
 
         Plots the spectral flux values as a mid-step function with errorbars.
@@ -591,7 +668,7 @@ class Spectrum(Data1D):
         --------
         >>> import matplotlib.pyplot as plt
         >>> fig, ax = plt.subplots()
-        >>> spec.plot_spectrum(ax=ax)
+        >>> spec.plot(ax=ax)
         >>> plt.show()
         """
         created_fig = False
