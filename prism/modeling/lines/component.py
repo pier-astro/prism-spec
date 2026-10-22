@@ -11,8 +11,8 @@ class _LineGroup(_Function):
     """Prepared argument maps; each profile still contains its own physics."""
 
     def __init__(self, profile, lines, shared, parameters, scale, position, derivative, name):
-        from .tables import normalize_linetable, _clean_name
-        table = normalize_linetable(lines)
+        from .tables import load, _clean_name
+        table = load(lines)
         if hasattr(profile, 'position_unit') and profile.position_unit != table['position'].unit:
             raise ValueError('Profile and line table must use the same numeric spectral unit; convert the table explicitly.')
         if not len(table):
@@ -33,16 +33,16 @@ class _LineGroup(_Function):
         templates = tuple(dict.fromkeys(str(value) for value in table['name']))
         if set(parameters) != set(templates):
             raise ValueError('Provide independent parameters for every template, without extra templates.')
-        if position in shared or scale in shared:
-            raise ValueError('Positions are tabulated and the scale must be independent per template.')
+        if position in shared:
+            raise ValueError('Positions are tabulated, not shared parameters.')
         values = dict(shared)
         scopes = []
         for template in templates:
             local = dict(parameters[template])
             if set(local).intersection(shared):
                 raise ValueError('A profile parameter cannot be both shared and independent.')
-            if position in local or scale not in local or set(local) | set(shared) != set(names)-{position}:
-                raise ValueError('Every profile argument must be tabulated, shared, or independent; each template needs its scale.')
+            if position in local or set(local) | set(shared) != set(names)-{position}:
+                raise ValueError('Every profile argument must be tabulated, shared, or independent.')
             slots = {}
             for argument, value in local.items():
                 prefix = 'amp' if argument == 'amplitude' else argument
@@ -129,7 +129,7 @@ class LineSet(Component):
     profile : callable
         Numeric function ``profile(x, ...)``. The function owns all coordinate,
         width, normalization and velocity transformations.
-    lines : astropy.table.Table or mapping
+    lines : table, mapping, preset name, path or sequence of names/paths
         Columns ``name``, ``position`` (spectral Quantity), and optional ``weight``.
         Repeated names form one template. Weights multiply the selected scale
         argument without normalization. Use unit-bearing positions explicitly.
@@ -137,7 +137,7 @@ class LineSet(Component):
         Profile argument names and initial values common to every template.
     parameters : mapping
         ``{template: {argument: initial_value}}`` for independent parameters.
-        Every template must supply its scale argument. Every profile argument
+        The scale argument may be shared or independent. Every profile argument
         after x must be either position, shared or independent, exactly once.
     scale : str, optional
         Profile argument multiplied by each transition's weight; default amplitude.

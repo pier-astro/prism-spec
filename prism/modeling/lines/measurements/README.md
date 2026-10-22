@@ -241,3 +241,14 @@ Each weight is applied once. The summed profile shares the parent parameter grap
 and covariance; uncertainties are not combined as independent member errors.
 Repeated requested positions are counted once. Omit `position` to retain the
 single-member rule (unique unit-weight anchor or sole member).
+
+### Analytic total integrals
+
+`select_line(result, tag, components=...).flux()` returns a `Metric` for the total
+intrinsic integral of built-in Gaussian, Lorentzian and Voigt profiles. It uses
+analytic profile derivatives and the full fit covariance, including links.
+`std=None` means no covariance is available. An unsupported custom integral
+raises `NotImplementedError`; use `.measure(x=...)` or `.measure(window=...)`.
+With a `BootstrapResult`, `.flux()` propagates actual successful refits and
+reports their standard deviation and central interval. A ready-made line set's
+own `.flux()` returns per-transition values only, without statistical metadata.

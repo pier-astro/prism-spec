@@ -410,8 +410,6 @@ def load_params(filename: str) -> dict:
     """
     params = {}
     with fits.open(filename) as hdul:
-        if hdul[0].header.get('FORMAT') == 'PRISMFIT':
-            raise ValueError('This file stores a FitResult; use FitResult.load(...).')
         ext_names = [hdu.name.upper() for hdu in hdul]
 
         if EXT_PARS in ext_names:
@@ -419,6 +417,9 @@ def load_params(filename: str) -> dict:
             for row in data:
                 params[str(row['NAME']).strip().lower()] = float(row['VALUE'])
             return params
+
+        if hdul[0].header.get('FORMAT') == 'PRISMFIT':
+            raise ValueError('This older FitResult lacks a parameter table; load it with FitResult.load(...).')
 
         skip = {'PRIMARY', EXT_MODEL}
         for hdu in hdul:

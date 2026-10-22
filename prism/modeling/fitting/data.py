@@ -8,9 +8,8 @@ class Dataset:
     Parameters
     ----------
     x : array-like or prism.data.Spectrum
-        One-dimensional coordinates, or a Spectrum whose current working arrays
-        are used. Spectrum cutouts are already selected; its original-grid mask
-        is not applied a second time.
+        One-dimensional coordinates, or a Spectrum whose current arrays are used.
+        Spectrum cutouts already contain only the selected samples.
     y : array-like, optional
         Observed values matching x. Omit only when x is a Spectrum.
     yerr : array-like, optional

@@ -186,3 +186,13 @@ unconvolved source. Choose `model_def=False` for parameter-only exports.
 Callable parameter links still require explicit restoration in analysis code.
 The new model-tree/resource schema does not promise compatibility with earlier
 development files; regenerate saved products when migrating.
+
+For rest-frame wavelengths, pass `redshift` explicitly:
+
+```python
+rsp = SpectralResponse(instrument="MUSE-WFM", wave=spec.x, redshift=spec.redshift)
+```
+
+Archive wavelength grids are observed-frame Angstrom. The constructor matches
+`wave * (1 + redshift)` to that grid; `redshift=0` is appropriate for observed
+wavelengths. A frame mismatch is an error, not a reason to enlarge bin tolerance.

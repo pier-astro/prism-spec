@@ -150,6 +150,13 @@ def _save_result(result, filename, overwrite=False):
         param_names=list(graph.param_names), fit_indices=result.fit_indices.tolist(),
         links=_encode_links(graph),
         fit_info=info, contributions={key: dict(value) for key, value in result._contributions.items()})
+    # A small parameter table supports initialization without rebuilding the graph.
+    names = list(result.param_names)
+    width = max(map(len, names), default=1)
+    hdus.append(fits.BinTableHDU.from_columns([
+        fits.Column(name='NAME', format=f'{width}A', array=names),
+        fits.Column(name='VALUE', format='D', array=result.parameters),
+    ], name='PARS'))
     if result.covariance is not None:
         hdus.append(fits.ImageHDU(result.covariance, name='PARAM_COV'))
     document = yaml.dump(payload, Dumper=_session_dumper(resources), default_flow_style=None)
@@ -174,7 +181,7 @@ def _session_loader(filename, components):
             if recipe.get('type') != 'instrument':
                 raise ValueError('Unsupported saved response recipe.')
             restored = SpectralResponse(instrument=recipe['instrument'], wave=state['wave'],
-                z=recipe.get('z', 0.), flexible=recipe.get('flexible', True),
+                redshift=recipe.get('redshift', recipe.get('z', 0.)), flexible=recipe.get('flexible', True),
                 renormalize=recipe.get('renormalize', False), name=state['name'])
         if _operator_digest(restored) != state['fingerprint']:
             raise ValueError('Response content differs from the fitted session.')

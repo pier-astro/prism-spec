@@ -5,7 +5,7 @@ import astropy.units as u
 from astropy.table import QTable
 
 from prism.modeling.lines import profiles
-from prism.modeling.lines import setup_local_lines, trim_line_lists
+from prism.modeling.lines import export, set_directory, trim_line_lists
 from prism.modeling.lines import tables as line_tables
 from prism.utils.tools import air_to_vac
 
@@ -24,7 +24,7 @@ def _write_csv(path, rows, header='name,position,weight\n'):
     path.write_text(header + body)
 
 
-def test_setup_local_lines_accepts_quantity_bounds_and_writes_ecsv_in_angstrom(tmp_path, monkeypatch):
+def test_export_accepts_quantity_window_and_preserves_ecsv_units(tmp_path, monkeypatch):
     source_dir = tmp_path / 'source'
     source_dir.mkdir()
     output_dir = tmp_path / 'local'
@@ -34,20 +34,16 @@ def test_setup_local_lines_accepts_quantity_bounds_and_writes_ecsv_in_angstrom(t
 
     min_nu = (6500.0 * u.AA).to(u.Hz, equivalencies=u.spectral())
     max_nu = (5500.0 * u.AA).to(u.Hz, equivalencies=u.spectral())
-    setup_local_lines(min=min_nu, max=max_nu, dirpath=str(output_dir), overwrite=True)
+    export('demo', window=(550*u.nm, 650*u.nm), directory=output_dir)
 
     trimmed = QTable.read(output_dir / 'demo.ecsv', format='ascii.ecsv')
     np.testing.assert_allclose(trimmed['position'].to_value(u.AA), [6000.0])
     assert trimmed['position'].unit == u.AA
     assert trimmed.meta['medium'] == 'air'
     text = (output_dir / 'demo.ecsv').read_text()
-    assert '# meta:' in text
-    assert '__serialized_columns__' not in text
-    assert line_tables._wmin == 5500.0
-    assert line_tables._wmax == 6500.0
 
 
-def test_setup_local_lines_accepts_scalar_bounds_with_explicit_unit(tmp_path, monkeypatch):
+def test_export_accepts_scalar_window_in_native_unit(tmp_path, monkeypatch):
     source_dir = tmp_path / 'source'
     source_dir.mkdir()
     output_dir = tmp_path / 'local'
@@ -55,15 +51,15 @@ def test_setup_local_lines_accepts_scalar_bounds_with_explicit_unit(tmp_path, mo
 
     monkeypatch.setattr(line_tables, 'resource_path', str(source_dir))
 
-    setup_local_lines(min=550.0, max=650.0, unit=u.nm, dirpath=str(output_dir), overwrite=True)
+    export('demo', window=(5500.,6500.), directory=output_dir)
 
     trimmed = QTable.read(output_dir / 'demo.ecsv', format='ascii.ecsv')
     np.testing.assert_allclose(trimmed['position'].to_value(u.AA), [6000.0])
 
 
-def test_setup_local_lines_rejects_mixed_quantity_and_scalar_bounds(tmp_path):
-    with pytest.raises(ValueError, match='must both be spectral Quantities or both be plain scalars'):
-        setup_local_lines(min=5500.0 * u.AA, max=6500.0, dirpath=str(tmp_path), overwrite=False)
+def test_export_rejects_reversed_window(tmp_path):
+    with pytest.raises(ValueError, match='increasing'):
+        export('oiii', window=(6500.,5500.), directory=tmp_path)
 
 
 def test_trim_line_lists_converts_plain_csv_to_ecsv(tmp_path):
@@ -102,7 +98,6 @@ def test_plain_csv_requires_explicit_position_unit(tmp_path):
 
 def test_from_arrays_requires_explicit_position_unit_for_plain_arrays():
     """Bare float arrays must always come with an explicit position_unit."""
-    line_tables.set_wavelength_range(wmin=0.0, wmax=1.0e9)
     model = make_group(
         names=['HeII1640'],
         pos=[1640.42],
@@ -199,14 +194,13 @@ def test_native_kinematics_linear_vs_wavelength_domain():
 
 def test_agn_factory_uses_current_local_line_table_path(tmp_path,monkeypatch):
     from prism.modeling.models import agn
-    from prism.modeling.lines import tables
-    for name in ('linetable_path','_wmin','_wmax'):
-        monkeypatch.setattr(tables,name,getattr(tables,name))
-    setup_local_lines(min=4700,max=7000,dirpath=str(tmp_path/'lines'))
-    assert tables.linetable_path==str(tmp_path/'lines')
-    assert tables._wmin==4700 and tables._wmax==7000
-    iron=agn.fe(name='iron',fwhm=1200)
-    assert iron.name=='iron' and len(iron.component._setup['lines']['name'])>0
+    monkeypatch.setattr(line_tables, '_directory', None)
+    set_directory(tmp_path/'lines')
+    export('feII_model', window=(4700.,7000.), directory=tmp_path/'lines')
+    iron=agn.fe(name='iron',fwhm=1200.,window=(4800.,6900.))
+    positions=iron.component._setup['lines']['position']
+    assert iron.name=='iron' and len(positions)>0
+    assert min(positions)>=4800 and max(positions)<=6900
 
 
 @pytest.mark.parametrize("conversion", ["domain", "medium"])

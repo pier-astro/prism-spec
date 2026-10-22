@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+import copy
 import json
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +15,6 @@ from .core import (
     Data1D,
     convert_spectral_axis,
     is_wavelength_like,
-    normalize_unit,
     parse_celestial_coord,
     parse_err,
     subset_axis_err,
@@ -29,7 +28,7 @@ dustpath = os.path.join(script_dir, '..', '..', 'resources', 'dust')
 
 
 class Spectrum(Data1D):
-    """One-dimensional spectral container with reversible masking and rebinning.
+    """One-dimensional spectral container with explicit cutouts and rebinning.
 
     Parameters
     ----------
@@ -43,6 +42,9 @@ class Spectrum(Data1D):
         Sky coordinates associated with the spectrum. Default is ``None``.
     redshift : float, optional
         Source redshift stored with the spectrum. Default is ``None``.
+    frame : {None, 'observed', 'rest'}, optional
+        Descriptive reference-frame metadata; default unknown. The caller applies
+        physical transformations and passes redshift explicitly to a response.
     xunit, yunit : str or astropy.units.Unit, optional
         Units of the coordinate and value arrays. Default is ``None``.
     xtype, ytype : str, optional
@@ -58,12 +60,11 @@ class Spectrum(Data1D):
 
     Notes
     -----
-    ``Spectrum`` keeps both the original arrays and the currently active working
-    arrays. :meth:`cutout` updates a boolean mask on the original grid, so
-    :meth:`reset` can restore the initial sampling. :meth:`rebin` instead builds a
-    new spectral grid and therefore invalidates ``reset`` because the original
-    sampling has been replaced. For wavelength-like logarithmic axes Prism also
-    derives the approximate velocity scale and per-pixel FWHM implied by the grid.
+    Public arrays contain the current data. Assignments and in-place arithmetic
+    survive copy, cutout and rebin operations. cutout() selects coordinates,
+    values and errors together; it does not retain excluded samples or a mask.
+    Keep an explicit copy if an earlier state is needed. Sampling estimates
+    follow the current coordinate grid and do not describe an instrumental LSF.
 
     Examples
     --------
@@ -86,6 +87,7 @@ class Spectrum(Data1D):
         ra=None,
         dec=None,
         redshift=None,
+        frame=None,
         xunit=None,
         yunit=None,
         xtype=None,
@@ -111,61 +113,41 @@ class Spectrum(Data1D):
         self.ra = parse_celestial_coord(ra)
         self.dec = parse_celestial_coord(dec)
         self.redshift = redshift
+        self.frame = frame if frame is not None else self.meta.get('frame')
+        self.x = self.x.copy()
+        self.y = self.y.copy()
+        self.xerr = None if self.xerr is None else self.xerr.copy()
+        self.yerr = parse_err(self.yerr, shape=self.y.shape, name='yerr', dtype=self.dtype).copy()
 
-        self._original_x = self.x.copy()
-        self._original_y = self.y.copy()
-        self._original_xerr = None if self.xerr is None else self.xerr.copy()
-        self._original_yerr = parse_err(self.yerr, shape=self.y.shape, name='yerr', dtype=self.dtype)
+    @property
+    def frame(self):
+        """Coordinate reference frame: None (unknown), 'observed', or 'rest'.
 
-        self._full_x = self._original_x.copy()
-        self._full_y = self._original_y.copy()
-        self._full_xerr = None if self._original_xerr is None else self._original_xerr.copy()
-        self._full_yerr = self._original_yerr.copy()
+        Descriptive metadata only; assignment never transforms data or configures
+        an instrumental response. Velocity coordinates remain a separate axis choice.
+        """
+        return self.meta.get('frame')
 
-        self.mask = np.ones_like(self._full_x, dtype=bool)
-        self._rebinned = False
-        self._update_working_arrays()
-
-    def _update_working_arrays(self):
-        if self.mask is None:
-            self.x = self._full_x
-            self.y = self._full_y
-            self.xerr = self._full_xerr
-            self.yerr = self._full_yerr
+    @frame.setter
+    def frame(self, value):
+        if value not in (None, 'observed', 'rest'):
+            raise ValueError("frame must be None, 'observed', or 'rest'.")
+        if value is None:
+            self.meta.pop('frame', None)
         else:
-            self.x = self._full_x[self.mask]
-            self.y = self._full_y[self.mask]
-            self.xerr = subset_axis_err(self._full_xerr, self.mask)
-            self.yerr = subset_axis_err(self._full_yerr, self.mask)
+            self.meta['frame'] = value
 
+    @property
+    def velscale(self):
+        """Approximate km/s step derived from the current wavelength grid."""
         if self.x.size > 1 and (self.xtype or '').lower() in {'wavelength', 'spectral'} and np.all(self.x > 0):
-            log_x = np.log(self.x)
-            mean_log_step = np.mean(np.diff(log_x))
-            self.velscale = mean_log_step * c_kms
-            self.fwhm = 2.355 * (np.exp(mean_log_step) - 1.0) * self.x
-        else:
-            self.velscale = np.nan
-            self.fwhm = np.full_like(self.x, np.nan, dtype=float)
+            return float(np.mean(np.diff(np.log(self.x)))) * c_kms
+        return np.nan
 
     @property
-    def orig_x(self):
-        """numpy.ndarray: The original spectral coordinate array before any crop or rebin."""
-        return self._original_x
-
-    @property
-    def orig_y(self):
-        """numpy.ndarray: The original spectral values before any crop or rebin."""
-        return self._original_y
-
-    @property
-    def orig_xerr(self):
-        """numpy.ndarray or None: The original coordinate uncertainties."""
-        return self._original_xerr
-
-    @property
-    def orig_yerr(self):
-        """numpy.ndarray or None: The original value uncertainties."""
-        return self._original_yerr
+    def fwhm(self):
+        """Approximate pixel FWHM in coordinate units, not an instrumental LSF."""
+        return 2.355 * (np.exp(self.velscale/c_kms) - 1.) * self.x
 
     @property
     def var(self):
@@ -190,30 +172,18 @@ class Spectrum(Data1D):
         Spectrum
             A new instance with independent arrays and metadata.
         """
-        copied = self.__class__(
-            x=self._original_x.copy(),
-            y=self._original_y.copy(),
-            xerr=None if self._original_xerr is None else self._original_xerr.copy(),
-            yerr=self._original_yerr.copy(),
-            ra=self.ra,
-            dec=self.dec,
-            redshift=self.redshift,
-            xunit=self.xunit,
-            yunit=self.yunit,
-            xtype=self.xtype,
-            ytype=self.ytype,
-            name=self.name,
-            meta=self.meta.copy(),
-            dtype=self.dtype,
-        )
-        copied._full_x = self._full_x.copy()
-        copied._full_y = self._full_y.copy()
-        copied._full_xerr = None if self._full_xerr is None else self._full_xerr.copy()
-        copied._full_yerr = self._full_yerr.copy()
-        copied.mask = None if self.mask is None else self.mask.copy()
-        copied._rebinned = self._rebinned
-        copied._update_working_arrays()
-        return copied
+        self._validate_arrays()
+        return copy.deepcopy(self)
+
+    def _validate_arrays(self):
+        """Reject incompatible direct assignments before using the current data."""
+        shape = np.shape(self.x)
+        if len(shape) != 1 or np.shape(self.y) != shape:
+            raise ValueError('Spectrum x and y must be one-dimensional arrays of the same shape.')
+        if self.yerr is not None and np.shape(self.yerr) != shape:
+            raise ValueError('Spectrum yerr must match the current y shape.')
+        if self.xerr is not None and np.shape(self.xerr) not in (shape, (2, shape[0])):
+            raise ValueError('Spectrum xerr must have shape (N,) or (2, N), matching x.')
 
     def _require_symmetric_yerr(self):
         if self.yerr is None:
@@ -227,7 +197,7 @@ class Spectrum(Data1D):
             raise ValueError(f"{operation} is only defined for wavelength-like axes.")
 
     def cutout(self, min=None, max=None, mask=None, inplace=False):
-        """Restrict the active spectrum to a subset of the original grid.
+        """Extract selected samples from the current spectrum.
 
         Parameters
         ----------
@@ -249,13 +219,11 @@ class Spectrum(Data1D):
         --------
         >>> sub = spec.cutout(min=4000.0, max=5000.0)
         """
-        if self._rebinned:
-            raise RuntimeError('Cannot cut out after rebinning.')
+        self._validate_arrays()
         if min is None and max is None and mask is None:
             raise ValueError('At least one of min, max, or mask must be provided.')
 
         target = self if inplace else self.copy()
-        original_indices = np.flatnonzero(target.mask)
         current_mask = np.ones_like(target.x, dtype=bool)
 
         if min is not None:
@@ -271,10 +239,10 @@ class Spectrum(Data1D):
                 raise ValueError('mask must match the current working x shape.')
             current_mask &= mask
 
-        new_mask = np.zeros_like(target.mask, dtype=bool)
-        new_mask[original_indices] = current_mask
-        target.mask &= new_mask
-        target._update_working_arrays()
+        target.x = target.x[current_mask].copy()
+        target.y = target.y[current_mask].copy()
+        target.xerr = subset_axis_err(target.xerr, current_mask)
+        target.yerr = subset_axis_err(target.yerr, current_mask)
 
         return target
 
@@ -301,9 +269,8 @@ class Spectrum(Data1D):
 
         Notes
         -----
-        Rebinning replaces the stored full-resolution arrays. Because the new grid
-        is no longer a masked view of the original sampling, :meth:`reset` cannot
-        recover the pre-rebinned state.
+        Rebinning replaces the current arrays. Retain an explicit copy if the
+        previous sampling is needed. A further cutout is allowed.
         
         Examples
         --------
@@ -311,66 +278,26 @@ class Spectrum(Data1D):
         >>> # or rebin to a new specific wavelength grid
         >>> spec.rebin(new_x=np.linspace(4000, 5000, 100))
         """
-        if self.yerr is not None and self.yerr.ndim != 1:
-            raise ValueError('Rebinning does not support asymmetric yerr.')
+        self._validate_arrays()
 
         symmetric_yerr = self._require_symmetric_yerr()
 
         if new_x is not None:
             new_y, new_yerr = resample_spectrum(self.x, self.y, symmetric_yerr, new_wave=new_x, fill=fill, method=method)
-            self._full_x = np.asarray(new_x, dtype=float)
+            self.x = np.asarray(new_x, dtype=float).copy()
         elif factor is not None and factor > 1:
             rebinned_x = downsample_wave(self.x, factor)
             new_y, new_yerr = resample_spectrum(self.x, self.y, symmetric_yerr, new_wave=rebinned_x, fill=fill, method=method)
-            self._full_x = np.asarray(rebinned_x, dtype=float)
+            self.x = np.asarray(rebinned_x, dtype=float).copy()
         else:
             raise ValueError('Either factor > 1 or new_x must be provided.')
 
-        if self.mask is not None and not np.all(self.mask):
-            warnings.warn('Rebinning removes all corrections. Reapply them after rebinning if needed.', UserWarning)
-
-        self._full_y = new_y
-        self._full_yerr = new_yerr
-        self._full_xerr = None
-        self.mask = None
-        self._rebinned = True
-        self._update_working_arrays()
-
-    def reset(self):
-        """Restore the original sampling by removing any active crop.
-
-        This recovers the masked view of the original grid provided during
-        initialization.
-
-        Notes
-        -----
-        This operation is invalid if the spectrum was rebinned, since
-        rebinning irreversibly destroys the original grid.
-        """
-        if self._rebinned:
-            warnings.warn('Cannot reset a rebinned spectrum. Re-initialize the object instead.', UserWarning)
-            return
-
-        self._full_x = self._original_x.copy()
-        self._full_y = self._original_y.copy()
-        self._full_xerr = None if self._original_xerr is None else self._original_xerr.copy()
-        self._full_yerr = self._original_yerr.copy()
-        self.mask = np.ones_like(self._full_x, dtype=bool)
-        self._update_working_arrays()
-
-    def require_original_grid(self):
-        """Check whether the active grid corresponds to the original sampling.
-
-        Raises
-        ------
-        RuntimeError
-            If the spectrum has been resampled via :meth:`rebin`.
-        """
-        if self._rebinned:
-            raise RuntimeError('Operation requires the original coordinate grid, but the spectrum has been rebinned.')
+        self.y = new_y
+        self.yerr = new_yerr
+        self.xerr = None
 
     @classmethod
-    def from_txt(cls, filename, ra=None, dec=None, redshift=None, xunit=None, yunit=None, name=None, xtype=None, ytype=None, dtype=np.float32):
+    def from_txt(cls, filename, ra=None, dec=None, redshift=None, xunit=None, yunit=None, name=None, xtype=None, ytype=None, dtype=np.float32, frame=None):
         """Build a spectrum from a whitespace-delimited text file.
 
         Parameters
@@ -383,6 +310,8 @@ class Spectrum(Data1D):
             Units attached to the coordinate and values. Default is ``None``.
         name : str, optional
             Spectrum name. Defaults to the filename stem.
+        frame : {None, 'observed', 'rest'}, optional
+            Descriptive frame metadata; default unknown.
         xtype, ytype : str, optional
             Explicit semantic labels for the axis and values. Default is ``None``.
 
@@ -410,6 +339,7 @@ class Spectrum(Data1D):
             ra=ra,
             dec=dec,
             redshift=redshift,
+            frame=frame,
             xunit=xunit,
             yunit=yunit,
             xtype=xtype,
@@ -430,6 +360,7 @@ class Spectrum(Data1D):
         ra=None,
         dec=None,
         redshift=None,
+        frame=None,
         name=None,
         xtype=None,
         ytype=None,
@@ -453,6 +384,8 @@ class Spectrum(Data1D):
             Explicit ra/dec values take precedence.
         name : str, optional
             Spectrum name. Defaults to the filename stem.
+        frame : {None, 'observed', 'rest'}, optional
+            Descriptive frame metadata; default unknown.
         xtype, ytype : str, optional
             Explicit semantic labels for the axis and values. Default is ``None``.
 
@@ -486,6 +419,7 @@ class Spectrum(Data1D):
             ra=ra,
             dec=dec,
             redshift=redshift,
+            frame=frame,
             xunit=xunit,
             yunit=yunit,
             xtype=xtype,
@@ -586,11 +520,13 @@ class Spectrum(Data1D):
         Notes
         -----
         Coordinate errors may have lower/upper rows; flux errors are symmetric.
-        Only active samples are stored; cutout/reset history is not persisted.
+        Only the current samples are stored; no selection history is retained.
         Metadata must be JSON-compatible; paths and NumPy scalars are converted
         explicitly. Use :meth:`load` for this format and :meth:`from_fits` for
         external files.
         """
+        self._validate_arrays()
+
         def encode(value):
             if isinstance(value, os.PathLike):
                 return os.fspath(value)
@@ -633,8 +569,7 @@ class Spectrum(Data1D):
 
         Notes
         -----
-        The loaded active spectrum becomes the new reset baseline. Use
-        :meth:`from_fits` for external spectra.
+        Use :meth:`from_fits` for external spectra.
         """
         with fits.open(filename) as hdus:
             if hdus[0].header.get('PRISMSP') != 1:

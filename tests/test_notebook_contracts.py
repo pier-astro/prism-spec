@@ -32,7 +32,6 @@ def test_spectrum_snapshot_keeps_active_values_errors_units_and_metadata(tmp_pat
     assert restored.ra==13. and restored.dec==-25.
     assert restored.dtype==np.dtype(np.float64)
     assert restored.meta=={'source':'input.txt','stage':'corrected'}
-    assert restored.mask.all()
     with pytest.raises(OSError):spectrum.save(path)
 
 

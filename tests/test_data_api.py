@@ -39,10 +39,11 @@ def test_spectrum_generic_axis_workflow():
     assert freq.shape == x.shape
     assert np.all(np.isfinite(freq))
 
+    original = spec.copy()
     spec = spec.cutout(min=5020.0, max=5080.0)
     assert spec.x.size < x.size
 
-    spec.reset()
+    spec = original.copy()
     np.testing.assert_allclose(spec.x, x)
     np.testing.assert_allclose(spec.yerr, yerr)
 
@@ -535,8 +536,8 @@ def test_bootstrap_uncertainty_boundaries():
             verbose=False,
             noise_dist='uniform',
         )
-    assert set(samples) == {'slope', 'intercept'}
-    assert all(np.isfinite(values).sum() == 4 for values in samples.values())
+    assert set(samples.samples) == {'slope', 'intercept'}
+    assert all(np.isfinite(values).sum() == 4 for values in samples.samples.values())
 
     with pytest.raises(ResampleError, match='Asymmetric yerr is ambiguous'):
         bootstrap(
@@ -564,4 +565,4 @@ def test_bootstrap_uncertainty_boundaries():
         verbose=False,
         noise_dist='uniform',
     )
-    assert all(np.isfinite(values).sum() == 3 for values in perturbed.values())
+    assert all(np.isfinite(values).sum() == 3 for values in perturbed.samples.values())

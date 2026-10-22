@@ -523,3 +523,30 @@ def show_model(model, mode='auto', option=None):
     if mode == 'auto':
         print(text)
     return text
+
+
+def show_result(result, mode='auto'):
+    """Render a result's estimates on a temporary model, keeping source models clean."""
+    import copy
+    from html import escape
+    model = copy.deepcopy(result._graph) if hasattr(result, '_graph') else result.model
+    for name, estimate in result.params.items():
+        parameter = getattr(model, name)
+        for attribute in ('std', 'lolim', 'uplim'):
+            value = getattr(estimate, attribute, None)
+            if value is not None:
+                setattr(parameter, attribute, value)
+    info = result.fit_info
+    summary = ', '.join(f'{key}={info[key]}' for key in
+        ('success', 'stat', 'dof', 'n_success', 'n_samples') if key in info)
+    summary = type(result).__name__ + (': '+summary if summary else '')
+    if _detect_render_mode(mode) == 'html':
+        text = format_fit_html(model) + '<p>'+escape(summary)+'</p>'
+        if mode == 'auto':
+            from IPython.display import HTML
+            return HTML(text)
+        return text
+    text = format_fit_text(model) + '\n'+summary
+    if mode == 'auto':
+        print(text)
+    return text

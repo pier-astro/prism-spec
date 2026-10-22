@@ -163,7 +163,8 @@ def _restore_profile(recipe):
 def _lineset_representer(dumper, obj):
     if not obj.name:
         raise ValueError('Name custom line components before saving.')
-    state = dict(name=obj.name, setup=obj._setup, profile=_profile_recipe(obj._profile, obj._derivative), parameters={
+    state = dict(kind=getattr(getattr(obj, '_model_class', None), '__name__', None),
+                 name=obj.name, setup=obj._setup, profile=_profile_recipe(obj._profile, obj._derivative), parameters={
         name: _param_state(getattr(obj, name), dumper) for name in obj.param_names})
     return dumper.represent_mapping('!prism.LineSet', state)
 
@@ -186,6 +187,12 @@ def _lineset_constructor(loader, node):
                            parameters={key: dict(value) for key, value in setup['parameters']},
                            scale=setup['scale'], position=setup['position'],
                            derivative=derivative, name=state['name']).component
+    if state.get('kind') is not None:
+        from ..lines.models import GaussianLines, LorentzianLines, VoigtLines
+        classes = {cls.__name__: cls for cls in (GaussianLines, LorentzianLines, VoigtLines)}
+        if state['kind'] not in classes:
+            raise ValueError('Unknown saved ready-made line set.')
+        result._model_class = classes[state['kind']]
     if set(result.param_names) != set(state['parameters']):
         raise ValueError('Saved line parameter names do not match the saved setup.')
     for name, value in state['parameters'].items():
@@ -240,7 +247,8 @@ def _native_constructor(loader, node):
     from ..composition import Model
     state = loader.construct_mapping(node, deep=True)
     if 'component' in state:
-        return Model(component=state['component'])
+        from ..composition import _component_view
+        return _component_view(state['component'])
     result = Model(op=state['op'], left=state['left'], right=state['right'], name=state['name'])
     if result.op not in ('+', '-', '*', '/', '**', '|'):
         raise ValueError('Unsupported native model operation.')
@@ -324,7 +332,7 @@ def _linear_operator_pipe_constructor(loader, node):
         from ..operators.instrument import SpectralResponse
         recipe = mapping['_recipe']
         operator = SpectralResponse(instrument=recipe['instrument'], wave=mapping['_wave'],
-            z=recipe.get('z', 0), flexible=recipe.get('flexible', True),
+            redshift=recipe.get('redshift', recipe.get('z', 0)), flexible=recipe.get('flexible', True),
             renormalize=recipe.get('renormalize', False), name=mapping.get('_name', 'rsp'))
         if '_fingerprint' not in mapping or _operator_digest(operator) != mapping['_fingerprint']:
             raise ValueError('Instrument calibration or response configuration differs from the saved session.')
@@ -359,6 +367,9 @@ def register():
     AstropyDumper.add_representer(Component, _native_representer)
     from ..lines.component import LineSet, _LineGroup
     AstropyDumper.add_representer(LineSet, _native_representer)
+    from ..lines.models import GaussianLines, LorentzianLines, VoigtLines
+    for cls in (GaussianLines, LorentzianLines, VoigtLines):
+        AstropyDumper.add_representer(cls, _native_representer)
     AstropyDumper.add_representer(_LineGroup, _lineset_representer)
     AstropyLoader.add_constructor('!prism.LineSet', _lineset_constructor)
     # Read sessions written under the previous native name; emit LineSet only.

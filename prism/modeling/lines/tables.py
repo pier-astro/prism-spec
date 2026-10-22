@@ -16,20 +16,141 @@ from . import profiles
 c_kms = profiles.C_KMS
 sigma2fwhm = profiles.SIGMA2FWHM
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
+resource_path = Path(__file__).resolve().parents[3] / 'resources' / 'lines'
+_directory = None
 
 
-# ---------------------------------------------------------------------------
-# Line-table / wavelength-range globals
-# ---------------------------------------------------------------------------
+def set_directory(directory):
+    """Set the local preset directory, or None to use packaged presets only.
 
-script_dir = os.path.dirname(__file__)
-resource_path = os.path.join(script_dir, "..", "..", "..", "resources", "lines")
-linetable_path = resource_path
+    Parameters
+    ----------
+    directory : str, Path or None
+        Local preset directory, resolved now; it may be created later by export().
+        None restores packaged-only lookups. Explicit paths and existing models
+        are unchanged.
+    """
+    global _directory
+    path = None if directory is None else Path(directory).expanduser().resolve()
+    if path is not None and path.exists() and not path.is_dir():
+        raise NotADirectoryError(path)
+    _directory = path
 
-_wmin = 0.0
-_wmax = np.inf
+
+def _preset_path(name):
+    path = Path(resource_path) / (name + '.ecsv')
+    if not path.is_file():
+        available = ', '.join(p.stem for p in sorted(Path(resource_path).glob('*.ecsv')))
+        raise FileNotFoundError(f'Unknown line preset {name!r}. Packaged presets: {available}')
+    return path
+
+
+def _line_path(value):
+    if isinstance(value, Path):
+        return value
+    value = str(value)
+    if Path(value).suffix or '/' in value or '\\' in value:
+        return Path(value)
+    if _directory is not None:
+        local = _directory / (value + '.ecsv')
+        if local.exists():
+            return local
+    return _preset_path(value)
+
+
+def _select_window(table, window):
+    if window is None:
+        return table
+    if len(window) != 2:
+        raise ValueError('window must contain two finite increasing transition positions.')
+    unit = table['position'].unit
+    limits = [value.to_value(unit) if isinstance(value, u.Quantity) else float(value) for value in window]
+    if not np.isfinite(limits).all() or limits[0] >= limits[1]:
+        raise ValueError('window must contain two finite increasing transition positions.')
+    return table[(table['position'].value >= limits[0]) & (table['position'].value <= limits[1])]
+
+
+def load(lines, *, window=None):
+    """Load an independent line table from preset names, paths or tabulated data.
+
+    Parameters
+    ----------
+    lines : str, Path, sequence of names/paths, table or mapping
+        Bare names search the configured directory before packaged presets.
+        Paths (including strings with an extension) are read exactly as given,
+        with no fallback. Sequences are stacked without merging transitions.
+    window : pair, optional
+        Inclusive rest-position limits in the table's spectral unit, before
+        offset and redshift. Quantities must convert to that unit.
+
+    Returns
+    -------
+    astropy.table.QTable
+        Editable copy with name, unit-bearing position and weight columns.
+        Its write() method can save a customized ECSV table.
+    """
+    if isinstance(lines, (str, Path)):
+        table = read_linetable(_line_path(lines))
+    elif isinstance(lines, (list, tuple)) and lines and all(isinstance(item, (str, Path)) for item in lines):
+        table = stack_linetables([read_linetable(_line_path(item)) for item in lines])
+    else:
+        table = normalize_linetable(lines)
+    return _select_window(table, window)
+
+
+def export(lines=None, *, directory='lines', all=False, window=None, overwrite=False):
+    """Export selected packaged presets as editable ECSV files.
+
+    Parameters
+    ----------
+    lines : str or sequence of str, optional
+        Packaged preset names, without filename extensions. Mutually exclusive
+        with all=True. Local overrides are not read when exporting defaults.
+    directory : str or Path, optional
+        Destination, created when necessary; default 'lines'. Does not change
+        name lookup. Use set_directory() explicitly for local overrides.
+    all : bool, optional
+        Export every packaged preset instead of an explicit selection.
+    window : pair, optional
+        Inclusive rest-position limits, with the same meaning as load().
+    overwrite : bool, optional
+        Replace existing files; default False. Existing files raise
+        FileExistsError before any preset is written.
+
+    Returns
+    -------
+    list of Path
+        Paths of the written ECSV tables, including empty filtered tables.
+    """
+    if all:
+        if lines is not None:
+            raise ValueError('Pass preset names or all=True, not both.')
+        names = [path.stem for path in sorted(Path(resource_path).glob('*.ecsv'))]
+    else:
+        if lines is None:
+            raise ValueError('Pass preset names or all=True.')
+        names = [lines] if isinstance(lines, str) else list(lines)
+    if not names:
+        raise ValueError('Pass at least one preset name.')
+    directory = Path(directory)
+    tables = []
+    for name in names:
+        if not isinstance(name, str) or not name or Path(name).name != name or Path(name).suffix:
+            raise ValueError('Export requires packaged preset names without paths or extensions.')
+        table = _select_window(read_linetable(_preset_path(name)), window)
+        tables.append((directory / (name + '.ecsv'), table))
+    paths = [path for path, _ in tables]
+    if len(set(paths)) != len(paths):
+        raise ValueError('Export preset names must be distinct.')
+    if not overwrite:
+        for path in paths:
+            if path.exists():
+                raise FileExistsError(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    for path, table in tables:
+        # Plain unit-bearing columns keep exported presets compact and editable.
+        Table(table, copy=False).write(path, format='ascii.ecsv', overwrite=overwrite)
+    return paths
 
 
 def _scalar_float(value, name):
@@ -40,14 +161,6 @@ def _scalar_float(value, name):
     if not np.isfinite(scalar):
         raise ValueError(f"{name} must be finite.")
     return scalar
-
-
-def _wavelength_limit_value(value, name):
-    if value is None:
-        return None
-    if isinstance(value, u.Quantity):
-        return _scalar_float(value.to_value(u.AA, equivalencies=u.spectral()), name)
-    return _scalar_float(value, name)
 
 
 def _resolve_filter_bounds(minimum, maximum, *, unit=None, target_unit=u.AA):
@@ -72,16 +185,6 @@ def _resolve_filter_bounds(minimum, maximum, *, unit=None, target_unit=u.AA):
         raise ValueError("min and max resolve to the same spectral position.")
     return (min(lower_val, upper_val) * target_unit,
             max(lower_val, upper_val) * target_unit)
-
-
-def set_wavelength_range(wmin=None, wmax=None):
-    """Set the global wavelength range for line filtering."""
-    global _wmin, _wmax
-    if wmin is not None:
-        _wmin = _wavelength_limit_value(wmin, 'wmin')
-    if wmax is not None:
-        _wmax = _wavelength_limit_value(wmax, 'wmax')
-    print(f"Wavelength range set to: [{_wmin}, {_wmax}]")
 
 
 def _validate_domain(domain):
@@ -473,40 +576,6 @@ def _trim_linetable_file(filepath, output_dirpath, min, max, unit=None, position
     trimmed = table[(table['position'] >= lower) & (table['position'] <= upper)]
     output_path = os.path.join(output_dirpath, f"{Path(filepath).stem}.ecsv")
     _write_linetable(output_path, trimmed, overwrite=overwrite)
-
-
-def setup_local_lines(min=4000, max=7000, unit=u.AA, dirpath='./lines', overwrite=False):
-    """Copy packaged line lists locally after filtering by a spectral range.
-
-    Parameters
-    ----------
-    min, max : float or `~astropy.units.Quantity`
-        Spectral bounds used to trim the packaged Prism line lists. When plain
-        scalars are provided, they are interpreted in ``unit``. When
-        ``Quantity`` bounds are provided, ``unit`` is ignored and spectral
-        equivalencies are used.
-    unit : unit-like, optional
-        Unit for scalar ``min``/``max`` inputs. Defaults to Angstrom.
-    dirpath : str, optional
-        Output directory for the trimmed CSV files.
-    overwrite : bool, optional
-        Rewrite files even if ``dirpath`` already exists.
-
-    Notes
-    -----
-    Local copies are always written as ECSV with an explicit Angstrom unit and
-    wavelength-medium metadata.
-    """
-    lower, upper = _resolve_filter_bounds(min, max, unit=unit, target_unit=u.AA)
-    set_wavelength_range(wmin=lower, wmax=upper)
-
-    is_created = _ensure_directory(dirpath)
-
-    global linetable_path
-    linetable_path = dirpath
-
-    if overwrite or is_created:
-        trim_line_lists(min, max, resource_path, dirpath, unit=unit, overwrite=True)
 
 
 def trim_line_lists(min, max, input_dirpath, output_dirpath, unit=None, overwrite=False):

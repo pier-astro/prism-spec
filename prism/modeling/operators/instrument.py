@@ -20,10 +20,10 @@ SpectralResponse
 
 Wavelength conventions
 ~~~~~~~~~~~~~~~~~~~~~~
-When sources are redshifted, the data is typically z-corrected to rest
+When sources are redshifted, the data is typically redshift-corrected to rest
 frame.  The instrument LSF is defined in observer frame.
-``SpectralResponse`` handles the mapping via the *z* parameter:
-``λ_obs = λ_rest × (1 + z)``.
+``SpectralResponse`` handles the mapping via the *redshift* parameter:
+``λ_obs = λ_rest × (1 + redshift)``.
 
 Instrument storage
 ~~~~~~~~~~~~~~~~~~
@@ -38,7 +38,7 @@ To register a new instrument for recipe-based serialization::
 
 Example
 -------
->>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, z=0.1)
+>>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave_rest, redshift=0.1)
 >>> convolved = source_model | rsp      # CompoundModel pipe expression
 >>> convolved.left                      # unwrapped source
 >>> convolved(wave_rest)                # evaluates R @ f(wave_rest, θ)
@@ -732,11 +732,11 @@ class SpectralResponse(LinearOperatorModel):
         Name of an archived instrument (e.g. ``'MUSE-WFM'``) **or** an
         ``InstrumentResponse`` instance built manually.
     wave : array-like
-        Requested rest-frame samples, matched at lambda_obs = wave*(1+z).
+        Requested rest-frame samples, matched at lambda_obs = wave*(1+redshift).
         With flexible=True and renormalize=False, the native model grid also
         retains available neighboring source bins from the supplied response.
         Consequently wavelength_grid can be larger than wave.
-    z : float, default 0
+    redshift : float, default 0
         Redshift used to map rest→observer wavelengths.
     response_matrix : sparse matrix, optional
         Supply a pre-built matrix directly (no archive lookup, no cropping).
@@ -756,11 +756,11 @@ class SpectralResponse(LinearOperatorModel):
     Examples
     --------
     >>> # From archive (serializable — full round-trip supported)
-    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1)
+    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, redshift=0.1)
     >>> model = source | rsp
 
     >>> # Custom name at construction
-    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, z=0.1, name='muse')
+    >>> rsp = SpectralResponse(instrument='MUSE-WFM', wave=wave, redshift=0.1, name='muse')
     >>> model = source | rsp
 
     >>> # From InstrumentResponse instance (matrix serialized directly)
@@ -773,15 +773,15 @@ class SpectralResponse(LinearOperatorModel):
         self,
         instrument: str | InstrumentResponse | None = None,
         wave: np.ndarray | None = None,
-        z: float = 0,
+        redshift: float = 0,
         response_matrix=None,
         renormalize: bool = False,
         flexible: bool = True,
         name: str = 'rsp',
     ):
-        if not np.isfinite(z) or z <= -1:
+        if not np.isfinite(redshift) or redshift <= -1:
             raise ValueError('Response redshift must be finite and greater than -1.')
-        self.z = z
+        self.redshift = redshift
         self.flexible = flexible
         self.renormalize = renormalize
         self._instrument_name = None
@@ -797,7 +797,7 @@ class SpectralResponse(LinearOperatorModel):
             
         elif instrument is not None and wave is not None:
             wave = _response_grid(wave)
-            wave_obs = wave * (1 + z) if z != 0 else wave
+            wave_obs = wave * (1 + redshift) if redshift != 0 else wave
             
             # Check if instrument is a string (name) or InstrumentResponse instance
             if isinstance(instrument, str):
@@ -825,7 +825,7 @@ class SpectralResponse(LinearOperatorModel):
                 start = min(first, support.min()) if support.size else first
                 stop = max(last, support.max()) + 1 if support.size else last + 1
                 self.response_matrix = response.response_matrix[start:stop, start:stop]
-                self.wavelength_grid = response.wavelength_grid[start:stop] / (1 + z)
+                self.wavelength_grid = response.wavelength_grid[start:stop] / (1 + redshift)
             else:
                 cropped = response.crop(wave_obs, renormalize=renormalize)
                 self.response_matrix = cropped.response_matrix
@@ -878,19 +878,19 @@ class SpectralResponse(LinearOperatorModel):
             return {
                 'type': 'instrument',
                 'instrument': self._instrument_name,
-                'z': float(self.z),
+                'redshift': float(self.redshift),
                 'renormalize': bool(self.renormalize),
                 'flexible': bool(self.flexible),
             }
         return {'type': 'direct', 'flexible': bool(self.flexible),
-                'renormalize': bool(self.renormalize), 'z': float(self.z)}
+                'renormalize': bool(self.renormalize), 'redshift': float(self.redshift)}
 
     def __repr__(self) -> str:
         shape = self.wavelength_grid.shape if self.wavelength_grid is not None else None
-        z_str = f", z={self.z}" if self.z != 0 else ""
+        redshift_str = f", redshift={self.redshift}" if self.redshift != 0 else ""
         inst_str = f", instrument='{self._instrument_name}'" if self._instrument_name else ""
         name_str = f", name='{self.name}'" if self.name != 'rsp' else ""
-        return f"<SpectralResponse(wave={shape}{z_str}{inst_str}{name_str})>"
+        return f"<SpectralResponse(wave={shape}{redshift_str}{inst_str}{name_str})>"
 
 
 # Public exports

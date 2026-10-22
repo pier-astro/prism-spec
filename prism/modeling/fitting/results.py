@@ -182,6 +182,14 @@ class FitResult:
                 _clear_model_estimates(data.response)
         return associations
 
+    def show(self, mode='auto'):
+        """Display fitted parameter estimates and global fit diagnostics."""
+        from ..display import show_result
+        return show_result(self, mode=mode)
+
+    def _repr_html_(self):
+        return self.show(mode='html')
+
     def save(self, filename, overwrite=False):
         """Save models, data, response resources, links and fit estimates to FITS.
 

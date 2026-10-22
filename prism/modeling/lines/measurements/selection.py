@@ -224,6 +224,16 @@ class SelectedLineProfile:
             result[name] = result[name] + values if name in result else values
         return result
 
+    def flux(self):
+        """Analytic total intrinsic flux; propagate the retained fit covariance.
+
+        Returns a Metric, with std absent when no covariance is available. A
+        bootstrap selection propagates the actual successful refits instead.
+        This is distinct from measure's numerical finite-window integral.
+        """
+        from .measurement import _analytic_flux
+        return _analytic_flux(self)
+
     def measure(self, x=None, window=None, num=4096):
         from .measurement import measure_line
         return measure_line(self, x=x, window=window, num=num)
@@ -407,6 +417,11 @@ def select_line(model, selector, components=None, additive=True, index=None, pos
     """
     from ...fitting.multifit import MultiFitResult
     from ...fitting.results import FitResult, _DatasetFitView
+    from ...fitting.uncertainty.resample import BootstrapResult
+
+    bootstrap = model if isinstance(model, BootstrapResult) else None
+    if bootstrap is not None:
+        model = bootstrap.model
     from ...operators.matop import is_linear_operator_pipe
 
     if isinstance(model, (FitResult, _DatasetFitView)):
@@ -507,4 +522,6 @@ def select_line(model, selector, components=None, additive=True, index=None, pos
             raise TypeError(f'{name!r} is not a line model. Use profile_metrics for arbitrary profiles.')
     if not entries:
         raise KeyError(f'No line selection found for {selector!r} in the chosen components.')
-    return SelectedLineProfile(model, selector, entries)
+    selection = SelectedLineProfile(model, selector, entries)
+    selection._bootstrap_result = bootstrap
+    return selection

@@ -206,5 +206,5 @@ def test_batch_and_x_perturbed_bootstrap_do_not_construct_single_snapshots(monke
     assert result.success.all()
     samples = bootstrap(model, TRF(), x=x, y=y, yerr=np.full(x.size, .1),
                         xerr=np.full(x.size, .01), perturb_x=True,
-                        n_samples=8, seed=41, nproc=1, inplace=False)
-    assert all(np.all(np.isfinite(values)) for values in samples.values())
+                        n_samples=8, seed=41, nproc=1, )
+    assert all(np.all(np.isfinite(values)) for values in samples.samples.values())

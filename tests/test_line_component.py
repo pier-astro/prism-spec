@@ -66,8 +66,11 @@ def test_builtin_kernels_match_independent_reference(kind,widths,domain):
     t=table()
     if domain=='linear':t['position']=[1.,1.2,1.4]*u.keV
     shared=dict(offset=-85.,**widths,redshift=.08)
-    profile=partial(getattr(profiles,'_'+kind+'_line'),instfwhm=150.,domain_family=domain)
-    derivative=partial(getattr(profiles,'_'+kind+'_line_deriv'),instfwhm=150.,domain_family=domain)
+    profile_class = {'gaussian': profiles.GaussianProfile,
+                     'lorentzian': profiles.LorentzianProfile,
+                     'voigt': profiles.VoigtProfile}[kind]
+    profile = profile_class(instfwhm=150., position_unit=t['position'].unit)
+    derivative = profile.derivative
     g=LineSet(profile,t,shared=shared,
                     parameters={'Hb':{'amplitude':2.},'OIII':{'amplitude':3.}},
                     position='position',derivative=derivative,name='lines')
@@ -111,7 +114,6 @@ def test_omitted_weights_preserve_membership():
 
 
 @pytest.mark.parametrize('shared,local',[
-    ({'sigma':2,'amplitude':1},{'Hb':{},'OIII':{}}),
     ({'sigma':2},{'Hb':{'amplitude':1}}),
     ({'sigma':2},{'Hb':{'amplitude':1,'sigma':3},'OIII':{'amplitude':2}})])
 def test_invalid_scopes(shared,local):

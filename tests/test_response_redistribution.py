@@ -90,7 +90,7 @@ def test_window_archive_recipe_does_not_grow_on_roundtrip(monkeypatch):
     response = InstrumentResponse.from_fixed_sigma(native, 1.)
     monkeypatch.setattr(InstrumentResponse, 'from_instrument', classmethod(lambda cls, name: response))
     requested = native[200:250]/1.1
-    model = Gaussian1D(2., requested[0], 1.) | SpectralResponse(instrument='TEST', wave=requested, z=.1)
+    model = Gaussian1D(2., requested[0], 1.) | SpectralResponse(instrument='TEST', wave=requested, redshift=.1)
     original_grid = model.right.wavelength_grid.copy()
     original_flux = model(requested)
     for _ in range(3):
@@ -158,3 +158,26 @@ def test_offset_sampling_keeps_bracketing_rows_even_for_identity(shift):
     operator = SpectralResponse(instrument=response, wave=requested)
     expected = np.interp(requested, native, source(native))
     np.testing.assert_allclose((source | operator)(requested), expected, atol=1e-14)
+
+
+def test_rest_frame_grid_requires_its_response_redshift(tmp_path):
+    native = np.arange(4700.406, 4801., 1.25)
+    response = InstrumentResponse.from_fixed_sigma(native, 1.)
+    redshift = .014630
+    observed = native[10:40]
+    rest = observed/(1+redshift)
+    with pytest.raises(ValueError, match='not found within'):
+        SpectralResponse(instrument=response, wave=rest)
+    operator = SpectralResponse(instrument=response, wave=rest, redshift=redshift)
+    assert operator.redshift == redshift
+    assert operator.recipe['redshift'] == redshift
+    x = operator.wavelength_grid
+    expected = response(np.ones(native.size))[10:40]
+    from prism.modeling import Component
+    constant = Component(lambda x, a: np.full_like(x,a), {'a':1.}, name='constant')
+    np.testing.assert_allclose((constant | operator)(rest), expected, rtol=1e-12)
+    filename = tmp_path/'response.fits'
+    operator.save(filename)
+    restored = type(operator).from_fits(filename)
+    assert restored.redshift == redshift
+    np.testing.assert_array_equal(restored.matrix.toarray(), operator.matrix.toarray())

@@ -25,13 +25,14 @@ Covariance-based uncertainties:
 Bootstrap intervals:
 
         from prism.modeling.fitting import TRF
-        from prism.modeling.fitting.uncertainty import bootstrap, resample_attach
+        from prism.modeling.fitting.uncertainty import bootstrap
 
         fitter = TRF()
         result = fitter(model, x, y, yerr=yerr)
         fitted = result.model
         samples = bootstrap(fitted, fitter, x, y, yerr, n_samples=500)
-        resample_attach(fitted, samples)
+        samples.params
+        samples.show()
 """
 
 from .covariance import (
@@ -48,8 +49,7 @@ from .covariance import (
 from .resample import (
     Bootstrap,
     bootstrap,
-    attach as resample_attach,
-    detach as resample_detach,
+    BootstrapResult,
     ResampleError
 )
 
@@ -66,8 +66,7 @@ __all__ = [
     # Resample
     'Bootstrap',
     'bootstrap',
-    'resample_attach',
-    'resample_detach',
+    'BootstrapResult',
     'ResampleError',
 ]
 

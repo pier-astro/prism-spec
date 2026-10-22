@@ -639,3 +639,31 @@ and all its optional dependencies are functional.
 otherwise scale as the number of targets times the squared free-parameter count.
 The matrix is available as `result.covariance`. Astropy interoperability adapters
 keep Astropy's separate `calc_uncertainties` constructor option.
+
+## Inspecting results and bootstrap draws
+
+`result.show()` displays fitted values, errors and diagnostics. A detached
+`result.model` contains the evaluable model without result uncertainty metadata.
+
+```python
+from prism.modeling.fitting.uncertainty import bootstrap
+
+resampled = bootstrap(result.model, TRF(covariance=False),
+                      x=x, y=y, yerr=yerr, n_samples=200, seed=11)
+resampled.show()
+resampled.params["amplitude"]
+resampled.samples["amplitude"]
+```
+
+`bootstrap` returns `BootstrapResult` and leaves its input unchanged. `.params`
+contains nominal values, sample standard deviations and central intervals;
+`.samples` contains correlated free-parameter refits, with NaNs for failed
+realizations. `.model` returns a detached nominal model. Bootstrap currently
+operates on one spectrum, not a complete joint or batch result. Save draws
+explicitly with `np.savez(filename, **resampled.samples)` when needed.
+
+New `FitResult.save` files also carry a small parameter-value table.
+`load_params(filename)` reads it without reconstructing models or responses,
+allowing explicit name-based initialization of a modified model. It does not
+assert scientific equivalence of two model expressions. `FitResult.load`
+continues to restore complete sessions.

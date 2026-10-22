@@ -17,8 +17,8 @@ def test_resampling_recovers_independent_weighted_mean(statistic, weights_only):
     kwargs = {"weights": 1 / errors} if weights_only else {"yerr": errors}
     with warnings.catch_warnings(record=True) as caught:
         samples = bootstrap(Const1D(-30.), TRF(), x=x, y=y, n_samples=16,
-                            seed=81, statistic=statistic, inplace=False, **kwargs)
-    np.testing.assert_allclose(samples["amplitude"], expected, rtol=1e-7, atol=1e-7)
+                            seed=81, statistic=statistic, **kwargs)
+    np.testing.assert_allclose(samples.samples["amplitude"], expected, rtol=1e-7, atol=1e-7)
     assert not any("barely" in str(item.message) or "reoptimiz" in str(item.message) for item in caught)
 
 def test_excluded_values_and_errors_do_not_enter_noise():
@@ -26,9 +26,9 @@ def test_excluded_values_and_errors_do_not_enter_noise():
     np.testing.assert_equal(raw, [0.3, 0.])
     np.testing.assert_equal(weights, [2., 0.])
     samples = bootstrap(Const1D(-10), TRF(), x=[0., 1.], y=[2., np.nan],
-                        yerr=[0.3, np.nan], weights=[2., 0.], n_samples=8, seed=7, inplace=False)
+                        yerr=[0.3, np.nan], weights=[2., 0.], n_samples=8, seed=7, )
     expected = np.random.default_rng(7).normal([2., 0.], [0.3, 0.], size=(8, 2))[:, 0]
-    np.testing.assert_allclose(samples["amplitude"], expected, atol=1e-7)
+    np.testing.assert_allclose(samples.samples["amplitude"], expected, atol=1e-7)
 
 @pytest.mark.parametrize("errors, weights", [([-1., 1.], None), ([1.], None), ([1., 1.], [-1., 1.]), ([1., 1.], [0., 0.])])
 def test_invalid_noise_contract(errors, weights):
@@ -67,5 +67,5 @@ def test_x_perturbation_does_not_count_failed_fits():
     with pytest.warns(RuntimeWarning, match="Only 0.0%"):
         samples = bootstrap(Const1D(), FailedFitter(), x=[0., 1.], y=[1., 2.],
                             yerr=[0.2, 0.3], xerr=[0.1, 0.1], perturb_x=True,
-                            n_samples=3, seed=1, inplace=False)
-    assert np.all(np.isnan(samples["amplitude"]))
+                            n_samples=3, seed=1, )
+    assert np.all(np.isnan(samples.samples["amplitude"]))

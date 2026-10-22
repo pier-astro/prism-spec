@@ -393,73 +393,35 @@ def _lorentzian_velocity_deriv(x, pos, amplitude, weight, offset, fwhm, redshift
     return value, d_amp, d_pos, d_off, d_width, d_z
 
 
-def _gaussian_line(x, amplitude, position, offset, fwhm, redshift,
-                   *, instfwhm=0.0, domain_family='wavelength'):
-    """Gaussian with explicit velocity-to-coordinate conversion and peak scaling.
-
-    Numeric velocity widths are km/s. A Lorentzian with Gaussian instrumental
-    broadening is evaluated as a Voigt. This is the shared scientific kernel
-    for native function components and weighted transition groups.
-    """
-    center = observed_center(position, offset, redshift, domain_family=domain_family)
-    instrumental_width = instfwhm(center) if callable(instfwhm) else instfwhm
-    effective = gaussian_profile_params(
-        center, amplitude, 1.0, fwhm, redshift, instrumental_width)
-    return gaussian(x, effective[0], center, *effective[1:])
-
-
-def _lorentzian_line(x, amplitude, position, offset, fwhm, redshift,
-                   *, instfwhm=0.0, domain_family='wavelength'):
-    """Lorentzian with explicit velocity-to-coordinate conversion and peak scaling.
-
-    Numeric velocity widths are km/s. A Lorentzian with Gaussian instrumental
-    broadening is evaluated as a Voigt. This is the shared scientific kernel
-    for native function components and weighted transition groups.
-    """
-    center = observed_center(position, offset, redshift, domain_family=domain_family)
-    instrumental_width = instfwhm(center) if callable(instfwhm) else instfwhm
-    effective = lorentzian_profile_params(
-        center, amplitude, 1.0, fwhm, redshift, instrumental_width)
-    return voigt(x, effective[0], center, *effective[1:])
+def _voigt_flux_gradient(amplitude, sigma, gamma):
+    """Total area and its peak, Gaussian-width and Lorentzian-width derivatives."""
+    if sigma == 0:
+        return lorentzian_flux(amplitude, gamma), np.pi*gamma, 0., np.pi*amplitude
+    z = 1j*gamma/(sigma*np.sqrt(2.))
+    w = wofz(z)
+    dw = -2*z*w + 2j/np.sqrt(np.pi)
+    norm = w.real/(sigma*SQRT_2PI)
+    dnorm_sigma = (-dw*z).real/(sigma**2*SQRT_2PI) - norm/sigma
+    dnorm_gamma = (dw*1j/np.sqrt(2.)).real/(sigma**2*SQRT_2PI)
+    return (amplitude/norm, 1./norm,
+            -amplitude*dnorm_sigma/norm**2, -amplitude*dnorm_gamma/norm**2)
 
 
-def _voigt_line(x, amplitude, position, offset, fwhm_G, fwhm_L, redshift,
-                   *, instfwhm=0.0, domain_family='wavelength'):
-    """Voigt with explicit velocity-to-coordinate conversion and peak scaling.
-
-    Numeric velocity widths are km/s. A Lorentzian with Gaussian instrumental
-    broadening is evaluated as a Voigt. This is the shared scientific kernel
-    for native function components and weighted transition groups.
-    """
-    center = observed_center(position, offset, redshift, domain_family=domain_family)
-    instrumental_width = instfwhm(center) if callable(instfwhm) else instfwhm
-    effective = voigt_profile_params(
-        center, amplitude, 1.0, fwhm_G, fwhm_L, redshift, instrumental_width)
-    return voigt(x, effective[0], center, *effective[1:])
-
-
-def _gaussian_line_deriv(x, amplitude, position, offset, fwhm, redshift,
-                         *, instfwhm=0.0, domain_family='wavelength'):
-    """Derivative rows in the native callable's argument order, fixed instrumental width."""
-    return gaussian_velocity_deriv(
-        x, position, amplitude, 1.0, offset, fwhm, redshift,
-        instfwhm, 0.0, domain_family=domain_family)[1:]
-
-
-def _lorentzian_line_deriv(x, amplitude, position, offset, fwhm, redshift,
-                         *, instfwhm=0.0, domain_family='wavelength'):
-    """Derivative rows in the native callable's argument order, fixed instrumental width."""
-    return _lorentzian_velocity_deriv(
-        x, position, amplitude, 1.0, offset, fwhm, redshift,
-        instfwhm, 0.0, domain_family=domain_family)[1:]
-
-
-def _voigt_line_deriv(x, amplitude, position, offset, fwhm_G, fwhm_L, redshift,
-                         *, instfwhm=0.0, domain_family='wavelength'):
-    """Derivative rows in the native callable's argument order, fixed instrumental width."""
-    return voigt_velocity_deriv(
-        x, position, amplitude, 1.0, offset, fwhm_G, fwhm_L, redshift,
-        instfwhm, 0.0, domain_family=domain_family)[1:]
+def _voigt_integral_gradient(amplitude, position, center, fwhm_G, fwhm_L,
+                             redshift, instrumental, slope, sign):
+    """Chain rule for the total Voigt area, including chromatic broadening."""
+    width = np.hypot(fwhm_G, instrumental)
+    sigma = center*width/(C_KMS*SIGMA2FWHM)
+    gamma = center*fwhm_L/(2*C_KMS)
+    peak = amplitude/(1+redshift)
+    flux, dpeak, dsigma, dgamma = _voigt_flux_gradient(peak, sigma, gamma)
+    dsigma_center = (width + (center*instrumental*slope/width if width else 0.))/(C_KMS*SIGMA2FWHM)
+    dcenter = dsigma*dsigma_center + dgamma*fwhm_L/(2*C_KMS)
+    return np.array([dpeak/(1+redshift), dcenter*center/position,
+        dcenter*sign*center/C_KMS,
+        dsigma*center/(C_KMS*SIGMA2FWHM)*(fwhm_G/width if width else 1.),
+        dgamma*center/(2*C_KMS),
+        (dcenter*sign*center-dpeak*peak)/(1+redshift)])
 
 
 class _LineProfile:
@@ -510,8 +472,31 @@ class GaussianProfile(_LineProfile):
     """
 
     def __call__(self, x, amplitude, position, offset, fwhm, redshift):
-        return _gaussian_line(x, amplitude, position, offset, fwhm, redshift,
-                              instfwhm=self._width_at, domain_family=self.domain_family)
+        factor = (1+redshift)*np.exp(offset/C_KMS)
+        center = position*factor if self.domain_family == 'wavelength' else position/factor
+        instrumental = self._width_at(center)
+        sigma = center*np.hypot(fwhm, instrumental)/(C_KMS*SIGMA2FWHM)
+        peak = amplitude/(1+redshift)
+        return gaussian(x, peak, center, sigma)
+
+    def _integral(self, amplitude, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        return amplitude/(1+redshift)*sigma*SQRT_2PI
+
+    def _integral_gradient(self, amplitude, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        instrumental = self._width_at(center)
+        width = np.hypot(fwhm, instrumental)
+        peak = amplitude/(1+redshift)
+        factor = SQRT_2PI/(C_KMS*SIGMA2FWHM)
+        flux = peak*center*width*factor
+        dcenter = peak*factor*(width + (center*instrumental*self._width_slope(center)/width if width else 0.))
+        sign = 1. if self.domain_family == 'wavelength' else -1.
+        return np.array([center*width*factor/(1+redshift),
+            dcenter*center/position, dcenter*sign*center/C_KMS,
+            peak*center*factor*(fwhm/width if width else 1.),
+            (dcenter*sign*center-flux)/(1+redshift)])
 
     def derivative(self, x, amplitude, position, offset, fwhm, redshift):
         """Analytic rows in amplitude, position, offset, fwhm, redshift order."""
@@ -523,11 +508,9 @@ class GaussianProfile(_LineProfile):
                                        domain_family=self.domain_family)[1:]
 
     def _center_width(self, amplitude, position, offset, fwhm, redshift):
-        """Observed center and width estimate used only to prepare a measurement grid."""
-        center = observed_center(position, offset, redshift, domain_family=self.domain_family)
-        effective = gaussian_profile_params(
-            center, amplitude, 1.0, fwhm, redshift, self._width_at(center))
-        return center, float(_profile_fwhm(*effective[1:]))
+        """Center and effective FWHM, used only to prepare a measurement grid."""
+        center = observed_center(position, offset, redshift, self.domain_family)
+        return center, center*np.hypot(fwhm, self._width_at(center))/C_KMS
 
 
 class LorentzianProfile(_LineProfile):
@@ -549,8 +532,25 @@ class LorentzianProfile(_LineProfile):
     """
 
     def __call__(self, x, amplitude, position, offset, fwhm, redshift):
-        return _lorentzian_line(x, amplitude, position, offset, fwhm, redshift,
-                                instfwhm=self._width_at, domain_family=self.domain_family)
+        factor = (1+redshift)*np.exp(offset/C_KMS)
+        center = position*factor if self.domain_family == 'wavelength' else position/factor
+        sigma = center*self._width_at(center)/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm/(2*C_KMS)
+        peak = amplitude/(1+redshift)
+        return voigt(x, peak, center, sigma, gamma)
+
+    def _integral(self, amplitude, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*self._width_at(center)/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm/(2*C_KMS)
+        return voigt_flux(amplitude/(1+redshift), sigma, gamma)
+
+    def _integral_gradient(self, amplitude, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sign = 1. if self.domain_family == 'wavelength' else -1.
+        gradient = _voigt_integral_gradient(amplitude, position, center, 0., fwhm,
+            redshift, self._width_at(center), self._width_slope(center), sign)
+        return gradient[[0, 1, 2, 4, 5]]
 
     def derivative(self, x, amplitude, position, offset, fwhm, redshift):
         """Analytic rows including the position-dependent instrumental width."""
@@ -564,9 +564,9 @@ class LorentzianProfile(_LineProfile):
     def _center_width(self, amplitude, position, offset, fwhm, redshift):
         """Observed center and width estimate used only to prepare a measurement grid."""
         center = observed_center(position, offset, redshift, domain_family=self.domain_family)
-        effective = lorentzian_profile_params(
-            center, amplitude, 1.0, fwhm, redshift, self._width_at(center))
-        return center, float(_profile_fwhm(*effective[1:]))
+        sigma = center*self._width_at(center)/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm/(2*C_KMS)
+        return center, float(_profile_fwhm(sigma, gamma))
 
 
 class VoigtProfile(_LineProfile):
@@ -587,8 +587,24 @@ class VoigtProfile(_LineProfile):
     """
 
     def __call__(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
-        return _voigt_line(x, amplitude, position, offset, fwhm_G, fwhm_L, redshift,
-                           instfwhm=self._width_at, domain_family=self.domain_family)
+        factor = (1+redshift)*np.exp(offset/C_KMS)
+        center = position*factor if self.domain_family == 'wavelength' else position/factor
+        sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm_L/(2*C_KMS)
+        peak = amplitude/(1+redshift)
+        return voigt(x, peak, center, sigma, gamma)
+
+    def _integral(self, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm_L/(2*C_KMS)
+        return voigt_flux(amplitude/(1+redshift), sigma, gamma)
+
+    def _integral_gradient(self, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sign = 1. if self.domain_family == 'wavelength' else -1.
+        return _voigt_integral_gradient(amplitude, position, center, fwhm_G, fwhm_L,
+            redshift, self._width_at(center), self._width_slope(center), sign)
 
     def derivative(self, x, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
         """Analytic rows including the position-dependent instrumental width."""
@@ -602,6 +618,6 @@ class VoigtProfile(_LineProfile):
     def _center_width(self, amplitude, position, offset, fwhm_G, fwhm_L, redshift):
         """Observed center and width estimate used only to prepare a measurement grid."""
         center = observed_center(position, offset, redshift, domain_family=self.domain_family)
-        effective = voigt_profile_params(
-            center, amplitude, 1.0, fwhm_G, fwhm_L, redshift, self._width_at(center))
-        return center, float(_profile_fwhm(*effective[1:]))
+        sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm_L/(2*C_KMS)
+        return center, float(_profile_fwhm(sigma, gamma))

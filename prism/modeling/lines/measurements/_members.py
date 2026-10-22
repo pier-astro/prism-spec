@@ -63,6 +63,26 @@ class _LineMember:
         values = profile(x, *arguments)
         return values if self.output_unit is None else values*self.output_unit
 
+    def integral(self):
+        """Analytic integral and local parameter gradient, using evaluation's weights."""
+        profile, arguments = self.profile_arguments()
+        integral = getattr(profile, '_integral', None)
+        gradient = getattr(profile, '_integral_gradient', None)
+        if integral is None or gradient is None:
+            raise NotImplementedError('This profile has no analytic total integral; use measure with an explicit grid/window.')
+        value = float(integral(*arguments))
+        derivatives = np.asarray(gradient(*arguments), dtype=float)
+        component = self.component
+        if isinstance(component, _LineGroup):
+            slots = component._groups[self.entry.template_index][2]
+            pairs = [(getattr(component, component.param_names[index]), derivatives[arg]*
+                      (self.entry.weight if arg == component._scale_slot else 1.))
+                     for arg, index in enumerate(slots) if arg != component._position_slot]
+        else:
+            pairs = [(getattr(component, name), derivative)
+                     for name, derivative in zip(component.param_names, derivatives)]
+        return value, pairs
+
     def center_width(self):
         """Effective width for a grid extent; the measured FWHM remains numerical."""
         profile, arguments = self.profile_arguments()

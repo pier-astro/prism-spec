@@ -49,8 +49,9 @@ equivalent widths, missing cube fits and uncertainty assumptions.
   units. Convert quantities before construction/evaluation. The table records
   spectral units; profile velocities are km/s. Automatic Astropy quantity
   stripping and its per-model `velocity_unit` option are not native APIs.
-- Analytic `.flux`/`.ew` properties are replaced by explicit selected-profile
-  measurements and sampling. Custom profiles require an explicit grid/window.
+- Ready-made native sets expose `flux()` for total analytic integrals.
+  Selected profiles use `.measure()` for finite numerical windows and equivalent
+  widths; custom profiles require an explicit grid/window.
 - `infer_window` no longer has the legacy zero-width `min_width` fallback;
   supply an explicit grid/window for a zero-width or unknown profile.
 
@@ -59,16 +60,16 @@ equivalent widths, missing cube fits and uncertainty assumptions.
 ```python
 from prism.modeling.lines import GaussianLines, LorentzianLines, VoigtLines
 
-narrow = GaussianLines("oiii.ecsv", fwhm=300., instfwhm=120., name="narrow")
+narrow = GaussianLines("oiii", fwhm=300., instfwhm=120., name="narrow")
 broad = LorentzianLines(linetable, fwhm=1500., instfwhm=120., name="broad")
 voigt = VoigtLines(linetable, fwhm_G=300., fwhm_L=100., name="voigt")
 ```
 
-These are native constructors returning `LineSet`, with shared kinematics and
+These are thin native `LineSet` subclasses, with shared kinematics and
 one peak amplitude per template. They prepare the same profiles, derivatives
 and parameter maps as an explicit custom set; no evaluation layer is added.
-Tables/mappings carry spectral units; relative ECSV paths use the current
-line-table directory. `redshift` starts fixed. `bounds={"amplitude": (0, 100)}`
+Tables/mappings carry spectral units. Bare preset names search the configured
+local directory then packaged defaults; paths are read exactly as given. `redshift` starts fixed. `bounds={"amplitude": (0, 100)}`
 applies to every template amplitude; individual parameters remain editable.
 Instrumental widths may be scalar or tabulated at observed positions. Gaussian
 broadening combines in quadrature only with Gaussian widths; a broadened
@@ -78,3 +79,60 @@ Use `LineSet(profile, lines, shared, parameters, ...)` when specifying a custom
 profile or parameter sharing. This replaces the former native `LineComponent`
 name. New sessions emit `!prism.LineSet`; the previous native tag remains readable.
 The ready-made constructors are unrelated to the removed Astropy subclasses.
+
+## Total fluxes and uncertainties
+
+```python
+narrow = GaussianLines(["hydrogen", "oiii"],
+                       window=(4800., 6800.), fwhm=300., name="narrow")
+narrow.flux()  # table: name, rest position, weight, total flux
+select_line(result, "OIII", components="narrow").flux()  # Metric(value, std)
+```
+
+`window` filters rest transition positions in the table's unit, before velocity
+shifts/redshift. It is unrelated to a numerical integration window. The table
+reports every transition; weights multiply its peak exactly once. Analytic
+integrals include profile-local broadening and precede any response operator.
+No flux normalization is imposed on generic `LineSet`: custom profiles may use
+peaks, integrated fluxes or another scale argument, shared or per template.
+
+For a fitted result, selected analytic fluxes propagate the complete covariance
+by the delta method, including links and cross-observation terms. Without a
+covariance, `std` is `None`. Selecting a `BootstrapResult` instead propagates the
+actual successful refits and reports their spread and central interval. The
+nominal value remains the integral at the supplied model's nominal parameters.
+These intervals are not posterior probabilities. `.measure(window=...)` always
+integrates the specified finite window, including for built-in profiles.
+
+## Inspect, export and customize presets
+
+```python
+from prism.modeling import lines
+
+lines.set_directory("lines")
+lines.export(["hydrogen", "helium", "oiii"], directory="lines",
+             window=(4800., 7000.), overwrite=False)
+table = lines.load("oiii")
+# Edit the table in Python or open the exported ECSV in a text editor.
+table.write("lines/custom.ecsv", overwrite=True)
+narrow = lines.GaussianLines("custom", fwhm=300.)
+```
+
+`load` returns an independent, editable QTable. Its standard `write` method can
+write ECSV or another Astropy-supported format. ECSV preserves spectral units.
+`export(all=True, directory="lines", window=...)` writes every packaged preset;
+export always reads packaged defaults, even if a local override is configured.
+Existing destinations raise before any files are written unless overwrite=True.
+Empty filtered presets are exported as empty tables. The window uses rest
+positions in the table's unit and never changes the source files.
+
+`set_directory` is explicit session configuration for future name lookups. The
+directory may not yet exist and its path is resolved when configured. A bare
+name first uses a local ECSV if present, otherwise the packaged preset; malformed
+local files raise rather than silently falling back. Strings with extensions
+or path separators, and all Path objects, are explicit paths without fallback.
+`set_directory(None)` restores packaged-only lookup. Export does not configure
+the directory; existing models retain their prepared tables after any change.
+
+This replaces `setup_local_lines` and `set_wavelength_range`: no global wavelength
+filter is applied. Use window explicitly for model construction or table loading.

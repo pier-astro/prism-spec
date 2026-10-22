@@ -196,7 +196,7 @@ class Model:
             if isinstance(leaf, LinearOperatorModel):
                 view = leaf
             else:
-                view = Model(component=leaf)
+                view = _component_view(leaf)
                 view._evaluation_parent = getattr(self, '_evaluation_parent', self)
             components[key] = view
         return MappingProxyType(components)
@@ -329,3 +329,11 @@ class Model:
 
 def _is_compound(model):
     return isinstance(model, CompoundModel) or isinstance(model, Model) and model.op is not None
+
+
+def _component_view(component):
+    """Retain a component's public model type in live and restored views."""
+    cls = getattr(component, '_model_class', Model)
+    view = cls.__new__(cls)
+    Model.__init__(view, component=component)
+    return view

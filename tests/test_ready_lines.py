@@ -38,14 +38,14 @@ def test_ready_lines_file_and_omitted_weights(tmp_path,monkeypatch):
     from astropy.table import QTable
     table=QTable(dict(name=['A','A'],position=[4959.,5007.]*u.AA,weight=[1/3,1.]))
     table.write(tmp_path/'pair.ecsv')
-    monkeypatch.setattr(tables,'linetable_path',str(tmp_path))
-    model=GaussianLines('pair.ecsv',fwhm=300.,name='file')
+    monkeypatch.setattr(tables,'_directory',tmp_path)
+    model=GaussianLines('pair',fwhm=300.,name='file')
     assert model.param_names==('offset','fwhm','redshift','amp_a')
     omitted=GaussianLines(dict(name=['A','A'],position=[4959.,5007.]*u.AA),name='unweighted')
     assert omitted.param_names==model.param_names
     table.remove_column('weight')
     table.write(tmp_path/'unweighted.ecsv')
-    assert GaussianLines('unweighted.ecsv').param_names == model.param_names
+    assert GaussianLines('unweighted').param_names == model.param_names
     with pytest.raises(ValueError,match='Instrumental'):
         GaussianLines(table,instfwhm=-1.)
 

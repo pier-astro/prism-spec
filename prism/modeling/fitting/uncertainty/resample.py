@@ -7,8 +7,7 @@ from ..utils import _free_parameter_indices
 __all__ = [
     'Bootstrap',
     'bootstrap',
-    'attach',
-    'detach',
+    'BootstrapResult',
     'ResampleError',
 ]
 
@@ -102,6 +101,73 @@ def extract_limits(param, param_samples, lower_percentile, upper_percentile,
     return lolim, uplim
 
 
+class BootstrapResult:
+    """Detached bootstrap estimates and correlated parameter samples.
+
+    params exposes nominal values, sample standard deviations and central
+    intervals. samples contains read-only arrays of free-parameter refits; failed
+    realizations remain NaN. The original model is never updated. Selecting a
+    line from this result propagates these same refits into its analytic flux.
+    """
+    def __init__(self, model, samples, confidence, fit_info):
+        import copy
+        from types import MappingProxyType
+        from ...metrics import Metric
+        from ..results import _clear_model_estimates
+        from ..utils import apply_tied
+        if not 0 < confidence < 100:
+            raise ValueError('confidence must lie strictly between 0 and 100.')
+        self._model = copy.deepcopy(model)
+        _clear_model_estimates(self._model)
+        self._confidence = confidence
+        arrays = {name: np.array(values, dtype=float, copy=True) for name, values in samples.items()}
+        for values in arrays.values():
+            values.setflags(write=False)
+        self.samples = MappingProxyType(arrays)
+        self.fit_info = MappingProxyType(dict(fit_info))
+        working = copy.deepcopy(self._model)
+        values = {name: [] for name in working.param_names}
+        for draw in zip(*arrays.values()):
+            if not np.isfinite(draw).all():
+                continue
+            self._set_values(working, draw)
+            apply_tied(working)
+            for name in values:
+                values[name].append(np.array(getattr(working, name).value, copy=True))
+        estimates = {}
+        alpha = (100-confidence)/2
+        for name, draws in values.items():
+            parameter = getattr(self._model, name)
+            std = lower = upper = None
+            if len(draws) >= 2:
+                std = np.std(draws, axis=0, ddof=1)
+                lower, upper = np.percentile(draws, [alpha, 100-alpha], axis=0)
+            estimates[name] = Metric(parameter.value, std, lower, upper, parameter.unit)
+        self.params = MappingProxyType(estimates)
+
+    @property
+    def model(self):
+        """Detached nominal model, without statistical estimates attached."""
+        import copy
+        return copy.deepcopy(self._model)
+
+    def _set_values(self, model, values):
+        for name, value in zip(self.samples, values):
+            if '[' in name:
+                base, index = name.split('[')
+                parameter = getattr(model, base)
+                updated = np.array(parameter.value, copy=True)
+                updated[int(index.rstrip(']'))] = value
+                parameter.value = updated
+            else:
+                getattr(model, name).value = value
+
+    def show(self, mode='auto'):
+        """Display nominal values and bootstrap uncertainties, without mutation."""
+        from ...display import show_result
+        return show_result(self, mode=mode)
+
+
 class Bootstrap:
     """Flux Randomization (Empirical Monte Carlo) uncertainty estimator.
 
@@ -133,7 +199,7 @@ class Bootstrap:
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
                  seed=None, confidence=68, noise_dist='uniform',
                  verbose=True, nproc=1,
-                 inplace=True, set_values=True, xerr=None, perturb_x=False):
+                 xerr=None, perturb_x=False):
         # Frozen copy: all bootstrap iterations start from this state.
         # The original model is never mutated during the run.
         self._initial_model = model.copy()
@@ -153,9 +219,7 @@ class Bootstrap:
         self.seed = seed
         self.verbose = bool(verbose)
         self.nproc = int(nproc)
-        self.inplace = bool(inplace)
         self.confidence = confidence
-        self.set_values = bool(set_values)
         self.noise_dist = noise_dist.lower()
         self.perturb_x = bool(perturb_x)
 
@@ -173,7 +237,7 @@ class Bootstrap:
         return names
 
     def run(self):
-        """Run bootstrap and return parameter sample arrays."""
+        """Run bootstrap and return a detached BootstrapResult."""
         if is_batched_result_like(self.model):
             raise NotImplementedError(
                 "Resampling for batched spectra/cubes is not implemented yet. "
@@ -348,110 +412,15 @@ class Bootstrap:
         if self.verbose:
             print(f"✓ Bootstrap complete: {n_success}/{self.n_samples} successful")
 
-        if self.inplace:
-            Bootstrap.attach(
-                self.model, samples,
-                confidence=self.confidence,
-                set_values=self.set_values,
-                verbose=self.verbose,
-            )
-
-        return samples
-
-    @staticmethod
-    def attach(model, samples, confidence=68, percentiles=None, verbose=False, set_values=True):
-        """Attach bootstrap uncertainties to model parameters in-place."""
-        if is_batched_result_like(model):
-            raise NotImplementedError(
-                "Attaching resampling limits to batched spectra/cubes is not implemented yet. "
-                "Use ad-hoc single-spectrum fitting for uncertainty attachment."
-            )
-
-        if percentiles is None:
-            percentiles = [16, 50, 84]
-        if 50 not in percentiles:
-            percentiles = list(percentiles) + [50]
-
-        alpha = (100 - confidence) / 2
-        lower_percentile = alpha
-        upper_percentile = 100 - alpha
-
-        for param_name, param_samples in samples.items():
-            if '[' in param_name:
-                base_name = param_name.split('[')[0]
-                idx = int(param_name.split('[')[1].rstrip(']'))
-                param = getattr(model, base_name)
-
-                if not hasattr(param, 'std') or param.std is None or np.isscalar(param.std):
-                    param.std = np.full(param.size, np.nan)
-                    param.median = np.full(param.size, np.nan)
-                    param.lolim = np.full(param.size, np.nan)
-                    param.uplim = np.full(param.size, np.nan)
-                    param.percentiles = {}
-
-                valid_samples = param_samples[~np.isnan(param_samples)]
-                if len(valid_samples) == 0:
-                    continue
-
-                param.std[idx] = np.std(valid_samples)
-                param.median[idx] = np.percentile(valid_samples, 50)
-                lolim, uplim = extract_limits(param, param_samples, lower_percentile, upper_percentile)
-                param.lolim[idx] = lolim
-                param.uplim[idx] = uplim
-
-                for p in percentiles:
-                    if p not in param.percentiles:
-                        param.percentiles[p] = np.full(param.size, np.nan)
-                    param.percentiles[p][idx] = np.percentile(valid_samples, p)
-
-                if set_values and np.isfinite(param.median[idx]):
-                    updated = np.array(param.value, copy=True)
-                    updated.flat[idx] = param.median[idx]
-                    param.value = updated
-                continue
-
-            param = getattr(model, param_name)
-            valid_samples = param_samples[~np.isnan(param_samples)]
-            if len(valid_samples) == 0:
-                continue
-
-            param.std = np.std(valid_samples)
-            param.median = np.percentile(valid_samples, 50)
-            lolim, uplim = extract_limits(param, param_samples, lower_percentile, upper_percentile)
-            param.lolim = lolim
-            param.uplim = uplim
-            param.percentiles = {p: np.percentile(valid_samples, p) for p in percentiles}
-
-            if set_values and np.isfinite(param.median):
-                param.value = param.median
-
-            if verbose:
-                print(
-                    f"  {param_name}: {param.value:.6g} ± {param.std:.6g} "
-                    f"(median: {param.median:.6g}) [{param.lolim:.6g}, {param.uplim:.6g}]"
-                )
-
-        if verbose:
-            print(f"✓ Attached uncertainties with {confidence}% confidence intervals")
-
-    @staticmethod
-    def detach(model):
-        """Remove bootstrap uncertainty attributes from model parameters."""
-        for param_name in model.param_names:
-            param = getattr(model, param_name)
-            for attr in ['std', 'median', 'lolim', 'uplim', 'percentiles', 'samples']:
-                if not hasattr(param, attr):
-                    continue
-                try:
-                    delattr(param, attr)
-                except (AttributeError, TypeError):
-                    setattr(param, attr, None)
+        return BootstrapResult(self._initial_model, samples, self.confidence,
+            dict(n_samples=self.n_samples, n_success=n_success, seed=self.seed,
+                 statistic=self.statistic, noise_dist=self.noise_dist, perturb_x=self.perturb_x))
 
 
 def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
               n_samples=1000, statistic='gauss', fitter_kwargs=None, seed=None,
               verbose=False, nproc=1,
-              inplace=True, confidence=68, set_values=True, noise_dist='gauss',
+              confidence=68, noise_dist='gauss',
               xerr=None, perturb_x=False):
     """Estimate parameter uncertainties via Flux Randomization (Empirical Monte Carlo).
 
@@ -462,14 +431,14 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
 
     Parameters
     ----------
-    model : Astropy model
+    model : native or adapted model
         Fitted model whose parameters carry the starting values.
     fitter : Fitter, optional
         Fitter for each iteration. Defaults to ``TRF()``, which uses analytic
         derivatives when available and otherwise finite differences. Every
         realization starts from the same supplied model state.
     x, y, yerr : array-like
-        Observed wavelengths, fluxes, and 1-sigma uncertainties.
+        Observed coordinates, values, and 1-sigma uncertainties.
     n_samples : int
         Number of Monte Carlo iterations.
     statistic : str
@@ -479,15 +448,15 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         ``'gauss'`` (default) — perturb each pixel as Normal(y_obs, sigma).
         ``'uniform'`` — perturb as Uniform(y_obs ± √3·sigma), which has the
         same variance as the Gaussian case.
-    inplace : bool
-        If True (default), attach std/lolim/uplim to *model* parameters after
-        sampling.
     confidence : float
-        Confidence interval percentage (default 68 ≈ 1σ).
-    set_values : bool
-        If *inplace*, update parameter values to bootstrap medians.
+        Central confidence interval percentage; the supplied model is unchanged.
     seed : int or None
         Random seed for reproducibility.
+
+    Returns
+    -------
+    BootstrapResult
+        Nominal model, parameter estimates and correlated refit samples.
     """
     return Bootstrap(
         model=model,
@@ -502,27 +471,8 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         seed=seed,
         verbose=verbose,
         nproc=nproc,
-        inplace=inplace,
         confidence=confidence,
-        set_values=set_values,
         noise_dist=noise_dist,
         xerr=xerr,
         perturb_x=perturb_x,
     ).run()
-
-
-def attach(model, samples, confidence=68, percentiles=None, verbose=False, set_values=True):
-    """Compatibility wrapper around Bootstrap.attach(...)."""
-    Bootstrap.attach(
-        model=model,
-        samples=samples,
-        confidence=confidence,
-        percentiles=percentiles,
-        verbose=verbose,
-        set_values=set_values,
-    )
-
-
-def detach(model):
-    """Compatibility wrapper around Bootstrap.detach(...)."""
-    Bootstrap.detach(model)

@@ -48,6 +48,16 @@
   Beta verification uses a built wheel in an isolated Python 3.11 environment;
   repeat the release checks when dependencies or supported platforms change.
 
+- [x] Keep built-in profile physics explicit; provide analytic total fluxes on
+  ready-made line sets and covariance/bootstrap propagation on selections.
+- [x] Keep bootstrap summaries in BootstrapResult, add result inspection and
+  lightweight parameter loading from sessions; simplify line-file/window setup.
+
+- [x] Separate preset loading, optional filtered export and explicit local-directory
+  configuration; keep paths exact and freeze each model's prepared transition table.
+- [x] Keep Spectrum working arrays authoritative through copies/cutouts/rebinning,
+  with descriptive frame metadata and explicit copies instead of hidden history.
+
 # Deferred improvements
 
 - Benchmark infrastructure time and memory on realistic multi-component fits,

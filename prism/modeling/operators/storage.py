@@ -35,7 +35,8 @@ def _operator_state(operator):
     state = dict(kind='spectral' if type(operator) is SpectralResponse else 'linear',
                  name=operator.name, flexible=bool(operator.flexible))
     if state['kind'] == 'spectral':
-        state.update(z=float(operator.z), renormalize=bool(operator.renormalize))
+        # Keep the on-disk state key stable so saved response fingerprints remain valid.
+        state.update(z=float(operator.redshift), renormalize=bool(operator.renormalize))
     return state
 
 
@@ -47,7 +48,7 @@ def _restore_operator(matrix, x, xout, state):
     if state['kind'] == 'spectral':
         if xout is not None and (x is None or not np.array_equal(xout, x)):
             raise ValueError('A spectral response requires the same native input/output grid.')
-        return SpectralResponse(response_matrix=matrix, wave=x, z=state['z'],
+        return SpectralResponse(response_matrix=matrix, wave=x, redshift=state['z'],
                                 renormalize=state['renormalize'], flexible=state['flexible'], name=state['name'])
     raise ValueError(f"Unknown fixed operator type: {state['kind']!r}.")
 

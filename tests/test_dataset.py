@@ -160,7 +160,8 @@ def test_spectrum_adapter_references_current_arrays_metadata_and_units():
     assert data.xunit == spectrum.xunit
     assert data.yunit == spectrum.yunit
     assert data.mask is None
-    assert len(data.x) == 11 and len(spectrum.mask) == 20
+    assert len(data.x) == 11
+    assert not hasattr(spectrum, "mask")
     fitter = TRF()
     fitted = fitter(Model.from_astropy(Const1D(0.)), data)
     assert fitted.model.amplitude.value == pytest.approx(1.)

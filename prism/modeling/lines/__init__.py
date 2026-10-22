@@ -6,7 +6,7 @@ Astropy models enter through ``Model.from_astropy``.
 from .profiles import GaussianProfile, LorentzianProfile, VoigtProfile
 from .component import LineSet
 from .tables import (
-    setup_local_lines, set_wavelength_range, trim_line_lists,
+    load, export, set_directory, trim_line_lists,
     convert_linetable_domain, convert_linetable_medium,
     convert_domain_csv, convert_medium_csv,
 )

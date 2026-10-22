@@ -4,28 +4,16 @@ Amplitudes are profile peaks, weights multiply each template amplitude once,
 and shared offsets/widths use km/s. Further constraints belong to the caller.
 """
 from pathlib import Path
-from astropy import units as u
 from ..lines import GaussianLines
-from ..lines import tables
 
 __all__ = ['nlr', 'blr', 'fe', 'fe_uv', 'balmer']
 
 
-def _from_builtin(files, *, name, dirpath=None, amplitude=1., offset=0.,
-                  fwhm=1000., redshift=0., instfwhm=0., bounds=None):
-    directory = Path(tables.linetable_path if dirpath is None else dirpath)
+def _from_builtin(files, *, name, dirpath=None, **kwargs):
     files = [files] if isinstance(files, str) else files
-    table = tables.stack_linetables([tables.read_linetable(directory/path) for path in files])
-    if tables._wmin is not None or tables._wmax is not None:
-        wavelength = table['position'].to_value(u.AA, equivalencies=u.spectral())
-        mask = wavelength == wavelength
-        if tables._wmin is not None:
-            mask &= wavelength >= tables._wmin
-        if tables._wmax is not None:
-            mask &= wavelength <= tables._wmax
-        table = table[mask]
-    return GaussianLines(table, amplitude=amplitude, offset=offset, fwhm=fwhm,
-                         redshift=redshift, instfwhm=instfwhm, bounds=bounds, name=name)
+    sources = ([Path(dirpath)/filename for filename in files] if dirpath is not None
+               else [Path(filename).stem for filename in files])
+    return GaussianLines(sources, name=name, **kwargs)
 
 
 def nlr(name='nlr', dirpath=None, **kwargs):
@@ -33,7 +21,8 @@ def nlr(name='nlr', dirpath=None, **kwargs):
 
     Keyword arguments set peak amplitude, shared offset/FWHM (km/s), redshift,
     instrumental FWHM and parameter bounds. ``amplitude`` bounds apply to every
-    template; redshift starts fixed. The current line-table directory is used.
+    template; redshift starts fixed. Preset names use the configured directory then packaged defaults.
+    Pass window=(min, max) to select rest positions explicitly.
     """
     return _from_builtin('narrow_basic.ecsv', name=name, dirpath=dirpath, **kwargs)
 

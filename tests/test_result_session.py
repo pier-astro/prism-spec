@@ -262,7 +262,7 @@ def test_incompatible_custom_definitions_with_same_name_are_rejected(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize('loader', ['load_params', 'load_model'])
+@pytest.mark.parametrize('loader', ['load_model'])
 def test_model_only_loaders_identify_fitted_sessions(loader, tmp_path):
     from prism.modeling import io
     x = np.linspace(-1., 1., 41)

@@ -222,3 +222,57 @@ def _measure_eqw(selection, continuum, x, window, num):
     else:
         values = selection._coerce_output_scalar(continuum, name='continuum')
     return Metric(value=_compute_ew_numerical(x_arr, line, values), unit=selection.eqw_unit)
+
+
+def _analytic_flux(selection):
+    """Total intrinsic flux with the full fit-graph delta-method uncertainty."""
+    from ...fitting.utils import apply_tied, _reduce_tied_analytic_jacobian, _free_parameter_indices
+    model = selection._parameter_model
+    apply_tied(model)
+    rows = {id(getattr(model, name)): i for i, name in enumerate(model.param_names)}
+    gradient = np.zeros((len(model.param_names), 1))
+    total = 0.
+    for member in selection._members:
+        value, derivatives = member.integral()
+        scale = (1. if member.output_unit is None else
+                 (1.*member.output_unit).to_value(selection.output_unit))
+        total += value*scale
+        for parameter, derivative in derivatives:
+            gradient[rows[id(parameter)], 0] += derivative*scale
+    free = _free_parameter_indices(model)
+    gradient = _reduce_tied_analytic_jacobian(model, gradient)[free, 0]
+    covariance = getattr(model, '_param_cov', None)
+    std = None
+    if covariance is not None:
+        fit_indices = getattr(model, '_fit_indices', None)
+        if fit_indices is not None and list(fit_indices) != list(free):
+            raise ValueError('Stored covariance indices disagree with current free parameters.')
+        covariance = np.asarray(covariance, dtype=float)
+        if covariance.shape == (len(model.param_names),)*2:
+            covariance = covariance[np.ix_(free, free)]
+        if covariance.shape != (len(free),)*2 or not np.isfinite(covariance).all():
+            raise ValueError('Covariance must be finite and match the fitted free-parameter order.')
+        if not np.allclose(covariance, covariance.T, rtol=1e-10, atol=0.):
+            raise ValueError('Covariance must be symmetric.')
+        variance = float(gradient @ covariance @ gradient)
+        tolerance = 1e-10*max(float(np.sum(abs(np.outer(gradient, gradient)*covariance))), np.finfo(float).tiny)
+        if variance < -tolerance:
+            raise ValueError('Covariance gives a negative propagated flux variance.')
+        std = float(np.sqrt(max(0., variance)))
+    bootstrap = getattr(selection, '_bootstrap_result', None)
+    if bootstrap is not None:
+        working = selection.copy_for_model(bootstrap.model)
+        draws = []
+        for values in zip(*bootstrap.samples.values()):
+            if not np.isfinite(values).all():
+                continue
+            bootstrap._set_values(working.source_model, values)
+            apply_tied(working._parameter_model)
+            draws.append(sum(member.integral()[0]*(1. if member.output_unit is None else
+                (1.*member.output_unit).to_value(selection.output_unit)) for member in working._members))
+        if len(draws) < 2:
+            return Metric(total, unit=selection.flux_unit)
+        alpha = (100-bootstrap._confidence)/2
+        lower, upper = np.percentile(draws, [alpha, 100-alpha])
+        return Metric(total, float(np.std(draws, ddof=1)), float(lower), float(upper), selection.flux_unit)
+    return Metric(total, std, unit=selection.flux_unit)
