@@ -211,17 +211,94 @@ def _continuum_level(selection, x):
     return level if level > 0. else float('nan')
 
 
-def _measure_eqw(selection, continuum, x, window, num):
-    x_arr = _measurement_grid(selection, x, window, num)
+def _eqw_continuum(selection, continuum):
+    """Resolve a named intrinsic continuum in the same live parameter graph."""
+    if isinstance(continuum, str):
+        from ...models.components import get_components
+        component = get_components(selection.source_model, additive=False)[continuum]
+        if component.n_inputs != 1:
+            raise ValueError('An EW continuum must be a one-input spectral component.')
+        return component
+    return continuum
+
+
+def _eqw_value(selection, continuum, x_arr, x_cont):
     line = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
     if continuum is None:
-        x_cont = _continuum_grid(selection, window)
         values = _continuum_level(selection, x_cont)
     elif callable(continuum):
         values = selection._coerce_output_array(continuum(x_arr), name='continuum')
     else:
         values = selection._coerce_output_scalar(continuum, name='continuum')
-    return Metric(value=_compute_ew_numerical(x_arr, line, values), unit=selection.eqw_unit)
+    return _compute_ew_numerical(x_arr, line, values)
+
+
+def _measure_eqw(selection, continuum, x, window, num):
+    from ...fitting.utils import _ParameterMap, apply_tied
+    x_arr = _measurement_grid(selection, x, window, num)
+    x_cont = _continuum_grid(selection, window) if continuum is None else None
+    resolved = _eqw_continuum(selection, continuum)
+    nominal = _eqw_value(selection, resolved, x_arr, x_cont)
+    unit = selection.eqw_unit
+    if not np.isfinite(nominal):
+        return Metric(nominal, unit=unit)
+    bootstrap = getattr(selection, '_bootstrap_result', None)
+    if bootstrap is not None:
+        from .sampling import _bootstrap_models
+        draws = []
+        sampled_continuum = None
+        for working in _bootstrap_models(selection):
+            if sampled_continuum is None:
+                sampled_continuum = _eqw_continuum(working, continuum)
+            draws.append(_eqw_value(working, sampled_continuum, x_arr, x_cont))
+        draws = np.asarray(draws); draws = draws[np.isfinite(draws)]
+        if draws.size < 2:
+            return Metric(nominal, unit=unit)
+        alpha = (100-bootstrap._confidence)/2
+        lower, upper = np.percentile(draws, [alpha, 100-alpha])
+        return Metric(nominal, float(np.std(draws, ddof=1)), float(lower), float(upper), unit)
+    model = selection._parameter_model
+    if getattr(model, '_param_cov', None) is None:
+        return Metric(nominal, unit=unit)
+    if any(getattr(model, name).size != 1 for name in model.param_names):
+        raise ValueError('EW covariance propagation requires scalar model parameters.')
+    mapping = _ParameterMap(model)
+    covariance = _covariance_matrix(model, mapping.free)
+    original = mapping.initial
+    gradient = np.zeros(len(mapping.free))
+    relevant = {id(getattr(member.component, name)) for member in selection._members
+                for name in member.parameter_names}
+    if isinstance(continuum, str):
+        relevant.update(id(getattr(resolved, name)) for name in resolved.param_names)
+    # Local finite differences of EW itself retain line/continuum correlations.
+    # Opaque links require all drivers; otherwise unrelated fit parameters skip.
+    try:
+        for column, index in enumerate(mapping.free):
+            parameter = getattr(model, model.param_names[index])
+            if continuum is not None and not model.has_tied and id(parameter) not in relevant:
+                continue
+            value = original[index]
+            scale = abs(value) if value != 0 else np.sqrt(covariance[column, column])
+            if scale == 0:
+                continue
+            step = max(scale*np.cbrt(np.finfo(float).eps), np.finfo(float).tiny)
+            lower, upper = mapping.bounds[column]
+            up = min(value+step, upper); down = max(value-step, lower)
+            if up == down:
+                continue
+            values = original.copy(); values[index] = up
+            model.parameters = values; apply_tied(model)
+            above = _eqw_value(selection, resolved, x_arr, x_cont)
+            values[index] = down
+            model.parameters = values; apply_tied(model)
+            below = _eqw_value(selection, resolved, x_arr, x_cont)
+            gradient[column] = (above-below)/(up-down)
+    finally:
+        model.parameters = original
+        apply_tied(model)
+    if not np.isfinite(gradient).all():
+        raise ValueError('EW derivatives are non-finite on the selected grid.')
+    return Metric(nominal, _covariance_std(model, gradient, mapping.free), unit=unit)
 
 
 def _analytic_flux(selection):
@@ -241,33 +318,12 @@ def _analytic_flux(selection):
             gradient[rows[id(parameter)], 0] += derivative*scale
     free = _free_parameter_indices(model)
     gradient = _reduce_tied_analytic_jacobian(model, gradient)[free, 0]
-    covariance = getattr(model, '_param_cov', None)
-    std = None
-    if covariance is not None:
-        fit_indices = getattr(model, '_fit_indices', None)
-        if fit_indices is not None and list(fit_indices) != list(free):
-            raise ValueError('Stored covariance indices disagree with current free parameters.')
-        covariance = np.asarray(covariance, dtype=float)
-        if covariance.shape == (len(model.param_names),)*2:
-            covariance = covariance[np.ix_(free, free)]
-        if covariance.shape != (len(free),)*2 or not np.isfinite(covariance).all():
-            raise ValueError('Covariance must be finite and match the fitted free-parameter order.')
-        if not np.allclose(covariance, covariance.T, rtol=1e-10, atol=0.):
-            raise ValueError('Covariance must be symmetric.')
-        variance = float(gradient @ covariance @ gradient)
-        tolerance = 1e-10*max(float(np.sum(abs(np.outer(gradient, gradient)*covariance))), np.finfo(float).tiny)
-        if variance < -tolerance:
-            raise ValueError('Covariance gives a negative propagated flux variance.')
-        std = float(np.sqrt(max(0., variance)))
+    std = _covariance_std(model, gradient, free)
     bootstrap = getattr(selection, '_bootstrap_result', None)
     if bootstrap is not None:
-        working = selection.copy_for_model(bootstrap.model)
+        from .sampling import _bootstrap_models
         draws = []
-        for values in zip(*bootstrap.samples.values()):
-            if not np.isfinite(values).all():
-                continue
-            bootstrap._set_values(working.source_model, values)
-            apply_tied(working._parameter_model)
+        for working in _bootstrap_models(selection):
             draws.append(sum(member.integral()[0]*(1. if member.output_unit is None else
                 (1.*member.output_unit).to_value(selection.output_unit)) for member in working._members))
         if len(draws) < 2:
@@ -276,3 +332,35 @@ def _analytic_flux(selection):
         lower, upper = np.percentile(draws, [alpha, 100-alpha])
         return Metric(total, float(np.std(draws, ddof=1)), float(lower), float(upper), selection.flux_unit)
     return Metric(total, std, unit=selection.flux_unit)
+
+
+def _covariance_matrix(model, free):
+    """Validate covariance and select its canonical free-parameter block."""
+    covariance = getattr(model, '_param_cov', None)
+    if covariance is None:
+        return None
+    fit_indices = getattr(model, '_fit_indices', None)
+    if fit_indices is not None and list(fit_indices) != list(free):
+        raise ValueError('Stored covariance indices disagree with current free parameters.')
+    covariance = np.asarray(covariance, dtype=float)
+    if covariance.shape == (len(model.param_names),)*2:
+        covariance = covariance[np.ix_(free, free)]
+    if covariance.shape != (len(free),)*2 or not np.isfinite(covariance).all():
+        raise ValueError('Covariance must be finite and match the fitted free-parameter order.')
+    if not np.allclose(covariance, covariance.T, rtol=1e-10, atol=0.):
+        raise ValueError('Covariance must be symmetric.')
+    if np.any(np.diag(covariance) < 0):
+        raise ValueError('Covariance diagonal must be nonnegative.')
+    return covariance
+
+
+def _covariance_std(model, gradient, free):
+    """Contract a free-parameter gradient with the validated full covariance."""
+    covariance = _covariance_matrix(model, free)
+    if covariance is None:
+        return None
+    variance = float(gradient @ covariance @ gradient)
+    tolerance = 1e-10*max(float(np.sum(abs(np.outer(gradient, gradient)*covariance))), np.finfo(float).tiny)
+    if variance < -tolerance:
+        raise ValueError('Covariance gives a negative propagated variance.')
+    return float(np.sqrt(max(0., variance)))

@@ -132,24 +132,50 @@ summarize propagated draws and retain the existing boundary-limit convention.
 A seed gives reproducibility within this implementation; corrected parameter
 selection/link handling can change samples relative to earlier versions.
 
-Equivalent width is another optional operation:
+Equivalent width uses the same selected profile:
 
 ```python
-ew = line.eqw(continuum=continuum, x=x)
-ew = line.sample_eqw(
-    continuum=continuum, x=x, method='covariance', random_state=7,
+ew = line.eqw(continuum="host", x=x)
+summary, samples = line.sample(
+    continuum="host", x=x, method="covariance", random_state=7,
+    return_samples=True,
 )
+ew_samples = summary.eqw
 ```
 
-A scalar or callable continuum is treated as exact. Omitting it retains the
-legacy local-median estimate of source model minus selected line; this is a
-convenience policy, not a continuum fit. With an inferred continuum,
-`perturb_continuum=True` includes non-line free parameters in the same joint
-propagation. With False the inferred continuum stays at its nominal level, even
-when links couple continuum and line drivers. EW uses the same
-selected transition, grid validation and parameter-update path as other measures.
-Positive sampled continua are required for numerical integration; legacy signed
-nonzero scalar continua remain supported.
+A named continuum is resolved in the fitted graph, preserving its uncertainty
+and correlations with the line. A scalar or external callable is treated as
+exact. `.eqw()` propagates available covariance using a local delta approximation;
+a bootstrap input instead reuses successful refits. Omitting the continuum in
+`.eqw()` retains the legacy local-median estimate of source minus selected line,
+not a continuum fit. The tabular `lines(...).eqw()` requires an explicit continuum.
+Positive sampled continua are required for numerical integration; signed nonzero
+scalar continua remain supported.
+
+`.sample()` draws correlated **parameters**, without generating data or refitting.
+Pass `continuum=` to include EW in the same samples as flux and shape metrics;
+otherwise the returned result has no `eqw` attribute. This replaces the separate
+`sample_eqw` method. A bootstrap input reuses its actual successful refits;
+`n_samples`, distribution and seed apply only to newly generated parameter draws.
+A model without uncertainty information cannot supply meaningful samples.
+
+## One component, all transitions
+
+```python
+from prism.modeling.lines.measurements import lines
+component = lines(result, component="narrow")
+fluxes = component.flux()
+equivalent_widths = component.eqw(continuum="host")
+```
+
+Exactly one component is accepted. Omit `component` only for a standalone
+`LineSet` or its single-component fit. Every physical transition gets a row;
+weights are applied once and rows are never implicitly summed. `select_line`
+remains the route to one identified transition across several components.
+Tables contain values, units and available uncertainty summaries; missing
+uncertainties are NaN. A bare model gives nominal values; use the fit or bootstrap
+result to retain its statistical context. Methods compute on request: retain the
+returned table for reuse, rather than relying on a hidden cache.
 
 ## Numerical conventions
 
@@ -250,5 +276,6 @@ analytic profile derivatives and the full fit covariance, including links.
 `std=None` means no covariance is available. An unsupported custom integral
 raises `NotImplementedError`; use `.measure(x=...)` or `.measure(window=...)`.
 With a `BootstrapResult`, `.flux()` propagates actual successful refits and
-reports their standard deviation and central interval. A ready-made line set's
-own `.flux()` returns per-transition values only, without statistical metadata.
+reports their standard deviation and central interval. Use `lines(model).flux()`
+for nominal per-transition values, or `lines(result, component=...).flux()` to
+retain the statistical context. Line components do not expose measurement methods.

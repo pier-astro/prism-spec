@@ -24,7 +24,7 @@ def test_presets_export_override_fallback_and_explicit_path(tmp_path,monkeypatch
     local=lines.load('oiii');local['weight']*=2
     local.write(paths[0],overwrite=True)
     np.testing.assert_allclose(lines.load('oiii')['weight'],baseline['weight']*2)
-    model=lines.GaussianLines('oiii',fwhm=250.,name='narrow')
+    model=lines.GaussianLines('oiii',fwhm=250.,name='narrow', normalization='amplitude')
     lines.set_directory(None)
     np.testing.assert_allclose(lines.load('oiii')['weight'],baseline['weight'])
     np.testing.assert_allclose(model.component._setup['lines']['weight'],baseline['weight']*2)

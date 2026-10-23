@@ -98,7 +98,7 @@ def test_pipe_access_retains_the_public_operator_and_its_flux_action():
 def test_lineset_and_astropy_leaves_share_the_same_public_parameter_access():
     from astropy import units as u
     lines = GaussianLines({'name': ['A'], 'position': [5000.]*u.AA},
-                           amplitude=2., fwhm=300., name='lines')
+                           amplitude=2., fwhm=300., name='lines', normalization='amplitude')
     continuum = Model.from_astropy(Gaussian1D(1., 5000., 100., name='continuum'))
     model = lines + continuum
     x = np.linspace(4990., 5010., 101)

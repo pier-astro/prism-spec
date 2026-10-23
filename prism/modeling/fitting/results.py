@@ -1,6 +1,6 @@
 """Fit snapshots, with separate source and observed-space predictions."""
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 import numpy as np
 
@@ -27,6 +27,14 @@ class _FitParameter:
     fixed: bool
     tied: bool
     unit: object
+    lolim: object = None
+    uplim: object = None
+
+    @property
+    def errors(self):
+        """Distances to both endpoints, or NaN when not a valid centered bar."""
+        from ..metrics import _interval_errors
+        return _interval_errors(self.value, self.lolim, self.uplim)
 
 
 def _clear_model_estimates(model):
@@ -101,6 +109,9 @@ class FitResult:
     are not inferred from marginal errors. Derived measurements require the full
     global covariance, including correlations between observations.
 
+    Explicit set_limits()/clear_limits() replace interval summaries and their
+    provenance only; fitted values, covariance and standard deviations stay fixed.
+
     ``fit_info`` contains global termination and fit diagnostics. Per-observation
     views expose their statistic contributions and sample counts, without local
     degrees of freedom that would double-count shared parameters.
@@ -131,6 +142,7 @@ class FitResult:
             estimates[name] = estimate
             self._by_identity[id(parameter)] = estimate
         self.params = MappingProxyType(estimates)
+        self.limits_info = None
         self.parameters = np.full_like(self._graph.parameters, np.nan) if _failed else self._graph.parameters.copy()
         self.parameters.setflags(write=False)
         self.fit_indices = _free_parameter_indices(self._graph)
@@ -161,7 +173,7 @@ class FitResult:
         if self.covariance is not None:
             self.covariance.setflags(write=False)
         for parameter in self.params.values():
-            for value in (parameter.value, parameter.std):
+            for value in (parameter.value, parameter.std, parameter.lolim, parameter.uplim):
                 if isinstance(value, np.ndarray):
                     value.setflags(write=False)
 
@@ -181,6 +193,60 @@ class FitResult:
             if data.response is not None:
                 _clear_model_estimates(data.response)
         return associations
+
+    def set_limits(self, limits):
+        """Replace active intervals with an explicitly associated summary table.
+
+        The table supplies name, lolim, uplim and unit columns, plus method,
+        confidence, criterion and parameter state in meta. Values, covariance
+        and minimizer standard deviations are unchanged. Missing endpoints are
+        NaN. Validation completes before replacing any existing intervals.
+        """
+        from astropy.table import Table
+        from .uncertainty.limits import _parameter_state
+        self._require_fitted()
+        if not isinstance(limits, Table):
+            raise TypeError('Supply an interval table, for example bootstrap_result.limits().')
+        required = {'name', 'lolim', 'uplim', 'unit'}
+        if not required.issubset(limits.colnames):
+            raise ValueError('Interval table needs name, lolim, uplim and unit columns.')
+        for key in ('method', 'confidence', 'criterion', 'state'):
+            if key not in limits.meta:
+                raise ValueError(f'Interval provenance is missing {key}.')
+        if any(not isinstance(limits.meta[k], str) or not limits.meta[k] for k in ('method', 'criterion')):
+            raise ValueError('Interval method and criterion must be nonempty strings.')
+        confidence = limits.meta['confidence']
+        if not np.isfinite(confidence) or not 0 < confidence < 100:
+            raise ValueError('confidence must lie strictly between 0 and 100.')
+        model = self.model if self._single else self._graph
+        if limits.meta['state'] != _parameter_state(model):
+            raise ValueError('Intervals do not match this fitted parameter state.')
+        names = list(limits['name'])
+        if len(set(names)) != len(names) or not set(names).issubset(self.params):
+            raise ValueError('Interval parameter names must be unique and belong to this fit.')
+        estimates = {name: replace(p, lolim=None, uplim=None) for name, p in self.params.items()}
+        for row in limits:
+            name = row['name']
+            p = self.params[name]
+            if str(row['unit']) != ('' if p.unit is None else str(p.unit)):
+                raise ValueError(f'Interval units disagree for {name}.')
+            lower, upper = np.asarray(row['lolim'], dtype=float), np.asarray(row['uplim'], dtype=float)
+            if lower.shape != np.shape(p.value) or upper.shape != np.shape(p.value):
+                raise ValueError(f'Interval shape disagrees for {name}.')
+            if np.isinf(lower).any() or np.isinf(upper).any() or np.any(lower > upper):
+                raise ValueError(f'Invalid interval endpoints for {name}.')
+            estimates[name] = replace(p, lolim=_estimate_value(lower), uplim=_estimate_value(upper))
+        metadata = copy.deepcopy({k: v for k, v in limits.meta.items() if k != 'state'})
+        object.__setattr__(self, 'params', MappingProxyType(estimates))
+        object.__setattr__(self, 'limits_info', MappingProxyType(metadata))
+        self._by_identity = {id(getattr(self._graph, n)): p for n, p in estimates.items()}
+
+    def clear_limits(self):
+        """Remove active intervals and provenance, preserving fit estimates."""
+        estimates = {name: replace(p, lolim=None, uplim=None) for name, p in self.params.items()}
+        object.__setattr__(self, 'params', MappingProxyType(estimates))
+        object.__setattr__(self, 'limits_info', None)
+        self._by_identity = {id(getattr(self._graph, n)): p for n, p in estimates.items()}
 
     def show(self, mode='auto'):
         """Display fitted parameter estimates and global fit diagnostics."""

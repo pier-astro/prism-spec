@@ -67,16 +67,16 @@ def test_eqw_joint_covariance_and_reproducible_generator():
     covariance = np.array([[.01,.015],[.015,.04]])
     model._param_cov = covariance
     selected = select_line(model, 'line')
-    kwargs = dict(method='covariance', perturb_continuum=True, n_samples=64)
-    result = selected.sample_eqw(random_state=np.random.default_rng(71), **kwargs)
-    again = selected.sample_eqw(random_state=np.random.default_rng(71), **kwargs)
+    kwargs = dict(method='covariance', continuum='continuum', n_samples=64)
+    result = selected.sample(random_state=np.random.default_rng(71), **kwargs).eqw
+    again = selected.sample(random_state=np.random.default_rng(71), **kwargs).eqw
     draws = np.random.default_rng(71).multivariate_normal([4.,3.], covariance, size=64)
     sigma = 5000.*200./profiles.C_KMS/profiles.SIGMA2FWHM
     expected = draws[:,0]*sigma*np.sqrt(2*np.pi)/draws[:,1]
     np.testing.assert_allclose(result.std, np.std(expected,ddof=1), rtol=1e-12)
     assert result.std == again.std
     assert result.value == again.value
-    assert selected.eqw(continuum=3.).value == result.value
+    np.testing.assert_allclose(selected.eqw(continuum=3.).value, result.value, rtol=1e-14)
 
 
 @pytest.mark.parametrize('method', ['measure','sample'])
@@ -86,7 +86,7 @@ def test_eqw_descending_quantity_grid(method):
     line.amplitude.std = .1
     selected = select_line(line, 'line')
     x = np.linspace(4980.,5020.,1001)*u.AA
-    function = selected.eqw if method == 'measure' else selected.sample_eqw
+    function = selected.eqw if method == 'measure' else lambda **kw: selected.sample(**kw).eqw
     kwargs = {} if method == 'measure' else dict(method='std', random_state=71,n_samples=8)
     a = function(continuum=3., x=x, **kwargs)
     b = function(continuum=3., x=x[::-1], **kwargs)
@@ -110,8 +110,8 @@ def test_sampled_eqw_keeps_explicit_member_of_tied_template():
     group.fwhm.fixed = True
     group.amp_pair.std = .2
     selected = select_line(group, 'pair', position=5010.)
-    result = selected.sample_eqw(continuum=3., method='std', distribution='gaussian',
-                                 n_samples=64, random_state=71)
+    result = selected.sample(continuum=3., method='std', distribution='gaussian',
+                                 n_samples=64, random_state=71).eqw
     sigma = 5010.*200./profiles.C_KMS/profiles.SIGMA2FWHM
     draws = np.random.default_rng(71).normal(4.,.2,64)
     expected = .5*draws*sigma*np.sqrt(2*np.pi)/3.

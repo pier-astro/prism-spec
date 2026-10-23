@@ -14,7 +14,7 @@ from ...fitting.uncertainty.resample import extract_limits
 from .selection import SelectedLineCollection
 from .results import LineResult, _METRIC_NAMES, _METRIC_BOUNDS, _NO_BOUNDS, _metric_units
 from .numerical import _compute_profile_metrics, _compute_ew_numerical
-from .measurement import _resolve_selection, _measurement_grid, _continuum_grid, _continuum_level
+from .measurement import _resolve_selection, _measurement_grid, _eqw_continuum
 
 
 @dataclass(frozen=True)
@@ -207,7 +207,7 @@ def sample_line_measurements(model_or_selection, selector=None,
                              window=None, num=4096, n_samples=256,
                              confidence=68, method='auto', distribution='auto',
                              random_state=None, return_samples=False,
-                             index=None) -> LineResult:
+                             index=None, *, continuum=None) -> LineResult:
     """Propagate parameter uncertainties into sampled line measurements.
 
     Parameters
@@ -250,6 +250,12 @@ def sample_line_measurements(model_or_selection, selector=None,
         Spatial index used when ``model_or_selection`` is a ``MultiFitResult``.
         Default is ``None``.
 
+    continuum : str, scalar or callable, optional
+        Omit to measure the line profile only. Supply a component name to include
+        EW and draw the continuum with the same correlated parameters. External
+        values/functions are exact. EW then appears as summary.eqw and in the
+        returned sample table. No continuum is inferred automatically.
+
     Returns
     -------
     LineResult or tuple
@@ -264,6 +270,9 @@ def sample_line_measurements(model_or_selection, selector=None,
     a multivariate normal sample so parameter correlations are preserved. When no
     covariance matrix is available, independent draws fall back to attached
     symmetric ``std`` values or asymmetric ``lolim``/``uplim`` intervals.
+    BootstrapResult inputs instead reuse all their successful refits: n_samples,
+    method, distribution and random_state only control generated draws, not refits.
+    No sampling is possible from a bare model without uncertainty information.
 
     Examples
     --------
@@ -279,17 +288,44 @@ def sample_line_measurements(model_or_selection, selector=None,
     y_nominal = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
     nominal = _compute_profile_metrics(x_arr, y_nominal)
     units = _metric_units(selection.axis_unit, selection.output_unit)
-    specs, draws = _draw_selection_samples(
-        selection, n_samples, method, distribution, random_state)
+    named_continuum = isinstance(continuum, str)
+    with_eqw = continuum is not None
+    if with_eqw:
+        units['eqw'] = selection.eqw_unit
+        resolved = _eqw_continuum(selection, continuum)
+        values = resolved(x_arr) if callable(resolved) else resolved
+        y_cont = selection._coerce_output_array(values, name='continuum')
+        nominal['eqw'] = _compute_ew_numerical(x_arr, y_nominal, y_cont)
+    if getattr(selection, '_bootstrap_result', None) is not None:
+        profiles = ((working, working._coerce_output_array(working.evaluate(x_arr)))
+                    for working in _bootstrap_models(selection))
+    else:
+        specs, draws = _draw_selection_samples(
+            selection, n_samples, method, distribution, random_state,
+            include_continuum=named_continuum)
+        profiles = _iter_sampled_profiles(selection, specs, draws, x_arr)
 
-    # Every realization uses the same numerical measurement core.
+    # Every metric for one draw uses the same parameter vector and profile.
     records = []
-    for _, values in _iter_sampled_profiles(selection, specs, draws, x_arr):
-        records.append(_compute_profile_metrics(x_arr, values))
-    samples = pd.DataFrame(records, columns=_METRIC_NAMES)
+    sampled_continuum = None
+    for working, values in profiles:
+        row = _compute_profile_metrics(x_arr, values)
+        if with_eqw:
+            if named_continuum:
+                if sampled_continuum is None:
+                    sampled_continuum = _eqw_continuum(working, continuum)
+                current = working._coerce_output_array(sampled_continuum(x_arr), name='continuum')
+            else:
+                current = y_cont
+            row['eqw'] = _compute_ew_numerical(x_arr, values, current)
+        records.append(row)
+    names = _METRIC_NAMES + (['eqw'] if with_eqw else [])
+    samples = pd.DataFrame(records, columns=names)
+    if not len(samples):
+        raise ValueError('No successful parameter samples are available.')
     metrics = {name: _summarize(nominal[name], samples[name].to_numpy(), confidence,
                               units[name], _METRIC_BOUNDS.get(name, _NO_BOUNDS))
-               for name in _METRIC_NAMES}
+               for name in names}
     if np.any(~np.isfinite(samples['fwhm'])):
         warnings.warn('Some sampled profiles have undefined FWHM.', RuntimeWarning)
     result = LineResult(selection.selector, 'auto', x_arr[0], x_arr[-1], x_arr.size,
@@ -297,27 +333,17 @@ def sample_line_measurements(model_or_selection, selector=None,
     return (result, samples) if return_samples else result
 
 
-def _sample_eqw(selection, continuum, n_samples, confidence, x, window, num,
-                method, distribution, perturb_continuum, random_state):
-    _validate_confidence(confidence)
-    x_arr = _measurement_grid(selection, x, window, num)
-    y_nominal = selection._coerce_output_array(selection.evaluate(x_arr), name='line profile')
-    x_cont = _continuum_grid(selection, window) if continuum is None else None
-    if continuum is None:
-        y_cont = _continuum_level(selection, x_cont)
-    elif callable(continuum):
-        y_cont = selection._coerce_output_array(continuum(x_arr), name='continuum')
-    else:
-        y_cont = selection._coerce_output_scalar(continuum, name='continuum')
-    nominal = _compute_ew_numerical(x_arr, y_nominal, y_cont)
-    specs, draws = _draw_selection_samples(
-        selection, n_samples, method, distribution, random_state,
-        include_continuum=perturb_continuum and continuum is None)
-    values = np.empty(int(n_samples), dtype=float)
-    for i, (working, y_line) in enumerate(_iter_sampled_profiles(selection, specs, draws, x_arr)):
-        local_continuum = y_cont
-        if continuum is None and perturb_continuum:
-            # Vary the inferred continuum only when explicitly requested.
-            local_continuum = _continuum_level(working, x_cont)
-        values[i] = _compute_ew_numerical(x_arr, y_line, local_continuum)
-    return _summarize(nominal, values, confidence, selection.eqw_unit)
+def _bootstrap_models(selection):
+    """Yield the actual successful refits on one reusable, detached work model."""
+    from ...fitting.utils import apply_tied
+    bootstrap = selection._bootstrap_result
+    model = getattr(selection, '_bootstrap_model', None)
+    if model is None:
+        model = bootstrap.model
+    working = selection.copy_for_model(model)
+    for values in zip(*bootstrap.samples.values()):
+        if not np.isfinite(values).all():
+            continue
+        bootstrap._set_values(working.source_model, values)
+        apply_tied(working._parameter_model)
+        yield working

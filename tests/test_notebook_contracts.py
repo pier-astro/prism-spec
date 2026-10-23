@@ -48,7 +48,7 @@ def test_covariance_default_and_explicit_opt_out(engine):
 
 
 def test_builtin_display_exposes_units_without_changing_native_arithmetic():
-    model=GaussianLines({'name':['A'],'position':[5000.]*u.AA},name='lines')
+    model=GaussianLines({'name':['A'],'position':[5000.]*u.AA},name='lines', normalization='amplitude')
     before=model.parameters.copy()
     html=format_model_html(model)
     assert 'km / s' in html

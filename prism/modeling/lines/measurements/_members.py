@@ -35,6 +35,9 @@ class _LineMember:
         self.component = component
         self.position_unit = _position_unit(component)
         self.output_unit = getattr(component, entry.amplitude_name).unit
+        profile = component._profile if isinstance(component, _LineGroup) else component._function
+        if self.output_unit is not None and getattr(profile, '_flux_normalized', False):
+            self.output_unit /= self.position_unit
         if isinstance(component, _LineGroup):
             slots = component._groups[entry.template_index][2]
             self.parameter_names = tuple(dict.fromkeys(

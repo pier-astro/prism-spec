@@ -158,7 +158,7 @@ def test_parameter_mapping_for_lines_and_adapted_components():
     from prism.modeling.lines import GaussianLines
 
     lines = GaussianLines({'name': ['a', 'b'], 'position': np.array([5000, 5020])*u.AA,
-                           'weight': [1, .5]}, name='lines')
+                           'weight': [1, .5]}, name='lines', normalization='amplitude')
     adapted = Model.from_astropy(Linear1D(slope=.2, intercept=1))
     for model in (component(), lines, adapted):
         assert tuple(model.params) == model.param_names

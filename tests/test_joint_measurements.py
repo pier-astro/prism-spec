@@ -24,8 +24,8 @@ def level_derivative(x, amplitude):
 
 def setup(engine):
     table = {'name': ['line'], 'position': np.array([5000.])*u.AA}
-    first = GaussianLines(table, amplitude=7., fwhm=150., name='line')
-    second = GaussianLines(table, amplitude=1., fwhm=150., name='line')
+    first = GaussianLines(table, amplitude=7., fwhm=150., name='line', normalization='amplitude')
+    second = GaussianLines(table, amplitude=1., fwhm=150., name='line', normalization='amplitude')
     for model in (first, second):
         model.offset.fixed = model.fwhm.fixed = True
     continuum = Component(level, dict(amplitude=2.), derivative=level_derivative, name='continuum')
@@ -90,8 +90,8 @@ def test_equivalent_width_honors_continuum_choice_with_global_covariance():
     selected = select_line(result['red'], 'line', components='line')
     factor = sigma*np.sqrt(2*np.pi)
     settings = dict(method='covariance', n_samples=4000, num=512, random_state=11)
-    fixed = selected.sample_eqw(perturb_continuum=False, **settings)
-    variable = selected.sample_eqw(perturb_continuum=True, **settings)
+    fixed = selected.sample(continuum=5., **settings).eqw
+    variable = selected.sample(continuum='continuum', **settings).eqw
     # EW = K(A+C)/C. Holding C fixed gives a different propagation from varying
     # the same C in the line amplitude and continuum with their fitted covariance.
     fixed_gradient = np.array([factor/5., factor/5.])
@@ -101,3 +101,16 @@ def test_equivalent_width_honors_continuum_choice_with_global_covariance():
     assert fixed.std == pytest.approx(fixed_std, rel=.04)
     assert variable.std == pytest.approx(variable_std, rel=.04)
     assert abs(fixed.std/variable.std-1.) > .1
+
+
+def test_ew_delta_method_retains_cross_observation_drivers():
+    from prism.modeling.lines.measurements import lines
+    result,covariance,sigma,_=setup(TRF)
+    factor=sigma*np.sqrt(2*np.pi)
+    gradient=np.array([factor/5.,-factor*10./25.])
+    selected=select_line(result['red'],'line',components='line')
+    measured=selected.eqw('continuum',window=(4990.,5010.),num=4096)
+    assert measured.value==pytest.approx(15*factor/5.,rel=2e-7)
+    assert measured.std==pytest.approx(np.sqrt(gradient@covariance@gradient),rel=5e-5)
+    tabular=lines(result['red'],component='line').eqw('continuum',window=(4990.,5010.),num=4096)
+    assert tabular['std'][0].value==pytest.approx(measured.std,rel=1e-12)

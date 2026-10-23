@@ -215,9 +215,9 @@ def test_line_profile_recovery_with_distinct_native_response_grids(engine):
     from astropy import units as u
     from prism.modeling.lines import GaussianLines
     table = {'name': ['L'], 'position': [5000.]*u.AA}
-    truth = GaussianLines(table, amplitude=3., fwhm=280., offset=45.)
+    truth = GaussianLines(table, amplitude=3., fwhm=280., offset=45., normalization='amplitude')
     start = GaussianLines(table, amplitude=1., fwhm=500., offset=0.,
-                          bounds={'fwhm': (50., 1000.), 'offset': (-200., 200.)})
+                          bounds={'fwhm': (50., 1000.), 'offset': (-200., 200.)}, normalization='amplitude')
     associations = {}
     for label, size, coefficients in [('blue', 201, [.2, .6, .2]), ('red', 301, [.3, .4, .3])]:
         native = np.linspace(4975., 5025., size)

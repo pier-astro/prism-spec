@@ -651,16 +651,68 @@ from prism.modeling.fitting.uncertainty import bootstrap
 resampled = bootstrap(result.model, TRF(covariance=False),
                       x=x, y=y, yerr=yerr, n_samples=200, seed=11)
 resampled.show()
-resampled.params["amplitude"]
+limits = resampled.limits(confidence=68, boundary_tolerance=0.05)
+result.set_limits(limits)  # Explicitly replace the active intervals.
+# result.clear_limits()   # Remove intervals and provenance only.
 resampled.samples["amplitude"]
 ```
 
-`bootstrap` returns `BootstrapResult` and leaves its input unchanged. `.params`
-contains nominal values, sample standard deviations and central intervals;
-`.samples` contains correlated free-parameter refits, with NaNs for failed
-realizations. `.model` returns a detached nominal model. Bootstrap currently
-operates on one spectrum, not a complete joint or batch result. Save draws
-explicitly with `np.savez(filename, **resampled.samples)` when needed.
+`bootstrap` returns `BootstrapResult` and leaves its input unchanged. Generation
+has no confidence-level argument. `.samples` contains correlated free-parameter
+refits, with NaNs for failed realizations. `.limits(confidence=...)` recomputes
+central percentile intervals from the same valid refits, including linked
+parameters; no fitting is repeated. Its table includes sample standard deviations
+and provenance. `.params` is a convenience summary at the default 68% level;
+`.model` returns a detached nominal model. Bootstrap currently operates on one
+spectrum, not a complete joint or batch result.
+
+`boundary_tolerance` defines the near-bound band as a fraction of the sample IQR
+(default 0.05, with a numerical floor). If its population reaches the excluded
+single-tail probability, that endpoint is NaN and the side is recorded in table
+metadata. Without a declared bound no endpoint is suppressed. The other endpoint
+keeps its original percentile: it is not relabelled as a one-sided limit with the
+same coverage. Fixed parameters and fewer than two valid draws have unavailable
+intervals. This is a configurable boundary heuristic, not a coverage guarantee.
+
+`FitResult.set_limits(table)` validates parameter state, units and interval
+provenance before replacing all previous intervals. `value`, covariance and `std`
+remain estimates of the original minimization. Only `lolim`, `uplim` and
+`limits_info` change. Sample scatter is not copied into minimizer `std`.
+`result.params[name].errors` returns `(value-lolim, uplim-value)`, or two NaNs when
+both finite endpoints do not enclose the value. Limits are absolute parameter
+values, not error distances. Intervals alone cannot recover correlations for
+propagating derived quantities; keep the draws for that purpose.
+
+Save the session with active intervals; save samples separately only if needed:
+
+```python
+from prism.modeling.fitting import FitResult
+from prism.modeling.fitting.uncertainty import BootstrapResult
+
+result.save("fit.fits", overwrite=True)
+resampled.save("bootstrap.npz", overwrite=True)
+restored = FitResult.load("fit.fits")
+resampled = BootstrapResult.load("bootstrap.npz", restored)
+restored.set_limits(resampled.limits(confidence=90))
+```
+
+The NPZ stores numerical samples and parameter-state/provenance metadata, without
+pickled code, data or a duplicate model. Loading requires the associated
+`FitResult`; mismatched values, units, bounds, free-parameter order or links are
+rejected. Keep the matching session alongside the optional sample archive.
+
+To explore marginal medians, edit a detached model explicitly (scalar parameters):
+
+```python
+median_model = result.model
+for name, draws in resampled.samples.items():
+    getattr(median_model, name).value = np.nanmedian(draws)
+```
+
+Links still determine derived parameters. Marginal medians need not form a
+best-fitting joint vector. The original fit statistic and covariance continue to
+refer to `result`, not the edited model; evaluate, save or refit that model
+separately.
 
 New `FitResult.save` files also carry a small parameter-value table.
 `load_params(filename)` reads it without reconstructing models or responses,

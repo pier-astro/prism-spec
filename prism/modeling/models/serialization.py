@@ -140,8 +140,10 @@ def _astropy_model_constructor(loader, node):
 
 def _profile_recipe(profile, derivative):
     """Whitelist built-in numeric profile state; never serialize Python code."""
-    from ..lines.profiles import GaussianProfile, LorentzianProfile, VoigtProfile
-    if type(profile) not in (GaussianProfile, LorentzianProfile, VoigtProfile):
+    from ..lines.profiles import (GaussianProfile, LorentzianProfile, VoigtProfile,
+                                 _GaussianFluxProfile, _LorentzianFluxProfile, _VoigtFluxProfile)
+    if type(profile) not in (GaussianProfile, LorentzianProfile, VoigtProfile,
+                             _GaussianFluxProfile, _LorentzianFluxProfile, _VoigtFluxProfile):
         return None
     analytic = derivative is not None
     if analytic and (getattr(derivative, '__self__', None) is not profile
@@ -152,8 +154,10 @@ def _profile_recipe(profile, derivative):
 
 
 def _restore_profile(recipe):
-    from ..lines.profiles import GaussianProfile, LorentzianProfile, VoigtProfile
-    classes = {cls.__name__: cls for cls in (GaussianProfile, LorentzianProfile, VoigtProfile)}
+    from ..lines.profiles import (GaussianProfile, LorentzianProfile, VoigtProfile,
+                                 _GaussianFluxProfile, _LorentzianFluxProfile, _VoigtFluxProfile)
+    classes = {cls.__name__: cls for cls in (GaussianProfile, LorentzianProfile, VoigtProfile,
+                             _GaussianFluxProfile, _LorentzianFluxProfile, _VoigtFluxProfile)}
     if recipe['kind'] not in classes:
         raise ValueError('Unknown saved line-profile recipe.')
     profile = classes[recipe['kind']](instfwhm=recipe['instfwhm'], position_unit=recipe['position_unit'])

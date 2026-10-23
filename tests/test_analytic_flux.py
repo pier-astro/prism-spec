@@ -1,3 +1,4 @@
+from prism.modeling.lines.measurements import lines
 """Total integrals, physical gradients and their result-aware propagation."""
 import copy
 import numpy as np
@@ -33,21 +34,21 @@ def test_integrals_and_analytic_gradient_against_independent_numerics(cls,widths
 
 def source(name='lines'):
     return GaussianLines({'name':['A','A'],'position':[5000.,5010.]*u.AA,'weight':[1.,.3]},
-                         amplitude=2.,offset=0.,fwhm=250.,name=name)
+                         amplitude=2.,offset=0.,fwhm=250.,name=name, normalization='amplitude')
 
 
 def test_ready_set_tables_typed_views_and_roundtrip(tmp_path):
     table=QTable({'name':['A'],'position':[5000.]*u.AA,'weight':[1.]})
     table.write(tmp_path/'one.ecsv');table['position']=[5010.]*u.AA;table['weight']=[.3];table.write(tmp_path/'two.ecsv')
-    model=GaussianLines([tmp_path/'one.ecsv',tmp_path/'two.ecsv'],window=(4990.,5020.),name='lines')
-    assert isinstance(model,LineSet) and len(model.flux())==2
-    with pytest.raises(ValueError):GaussianLines(table,window=(5020.,4990.))
+    model=GaussianLines([tmp_path/'one.ecsv',tmp_path/'two.ecsv'],window=(4990.,5020.),name='lines', normalization='amplitude')
+    assert isinstance(model,LineSet) and len(lines(model).flux())==2
+    with pytest.raises(ValueError):GaussianLines(table,window=(5020.,4990.), normalization='amplitude')
     expression=model+Component(lambda x,a: np.full_like(x,a),{'a':1.},name='constant')
     assert isinstance(expression.components['lines'],GaussianLines)
     filename=tmp_path/'model.fits';model.save(filename)
     restored=load_model(filename)
     assert isinstance(restored,GaussianLines)
-    np.testing.assert_allclose(restored.flux()['flux'],model.flux()['flux'])
+    np.testing.assert_allclose(lines(restored).flux()['flux'],lines(model).flux()['flux'])
 
 
 def test_shared_scale_remains_generic_and_has_no_flux_convention():
@@ -79,7 +80,7 @@ def test_covariance_with_links_matches_full_free_parameter_differences():
     graph.parameters=values
     expected=np.sqrt(np.array(gradient)@result.covariance@gradient)
     assert metric.std==pytest.approx(expected,rel=2e-5)
-    assert source().flux()['flux'][0]==pytest.approx(select_line(source(),'A',position=5000.).flux().value)
+    assert lines(source()).flux()['flux'][0]==pytest.approx(select_line(source(),'A',position=5000.).flux().value)
     assert select_line(result.model,'A',components='first',position=5000.).flux().std is None
 
 
@@ -102,7 +103,7 @@ def test_bootstrap_owns_estimates_and_flux_intervals_without_model_mutation():
     working=model.copy();draws=[]
     for values in zip(*result.samples.values()):
         for name,value in zip(result.samples,values):working.params[name].value=value
-        draws.append(working.flux()['flux'][0])
+        draws.append(lines(working).flux()['flux'][0])
     assert flux.std==pytest.approx(np.std(draws,ddof=1))
     np.testing.assert_allclose([flux.lolim,flux.uplim],np.percentile(draws,[16,84]))
     assert 'BootstrapResult' in result.show(mode='text')

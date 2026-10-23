@@ -18,6 +18,17 @@ Sherpa is an alternative only when installed separately.
 | [Chromatic PSF](Chromatic%20PSF.ipynb) | Fit an isolated star and describe its wavelength-dependent PSF. |
 | [Aperture Correction](Aperture%20Correction.ipynb) | Compare aperture and PSF-based extraction; the supplied calibration makes this independent of the PSF notebook. |
 
+For a concise overview of data, models, fitters and result objects, start with
+[Model Single Spectrum](Model%20Single%20Spectrum.ipynb). The opening measurement
+contract in [Line Components](Line%20Components.ipynb) distinguishes per-transition
+tables from selected profiles and explains covariance and bootstrap propagation.
+
 Tables and plots show parameter estimates, convergence and residuals. The
 notebooks describe each uncertainty approximation; optimizer success alone does
 not establish that a scientific model adequately describes the data.
+
+Ready-made line sets now default to integrated flux (`flux_<template>`).
+Line Components demonstrates this convention. Existing analysis examples select
+`normalization="amplitude"` explicitly to preserve their initial values, peak
+bounds and historical template shapes; switching a scientific analysis to flux
+requires revisiting those choices rather than merely renaming its parameters.

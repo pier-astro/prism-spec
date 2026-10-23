@@ -7,7 +7,7 @@ line model classes.
 """
 import numpy as np
 import astropy.units as u
-from scipy.special import wofz
+from scipy.special import wofz, voigt_profile
 from scipy.interpolate import CubicSpline
 
 # ---------------------------------------------------------------------------
@@ -621,3 +621,111 @@ class VoigtProfile(_LineProfile):
         sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
         gamma = center*fwhm_L/(2*C_KMS)
         return center, float(_profile_fwhm(sigma, gamma))
+
+
+# Flux-normalized counterparts are selected by the ready-made line constructors.
+# The generic LineSet has no normalization policy.
+class _FluxProfile:
+    _flux_normalized = True
+
+    def _integral(self, flux, *kinematics):
+        return flux
+
+    def _integral_gradient(self, flux, *kinematics):
+        return np.array([1., *np.zeros(len(kinematics))])
+
+
+def _unit_voigt_deriv(x, center, sigma, gamma):
+    """Unit-area Voigt and derivatives in center, sigma and gamma."""
+    if sigma < 0 or gamma < 0 or sigma == gamma == 0:
+        raise ValueError('A flux-normalized profile requires nonnegative widths and a nonzero total width.')
+    delta = np.asarray(x)-center
+    if sigma == 0:
+        denominator = delta**2+gamma**2
+        shape = gamma/(np.pi*denominator)
+        return shape, 2*delta*shape/denominator, np.zeros_like(shape), (delta**2-gamma**2)/(np.pi*denominator**2)
+    z = (delta+1j*gamma)/(sigma*np.sqrt(2))
+    w = wofz(z)
+    dw = -2*z*w+2j/np.sqrt(np.pi)
+    shape = w.real/(sigma*SQRT_2PI)
+    dcenter = -dw.real/(sigma**2*np.sqrt(2)*SQRT_2PI)
+    dsigma = -(dw*z).real/(sigma**2*SQRT_2PI)-shape/sigma
+    dgamma = (1j*dw).real/(sigma**2*np.sqrt(2)*SQRT_2PI)
+    return shape, dcenter, dsigma, dgamma
+
+
+def _flux_kinematic_rows(profile, flux, position, center, fwhm_G, fwhm_L,
+                         redshift, shape, dcenter, dsigma, dgamma):
+    """Chain rule from coordinate widths to shared velocity parameters."""
+    instrumental = profile._width_at(center)
+    width = np.hypot(fwhm_G, instrumental)
+    dsigma_center = (width+(center*instrumental*profile._width_slope(center)/width if width else 0.))/(C_KMS*SIGMA2FWHM)
+    dcenter = flux*(dcenter+dsigma*dsigma_center+dgamma*fwhm_L/(2*C_KMS))
+    sign = 1. if profile.domain_family == 'wavelength' else -1.
+    return [shape, dcenter*center/position, dcenter*sign*center/C_KMS,
+            flux*dsigma*center/(C_KMS*SIGMA2FWHM)*(fwhm_G/width if width else 0.),
+            flux*dgamma*center/(2*C_KMS), dcenter*sign*center/(1+redshift)]
+
+
+class _GaussianFluxProfile(_FluxProfile, GaussianProfile):
+    """Gaussian with total flux independent of widths and spectral shifts."""
+
+    def __call__(self, x, flux, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        if sigma <= 0:
+            raise ValueError('A flux-normalized Gaussian requires a positive total width.')
+        peak = flux/(sigma*SQRT_2PI)
+        return peak*np.exp(-.5*((np.asarray(x)-center)/sigma)**2)
+
+    def derivative(self, x, flux, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        if sigma <= 0:
+            raise ValueError('A flux-normalized Gaussian requires a positive total width.')
+        z = (np.asarray(x)-center)/sigma
+        shape = np.exp(-.5*z**2)/(sigma*SQRT_2PI)
+        dcenter = shape*z/sigma
+        dsigma = shape*(z**2-1)/sigma
+        rows = _flux_kinematic_rows(self, flux, position, center, fwhm, 0., redshift,
+                                    shape, dcenter, dsigma, np.zeros_like(shape))
+        return [rows[i] for i in (0, 1, 2, 3, 5)]
+
+
+class _LorentzianFluxProfile(_FluxProfile, LorentzianProfile):
+    """Unit-area Lorentzian, optionally broadened by a Gaussian kernel."""
+
+    def __call__(self, x, flux, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*self._width_at(center)/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm/(2*C_KMS)
+        if sigma < 0 or gamma < 0 or sigma == gamma == 0:
+            raise ValueError('A flux-normalized line requires nonnegative widths and a nonzero total width.')
+        return flux*voigt_profile(np.asarray(x)-center, sigma, gamma)
+
+    def derivative(self, x, flux, position, offset, fwhm, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*self._width_at(center)/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm/(2*C_KMS)
+        rows = _flux_kinematic_rows(self, flux, position, center, 0., fwhm, redshift,
+                                    *_unit_voigt_deriv(x, center, sigma, gamma))
+        return [rows[i] for i in (0, 1, 2, 4, 5)]
+
+
+class _VoigtFluxProfile(_FluxProfile, VoigtProfile):
+    """Unit-area Voigt with independent Gaussian and Lorentzian velocity widths."""
+
+    def __call__(self, x, flux, position, offset, fwhm_G, fwhm_L, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm_L/(2*C_KMS)
+        if sigma < 0 or gamma < 0 or sigma == gamma == 0:
+            raise ValueError('A flux-normalized line requires nonnegative widths and a nonzero total width.')
+        return flux*voigt_profile(np.asarray(x)-center, sigma, gamma)
+
+    def derivative(self, x, flux, position, offset, fwhm_G, fwhm_L, redshift):
+        center = observed_center(position, offset, redshift, self.domain_family)
+        sigma = center*np.hypot(fwhm_G, self._width_at(center))/(C_KMS*SIGMA2FWHM)
+        gamma = center*fwhm_L/(2*C_KMS)
+        return _flux_kinematic_rows(self, flux, position, center, fwhm_G, fwhm_L, redshift,
+                                    *_unit_voigt_deriv(x, center, sigma, gamma))

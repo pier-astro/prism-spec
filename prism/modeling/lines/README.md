@@ -66,14 +66,47 @@ voigt = VoigtLines(linetable, fwhm_G=300., fwhm_L=100., name="voigt")
 ```
 
 These are thin native `LineSet` subclasses, with shared kinematics and
-one peak amplitude per template. They prepare the same profiles, derivatives
+one integrated flux per template by default (`normalization='flux'`).
+`flux_oiii` and similar parameters are the actual fit parameters, with analytic
+derivatives and ordinary links/bounds. Set `flux=` for initialization and
+`bounds={'flux': (0, 100)}` for all template fluxes. A table weight multiplies
+the reference flux exactly once: it is not a sum-normalized group fraction.
+A weight-one transition has flux equal to its template parameter. Flux is the
+full-profile integral in the evaluation coordinate, before an external response;
+shifts and local Gaussian broadening conserve this integral. Redshift does not
+perform a luminosity-distance conversion. Numerical parameter values use the
+chosen density unit times the line-table coordinate unit. They prepare the same profiles, derivatives
 and parameter maps as an explicit custom set; no evaluation layer is added.
 Tables/mappings carry spectral units. Bare preset names search the configured
-local directory then packaged defaults; paths are read exactly as given. `redshift` starts fixed. `bounds={"amplitude": (0, 100)}`
-applies to every template amplitude; individual parameters remain editable.
+local directory then packaged defaults; paths are read exactly as given. `redshift` starts fixed. Individual parameters remain editable.
 Instrumental widths may be scalar or tabulated at observed positions. Gaussian
 broadening combines in quadrature only with Gaussian widths; a broadened
-Lorentzian is a Voigt. The peak convention does not imply flux preservation.
+Lorentzian is a Voigt. A nonzero total width is required for finite-flux density
+profiles: a delta function cannot be represented by a finite sampled peak.
+
+For peak parameters, choose explicitly:
+
+```python
+peaks = GaussianLines("oiii", normalization="amplitude", amplitude=2.,
+                      bounds={"amplitude": (0, 100)}, name="peaks")
+peaks.amp_oiii5007.bounds = (0, 20)
+```
+
+This retains the historical peak and redshift convention; table weights then
+specify peak ratios, not integrated-flux ratios. The parameter name and units
+change with the mode. Supplying the inactive scale keyword raises rather than
+silently converting. Existing notebooks using `amp_*` should select amplitude
+mode explicitly; flux mode requires deliberate initialization, bounds and links.
+GaussianProfile, LorentzianProfile and VoigtProfile retain their peak conventions
+for custom construction. No normalization option was added to generic LineSet.
+
+See [template provenance](../../../resources/lines/README.md) before interpreting
+packaged weights. All 283 optical Fe II weights agree with the published 2023
+table within its rounding. The atomic intensity formula in the 2010 paper is a
+line-integrated energy intensity, supporting flux normalization for those ratios.
+The old FANTASY code instead applied the weights to peaks; amplitude mode is
+available for reproducing that computational convention. UV weights have not
+been verified against their own published source.
 
 Use `LineSet(profile, lines, shared, parameters, ...)` when specifying a custom
 profile or parameter sharing. This replaces the former native `LineComponent`
@@ -85,13 +118,15 @@ The ready-made constructors are unrelated to the removed Astropy subclasses.
 ```python
 narrow = GaussianLines(["hydrogen", "oiii"],
                        window=(4800., 6800.), fwhm=300., name="narrow")
-narrow.flux()  # table: name, rest position, weight, total flux
+from prism.modeling.lines.measurements import lines
+lines(narrow).flux()  # one row per transition; nominal values
+lines(result, component="narrow").flux()  # retains fit uncertainty
 select_line(result, "OIII", components="narrow").flux()  # Metric(value, std)
 ```
 
 `window` filters rest transition positions in the table's unit, before velocity
 shifts/redshift. It is unrelated to a numerical integration window. The table
-reports every transition; weights multiply its peak exactly once. Analytic
+reports every transition; weights multiply the selected scale exactly once. Analytic
 integrals include profile-local broadening and precede any response operator.
 No flux normalization is imposed on generic `LineSet`: custom profiles may use
 peaks, integrated fluxes or another scale argument, shared or per template.

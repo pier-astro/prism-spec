@@ -21,6 +21,11 @@ class Metric:
             object.__setattr__(self, 'unit', u.Unit(self.unit))
 
     @property
+    def errors(self):
+        """Asymmetric distances from value; both NaN unless the interval contains it."""
+        return _interval_errors(self.value, self.lolim, self.uplim)
+
+    @property
     def quantity(self):
         return self.value if self.unit is None else self.value * self.unit
 
@@ -55,3 +60,15 @@ class Metric:
         if self.std is not None:
             return f'{self.value:.4g} +/- {self.std:.2g}{unit_str}'
         return f'{self.value:.4g}{unit_str}'
+
+
+def _interval_errors(value, lower, upper):
+    value = np.asarray(value, dtype=float)
+    if lower is None or upper is None:
+        missing = np.full_like(value, np.nan)
+        return (float(missing), float(missing)) if value.ndim == 0 else (missing, missing.copy())
+    lower, upper = np.asarray(lower), np.asarray(upper)
+    valid = np.isfinite(value) & np.isfinite(lower) & np.isfinite(upper)
+    valid &= (lower <= value) & (value <= upper)
+    errors = np.where(valid, value-lower, np.nan), np.where(valid, upper-value, np.nan)
+    return tuple(float(error) if error.ndim == 0 else error for error in errors)

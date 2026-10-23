@@ -29,4 +29,7 @@ __all__ = [
     'profile_metrics',
     'sample_line_measurements',
     'select_line',
+    'lines',
 ]
+
+from .catalog import lines

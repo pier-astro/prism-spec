@@ -17,7 +17,11 @@ io
 from .composition import Model
 from .component import Component
 from .lines import LineSet
-from .lines.measurements import *
+from .lines.measurements import (
+    LineResult, Metric, MultiLineMeasurements, SelectedLineProfile,
+    SelectedLineCollection, measure_line, profile_metrics,
+    sample_line_measurements, select_line,
+)
 from .operators.matop import LinearOperatorModel, is_linear_operator_pipe
 from .operators.instrument import InstrumentResponse, SpectralResponse
 from .display import (

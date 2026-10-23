@@ -104,46 +104,132 @@ def extract_limits(param, param_samples, lower_percentile, upper_percentile,
 class BootstrapResult:
     """Detached bootstrap estimates and correlated parameter samples.
 
-    params exposes nominal values, sample standard deviations and central
-    intervals. samples contains read-only arrays of free-parameter refits; failed
+    limits() summarizes existing refits at a requested confidence level.
+    params is a convenience summary at the default 68% level. samples contains read-only arrays of free-parameter refits; failed
     realizations remain NaN. The original model is never updated. Selecting a
     line from this result propagates these same refits into its analytic flux.
     """
-    def __init__(self, model, samples, confidence, fit_info):
+    def __init__(self, model, samples, fit_info=None):
         import copy
         from types import MappingProxyType
-        from ...metrics import Metric
         from ..results import _clear_model_estimates
-        from ..utils import apply_tied
-        if not 0 < confidence < 100:
-            raise ValueError('confidence must lie strictly between 0 and 100.')
         self._model = copy.deepcopy(model)
         _clear_model_estimates(self._model)
-        self._confidence = confidence
         arrays = {name: np.array(values, dtype=float, copy=True) for name, values in samples.items()}
+        expected = Bootstrap._fit_param_names(self._model)
+        if list(arrays) != expected:
+            raise ValueError('Samples must match the free-parameter names and ordering.')
+        if not arrays or any(a.ndim != 1 for a in arrays.values()) or len({len(a) for a in arrays.values()}) != 1:
+            raise ValueError('Samples must be equally sized one-dimensional arrays.')
         for values in arrays.values():
             values.setflags(write=False)
         self.samples = MappingProxyType(arrays)
-        self.fit_info = MappingProxyType(dict(fit_info))
+        self.fit_info = MappingProxyType(dict(fit_info or {}))
+        # Default for derived line measurements; generation itself has no level.
+        self._confidence = 68
+
+    def limits(self, confidence=68, boundary_tolerance=0.05):
+        """Summarize existing refits without running new fits.
+
+        Parameters
+        ----------
+        confidence : float, optional
+            Central percentile coverage in percent, strictly between 0 and 100.
+        boundary_tolerance : float, optional
+            Nonnegative width of the near-bound band as a fraction of the IQR.
+            An endpoint is unavailable when at least its excluded-tail fraction
+            of valid draws occupies that band. Zero uses numerical tolerance only.
+
+        Returns
+        -------
+        astropy.table.Table
+            Nominal values, sample standard deviations and interval endpoints,
+            with units per row and provenance in meta. Bound-dominated endpoints
+            are NaN; the opposite endpoint keeps its original percentile.
+        """
+        import copy
+        from astropy.table import Table
+        from ..utils import apply_tied
+        from .limits import _sample_interval, _parameter_state
+        if not np.isfinite(confidence) or not 0 < confidence < 100:
+            raise ValueError('confidence must lie strictly between 0 and 100.')
+        if not np.isfinite(boundary_tolerance) or boundary_tolerance < 0:
+            raise ValueError('boundary_tolerance must be finite and nonnegative.')
         working = copy.deepcopy(self._model)
         values = {name: [] for name in working.param_names}
-        for draw in zip(*arrays.values()):
+        for draw in zip(*self.samples.values()):
             if not np.isfinite(draw).all():
                 continue
             self._set_values(working, draw)
             apply_tied(working)
+            if not np.isfinite(working.parameters).all():
+                continue
             for name in values:
                 values[name].append(np.array(getattr(working, name).value, copy=True))
-        estimates = {}
-        alpha = (100-confidence)/2
+        rows = []
+        boundary = {}
         for name, draws in values.items():
             parameter = getattr(self._model, name)
-            std = lower = upper = None
-            if len(draws) >= 2:
+            shape = np.shape(parameter.value)
+            std = np.full(shape, np.nan)
+            lower, upper = np.full(shape, np.nan), np.full(shape, np.nan)
+            if len(draws) >= 2 and not parameter.fixed:
+                draws = np.asarray(draws)
                 std = np.std(draws, axis=0, ddof=1)
-                lower, upper = np.percentile(draws, [alpha, 100-alpha], axis=0)
-            estimates[name] = Metric(parameter.value, std, lower, upper, parameter.unit)
-        self.params = MappingProxyType(estimates)
+                lower, upper, sides = _sample_interval(draws, parameter.bounds, confidence, boundary_tolerance)
+                if sides: boundary[name] = sides
+            rows.append((name, np.array(parameter.value, copy=True), std, lower, upper,
+                         '' if parameter.unit is None else str(parameter.unit)))
+        names = ('name', 'value', 'std', 'lolim', 'uplim', 'unit')
+        if any(np.ndim(row[1]) for row in rows):
+            table = Table()
+            for column, name in enumerate(names):
+                column_values = np.empty(len(rows), dtype=object)
+                column_values[:] = [row[column] for row in rows]
+                table[name] = column_values
+        else:
+            table = Table(rows=rows, names=names)
+        table.meta.update(method='bootstrap', confidence=float(confidence), criterion='central_percentile',
+                          boundary_tolerance=float(boundary_tolerance), boundary=boundary,
+                          n_success=max(map(len, values.values()), default=0),
+                          sampling=dict(self.fit_info), state=_parameter_state(self._model))
+        return table
+
+    @property
+    def params(self):
+        """Convenience default summary (68%); call limits() for explicit choices."""
+        from types import MappingProxyType
+        from ...metrics import Metric
+        return MappingProxyType({row['name']: Metric(row['value'], row['std'], row['lolim'],
+                                                     row['uplim'], row['unit'] or None)
+                                 for row in self.limits()})
+
+    def save(self, filename, overwrite=False):
+        """Save samples and association metadata to NPZ, without duplicating the model."""
+        import json
+        from .limits import _parameter_state
+        metadata = dict(format='prism-bootstrap', version=1, state=_parameter_state(self._model),
+                        fit_info=dict(self.fit_info))
+        with open(filename, 'wb' if overwrite else 'xb') as stream:
+            np.savez_compressed(stream, __prism_bootstrap__=json.dumps(metadata, default=lambda value: value.item()), **self.samples)
+
+    @classmethod
+    def load(cls, filename, result):
+        """Load samples associated with a FitResult; reject a different parameter state."""
+        import json
+        from ..results import FitResult
+        from .limits import _parameter_state
+        if not isinstance(result, FitResult):
+            raise TypeError('Supply the associated FitResult when loading bootstrap samples.')
+        model = result.model
+        with np.load(filename, allow_pickle=False) as archive:
+            metadata = json.loads(str(archive['__prism_bootstrap__']))
+            if metadata.get('format') != 'prism-bootstrap' or metadata.get('version') != 1:
+                raise ValueError('Unsupported bootstrap archive.')
+            if metadata['state'] != _parameter_state(model):
+                raise ValueError('Bootstrap samples do not match this fitted parameter state.')
+            samples = {name: archive[name] for name in archive.files if name != '__prism_bootstrap__'}
+        return cls(model, samples, metadata['fit_info'])
 
     @property
     def model(self):
@@ -197,7 +283,7 @@ class Bootstrap:
 
     def __init__(self, model, fitter=None, x=None, y=None, yerr=None, weights=None,
                  n_samples=1000, statistic='gauss', fitter_kwargs=None,
-                 seed=None, confidence=68, noise_dist='uniform',
+                 seed=None, noise_dist='uniform',
                  verbose=True, nproc=1,
                  xerr=None, perturb_x=False):
         # Frozen copy: all bootstrap iterations start from this state.
@@ -219,7 +305,6 @@ class Bootstrap:
         self.seed = seed
         self.verbose = bool(verbose)
         self.nproc = int(nproc)
-        self.confidence = confidence
         self.noise_dist = noise_dist.lower()
         self.perturb_x = bool(perturb_x)
 
@@ -412,7 +497,7 @@ class Bootstrap:
         if self.verbose:
             print(f"✓ Bootstrap complete: {n_success}/{self.n_samples} successful")
 
-        return BootstrapResult(self._initial_model, samples, self.confidence,
+        return BootstrapResult(self._initial_model, samples,
             dict(n_samples=self.n_samples, n_success=n_success, seed=self.seed,
                  statistic=self.statistic, noise_dist=self.noise_dist, perturb_x=self.perturb_x))
 
@@ -420,7 +505,7 @@ class Bootstrap:
 def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
               n_samples=1000, statistic='gauss', fitter_kwargs=None, seed=None,
               verbose=False, nproc=1,
-              confidence=68, noise_dist='gauss',
+              noise_dist='gauss',
               xerr=None, perturb_x=False):
     """Estimate parameter uncertainties via Flux Randomization (Empirical Monte Carlo).
 
@@ -448,8 +533,6 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         ``'gauss'`` (default) — perturb each pixel as Normal(y_obs, sigma).
         ``'uniform'`` — perturb as Uniform(y_obs ± √3·sigma), which has the
         same variance as the Gaussian case.
-    confidence : float
-        Central confidence interval percentage; the supplied model is unchanged.
     seed : int or None
         Random seed for reproducibility.
 
@@ -471,7 +554,6 @@ def bootstrap(model, fitter=None, x=None, y=None, yerr=None, weights=None,
         seed=seed,
         verbose=verbose,
         nproc=nproc,
-        confidence=confidence,
         noise_dist=noise_dist,
         xerr=xerr,
         perturb_x=perturb_x,

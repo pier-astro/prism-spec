@@ -153,6 +153,9 @@ class LineResult:
                 _as_metric(metrics.get(name, float('nan')),
                            unit=self.metric_units.get(name)))
 
+        if 'eqw' in metrics:
+            self.eqw = _as_metric(metrics['eqw'], unit=self.metric_units.get('eqw'))
+
     def to_frame(self, metrics=None) -> pd.DataFrame:
         """Return the stored metrics as a tidy dataframe.
 
@@ -168,7 +171,7 @@ class LineResult:
             Table indexed by metric name with ``value``, ``std``, ``lolim``,
             ``uplim``, and ``unit`` columns.
         """
-        names = list(metrics) if metrics is not None else _METRIC_NAMES
+        names = list(metrics) if metrics is not None else _METRIC_NAMES + (['eqw'] if hasattr(self, 'eqw') else [])
         rows = {}
         for name in names:
             m = getattr(self, name, Metric(value=float('nan')))

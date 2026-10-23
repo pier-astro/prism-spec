@@ -197,7 +197,7 @@ def test_agn_factory_uses_current_local_line_table_path(tmp_path,monkeypatch):
     monkeypatch.setattr(line_tables, '_directory', None)
     set_directory(tmp_path/'lines')
     export('feII_model', window=(4700.,7000.), directory=tmp_path/'lines')
-    iron=agn.fe(name='iron',fwhm=1200.,window=(4800.,6900.))
+    iron=agn.fe(name='iron',fwhm=1200.,window=(4800.,6900.), normalization='amplitude')
     positions=iron.component._setup['lines']['position']
     assert iron.name=='iron' and len(positions)>0
     assert min(positions)>=4800 and max(positions)<=6900

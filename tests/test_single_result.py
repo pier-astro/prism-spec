@@ -179,7 +179,7 @@ def test_line_covariance_sampling_uses_result_without_mutating_snapshot():
     from prism.modeling import select_line
     x = np.linspace(4990., 5010., 401)
     table = {'name': ['line'], 'position': np.array([5000.])*u.AA}
-    model = GaussianLines(table, amplitude=1., fwhm=150., name='narrow')
+    model = GaussianLines(table, amplitude=1., fwhm=150., name='narrow', normalization='amplitude')
     model.offset.fixed = model.fwhm.fixed = True
     truth = model.copy()
     truth.amp_line.value = 3.

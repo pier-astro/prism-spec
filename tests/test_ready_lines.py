@@ -15,7 +15,7 @@ from prism.modeling.io import load_model
 def test_ready_line_fit_links_and_profile_roundtrip(factory,widths,tmp_path):
     table=dict(name=['A','A','B'],position=[4959.,5007.,5100.]*u.AA,weight=[1/3,1.,1.])
     curve=np.array([[4900.,80.],[5200.,140.]])
-    model=factory(table,amplitude=1.,instfwhm=curve,bounds={'amplitude':(0.,10.)},name='lines',**widths)
+    model=factory(table,amplitude=1.,instfwhm=curve,bounds={'amplitude':(0.,10.)},name='lines',**widths, normalization='amplitude')
     assert isinstance(model,LineSet) and not isinstance(model,AstropyModel)
     assert model.redshift.fixed
     assert model.amp_a.bounds==(0.,10.) and model.amp_b.bounds==(0.,10.)
@@ -39,19 +39,19 @@ def test_ready_lines_file_and_omitted_weights(tmp_path,monkeypatch):
     table=QTable(dict(name=['A','A'],position=[4959.,5007.]*u.AA,weight=[1/3,1.]))
     table.write(tmp_path/'pair.ecsv')
     monkeypatch.setattr(tables,'_directory',tmp_path)
-    model=GaussianLines('pair',fwhm=300.,name='file')
+    model=GaussianLines('pair',fwhm=300.,name='file', normalization='amplitude')
     assert model.param_names==('offset','fwhm','redshift','amp_a')
-    omitted=GaussianLines(dict(name=['A','A'],position=[4959.,5007.]*u.AA),name='unweighted')
+    omitted=GaussianLines(dict(name=['A','A'],position=[4959.,5007.]*u.AA),name='unweighted', normalization='amplitude')
     assert omitted.param_names==model.param_names
     table.remove_column('weight')
     table.write(tmp_path/'unweighted.ecsv')
-    assert GaussianLines('unweighted').param_names == model.param_names
+    assert GaussianLines('unweighted', normalization='amplitude').param_names == model.param_names
     with pytest.raises(ValueError,match='Instrumental'):
-        GaussianLines(table,instfwhm=-1.)
+        GaussianLines(table,instfwhm=-1., normalization='amplitude')
 
 
 def test_read_previous_native_lineset_tag():
-    model=GaussianLines(dict(name=['A'],position=[5000.]*u.AA),name='native')
+    model=GaussianLines(dict(name=['A'],position=[5000.]*u.AA),name='native', normalization='amplitude')
     text=yaml.dump(model)
     assert '!prism.LineSet' in text
     restored=yaml.load(text.replace('!prism.LineSet','!prism.LineComponent'))

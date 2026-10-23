@@ -84,12 +84,12 @@ class SelectedLineProfile:
         algebraic decomposition and instrumental corrections are not inferred.
     """
 
-    def __init__(self, source_model, selector, entries, additive=False):
+    def __init__(self, source_model, selector, entries, additive=False, *, _components=None):
         self.source_model = source_model
         self.selector = str(selector)
         self.entries = tuple(entries)
         self.additive = False
-        leaves = get_components(source_model, additive=False)
+        leaves = get_components(source_model, additive=False) if _components is None else _components
         self._members = tuple(_LineMember(entry, leaves[entry.component_key]) for entry in self.entries)
         if not self._members:
             raise ValueError('A line selection requires at least one component.')
@@ -145,7 +145,7 @@ class SelectedLineProfile:
 
     @property
     def eqw_unit(self):
-        return None if self.output_unit is None else self.axis_unit
+        return self.axis_unit
 
     def _coerce_domain_axis(self, x):
         unit = self.axis_unit
@@ -240,32 +240,28 @@ class SelectedLineProfile:
 
     def sample(self, n_samples=256, confidence=68, x=None, window=None,
                num=4096, method='auto', distribution='auto',
-               random_state=None, return_samples=False):
+               random_state=None, return_samples=False, continuum=None):
         from .sampling import sample_line_measurements
         return sample_line_measurements(
             self, n_samples=n_samples, confidence=confidence,
             x=x, window=window, num=num,
             method=method, distribution=distribution,
-            random_state=random_state, return_samples=return_samples)
+            random_state=random_state, return_samples=return_samples, continuum=continuum)
 
     def eqw(self, continuum=None, x=None, window=None, num=2048) -> Metric:
-        """Measure equivalent width against an explicit or inferred continuum."""
+        """Measure EW, with local covariance propagation when a fit supplies it.
+
+        Name a continuum component to include its fitted uncertainty and cross
+        correlations. External scalar/callable continua are exact. Bootstrap
+        results propagate their actual refits. Without statistical context the
+        returned Metric contains a nominal value only. The same finite grid is
+        used for the nominal EW and its parameter derivatives.
+        """
         from .measurement import _measure_eqw
         result = _measure_eqw(self, continuum, x, window, num)
         self.ew = result
         return result
 
-    def sample_eqw(self, continuum=None, n_samples=256, confidence=68,
-                   x=None, window=None, num=2048,
-                   method='auto', distribution='auto',
-                   perturb_continuum=False, random_state=None) -> Metric:
-        """Propagate parameter uncertainties into the equivalent width."""
-        from .sampling import _sample_eqw
-        result = _sample_eqw(
-            self, continuum, n_samples, confidence, x, window, num,
-            method, distribution, perturb_continuum, random_state)
-        self.ew = result
-        return result
 
 
 class SelectedLineCollection:
@@ -416,28 +412,8 @@ def select_line(model, selector, components=None, additive=True, index=None, pos
     Equivalent widths then require an explicit intrinsic continuum.
     """
     from ...fitting.multifit import MultiFitResult
-    from ...fitting.results import FitResult, _DatasetFitView
-    from ...fitting.uncertainty.resample import BootstrapResult
-
-    bootstrap = model if isinstance(model, BootstrapResult) else None
-    if bootstrap is not None:
-        model = bootstrap.model
     from ...operators.matop import is_linear_operator_pipe
-
-    if isinstance(model, (FitResult, _DatasetFitView)):
-        if isinstance(model, FitResult):
-            if not model._single:
-                raise TypeError('Select a joint observation by label for line measurements.')
-            parent, label = model, 'data'
-        else:
-            parent, label = model._parent, model._label
-        parent._require_fitted()
-        # Copy source and global graph together: external drivers and the full
-        # fitted covariance remain aligned with the selected physical leaves.
-        graph, model = copy.deepcopy((parent._graph, parent._associations[label][0]))
-        model._evaluation_parent = graph
-    if isinstance(model, _Function):
-        model = NativeModel(component=model)
+    model, bootstrap = _line_context(model)
     if selector is None or not str(selector).strip():
         raise ValueError('A line tag or name is required as selector.')
     selector = str(selector).strip()
@@ -525,3 +501,29 @@ def select_line(model, selector, components=None, additive=True, index=None, pos
     selection = SelectedLineProfile(model, selector, entries)
     selection._bootstrap_result = bootstrap
     return selection
+
+
+def _line_context(model):
+    """Retain one detached fit graph, shared by scalar and tabular measurements."""
+    from ...fitting.results import FitResult, _DatasetFitView
+    from ...fitting.uncertainty.resample import BootstrapResult
+
+    bootstrap = model if isinstance(model, BootstrapResult) else None
+    if bootstrap is not None:
+        model = bootstrap.model
+
+    if isinstance(model, (FitResult, _DatasetFitView)):
+        if isinstance(model, FitResult):
+            if not model._single:
+                raise TypeError('Select a joint observation by label for line measurements.')
+            parent, label = model, 'data'
+        else:
+            parent, label = model._parent, model._label
+        parent._require_fitted()
+        # Copy source and global graph together: external drivers and the full
+        # fitted covariance remain aligned with the selected physical leaves.
+        graph, model = copy.deepcopy((parent._graph, parent._associations[label][0]))
+        model._evaluation_parent = graph
+    if isinstance(model, _Function):
+        model = NativeModel(component=model)
+    return model, bootstrap

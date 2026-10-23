@@ -149,6 +149,10 @@ def _save_result(result, filename, overwrite=False):
     payload = dict(version=1, single=result._single, observations=observations,
         param_names=list(graph.param_names), fit_indices=result.fit_indices.tolist(),
         links=_encode_links(graph),
+        limits=None if result.limits_info is None else dict(
+            info=_portable(dict(result.limits_info)),
+            values={name: [_portable(p.lolim), _portable(p.uplim)]
+                    for name, p in result.params.items() if p.lolim is not None or p.uplim is not None}),
         fit_info=info, contributions={key: dict(value) for key, value in result._contributions.items()})
     # A small parameter table supports initialization without rebuilding the graph.
     names = list(result.param_names)
@@ -243,4 +247,15 @@ def _load_result(filename, components=None):
         info['param_cov'] = covariance
         if info['nfree'] != len(_free_parameter_indices(graph)):
             raise ValueError('Saved diagnostics disagree with the free parameter order.')
-        return FitResult(associations, graph, info, payload['contributions'], _single=payload['single'])
+        result = FitResult(associations, graph, info, payload['contributions'], _single=payload['single'])
+        if payload.get('limits') is not None:
+            from astropy.table import Table
+            from .uncertainty.limits import _parameter_state
+            stored = payload['limits']
+            table = Table(rows=[(name, *ends, '' if result.params[name].unit is None else str(result.params[name].unit))
+                                for name, ends in stored['values'].items()],
+                          names=('name', 'lolim', 'uplim', 'unit'))
+            table.meta.update(stored['info'])
+            table.meta['state'] = _parameter_state(result.model if result._single else result._graph)
+            result.set_limits(table)
+        return result

@@ -160,7 +160,7 @@ def test_fitted_response_transform_and_cross_links_roundtrip(tmp_path):
 def test_builtin_lines_and_no_covariance_roundtrip_without_definitions(tmp_path):
     from prism.modeling.lines import GaussianLines
     table = {'name': ['line'], 'position': np.array([5000.])*u.AA}
-    model = GaussianLines(table, amplitude=1., fwhm=150., name='narrow')
+    model = GaussianLines(table, amplitude=1., fwhm=150., name='narrow', normalization='amplitude')
     model.offset.fixed = model.fwhm.fixed = True
     x = np.linspace(4990., 5010., 101)
     response = SpectralResponse(instrument=InstrumentResponse.from_fixed_fwhm(x, .5), wave=x)
